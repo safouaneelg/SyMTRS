@@ -1,0 +1,27 @@
+# CycleGAN (unaligned) with tiling
+python train.py \
+  --dataroot /home/data/SyMTRS \
+  --raw_A_subdir hr \
+  --raw_B_subdir night \
+  --tile_size 512 \
+  --tile_mode random \
+  --model cycle_gan \
+  --name symtrs_cyclegan_t512_e200_s42 \
+  --n_epochs 100 \
+  --n_epochs_decay 100 \
+  --split_seed 42
+
+# pix2pix (aligned/paired) with tiling
+python train.py \
+  --dataroot /home/data/SyMTRS \
+  --raw_A_subdir hr \
+  --raw_B_subdir night \
+  --tile_size 512 \
+  --tile_mode random \
+  --model pix2pix \
+  --dataset_mode aligned \
+  --direction AtoB \
+  --name symtrs_pix2pix_t512_e200_s42 \
+  --n_epochs 100 \
+  --n_epochs_decay 100 \
+  --split_seed 42
