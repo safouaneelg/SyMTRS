@@ -2,6 +2,22 @@
 
 Reproducibility guide for the `SyMTRS` workspace.
 
+You first need to download the dataset from our huggingface repo `https://huggingface.co/datasets/safouaneelg/SyMTRS`
+
+you can either git clone it:
+
+```sh
+git clone https://huggingface.co/datasets/safouaneelg/SyMTRS
+```
+
+or load it via `datasets` HF framework:
+
+```python
+from datasets import load_dataset
+
+ds = load_dataset("safouaneelg/SyMTRS")
+```
+
 This repository currently contains:
 
 - PyTorch dataloaders for the SyMTRS dataset
