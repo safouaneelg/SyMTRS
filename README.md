@@ -1,5 +1,11 @@
 # SyMTRS
+SyMTRS is high-fidelity simulation pipeline (Unreal Engine 5), built on top of the MatrixCity project ([ArXiv](https://arxiv.org/abs/2309.16553)), enabling photorealistic urban scenes with precise control over geometry, lighting, and sensor parameters. It is Multi-modal, perfectly aligned data and high-resolution RGB aerial images (2048×2048).
 
+[matrixcity.webm](https://github.com/user-attachments/assets/bd63b74d-fca5-452b-8f19-554341188614)
+
+<img width="529" height="281" alt="image" src="https://github.com/user-attachments/assets/c0146b98-2a13-4fc1-a20a-bba7835229da" />
+
+---
 Reproducibility guide for the `SyMTRS` workspace.
 
 You first need to download the dataset from our huggingface repo `https://huggingface.co/datasets/safouaneelg/SyMTRS`
