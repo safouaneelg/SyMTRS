@@ -301,3 +301,18 @@ Use the separate guide in [CycleGAN-and-pix2pix/README.md](CycleGAN-and-pix2pix/
 - CycleGAN day-to-night translation
 - pix2pix paired translation
 - the custom auto-splitting and tiling logic added in this workspace
+
+## Citation
+If you use our dataset please cite the paper:
+
+```bibtex
+@misc{elghazoualisymtrs,
+      title={SyMTRS: Benchmark Multi-Task Synthetic Dataset for Depth, Domain Adaptation and Super-Resolution in Aerial Imagery}, 
+      author={Safouane El Ghazouali and Nicola Venturi and Michael Rueegsegger and Umberto Michelucci},
+      year={2026},
+      eprint={2604.21801},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2604.21801}, 
+}
+```
