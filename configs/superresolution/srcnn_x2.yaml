@@ -1,0 +1,58 @@
+# SRCNN at x2 (input 1024px -> target 2048px).
+#
+#     symtrs train configs/superresolution/srcnn_x2.yaml --data-root /data/SyMTRS
+#     symtrs eval  configs/superresolution/srcnn_x2.yaml --data-root /data/SyMTRS --eval-split test
+#
+# resolution: 1024 means scale x2: the LR input is rgb_day_lr/x2 and the HR target is
+# native rgb_day. The factor is derived from the resolution, never configured beside it,
+# so `resolution: 1024` cannot mean x4 in one file and x2 in another.
+#
+# SRCNN is described in full at configs/superresolution/
+# srcnn_x1.yaml - read that one for the loss, the batch size and the
+# model-specific caveats. Only the scale changes here.
+#
+# The training code for this task predates the `symtrs` package and now lives inside
+# it: `symtrs/legacy/superres/train.py` owns the model set, the data loading and the
+# metrics, launched as `python -m symtrs.legacy.superres.train`. `symtrs` translates
+# this config into that command line and reads test_metrics.json back.
+# `symtrs train <this file> --dry-run` prints it without launching anything, which is
+# the quickest way to see which two folders a scale will read.
+#
+
+task: superresolution
+model: srcnn
+resolution: 1024
+seed: 42
+
+model_kwargs:
+  use_y_channel: true
+  # Set use_y_channel false to train on RGB instead of luma; the
+  # published SRCNN numbers are Y-channel, so changing it also changes
+  # what you are comparing against.
+
+data:
+  root: /data/SyMTRS
+  split: train
+  val_split: val
+  test_split: test
+  num_workers: 8
+  pin_memory: true
+
+train:
+  epochs: 40
+  batch_size: 16
+  lr: 1.0e-4
+  save_samples_every: 1
+  gpus: 1
+  device: cuda
+  # A path here resumes a previous run; `symtrs eval` scores the run directory's
+  # weights/best.pt without training at all.
+  resume: ""
+
+eval:
+  # The super-resolution scorer always reports PSNR, SSIM and MSE; `metrics` is the
+  # reported order, and the first name here is what `symtrs tables` prints first.
+  metrics: [psnr, ssim, mse]
+  batch_size: 1
+  amp: true
+  num_visualizations: 4

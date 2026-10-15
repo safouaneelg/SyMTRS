@@ -1,0 +1,59 @@
+# autoencoder refiner at x1 (input 2048px -> target 2048px).
+#
+#     symtrs train configs/superresolution/autoencoder_x1.yaml --data-root /data/SyMTRS
+#     symtrs eval  configs/superresolution/autoencoder_x1.yaml --data-root /data/SyMTRS --eval-split test
+#
+# resolution: 2048 means scale x1: the LR input and the HR target are the *same* folder
+# (rgb_day), and the model is an image-to-image refiner rather than an upsampler. It is
+# a legitimate control row - it isolates how much of a x4 result is restoration rather
+# than resolution, which is the question worth asking when the low-resolution folders
+# were produced by downsampling the same captures - but it is not super-resolution, and
+# the run's own summary says so. Nothing is upsampled here.
+#
+# An encoder-decoder that refines the bicubic upsample rather than predicting the
+# high-resolution image from nothing. Same input convention as SRCNN, more capacity,
+# no adversarial term - so if this does not beat SRCNN, the extra depth is not paying
+# for itself and the GAN below has to justify its instability.
+#
+# The real super-resolution cells of this row are autoencoder_x2.yaml,
+# autoencoder_x4.yaml and autoencoder_x8.yaml in this folder.
+#
+# The training code for this task predates the `symtrs` package and now lives inside
+# it: `symtrs/legacy/superres/train.py` owns the model set, the data loading and the
+# metrics, launched as `python -m symtrs.legacy.superres.train`. `symtrs` translates
+# this config into that command line and reads test_metrics.json back.
+# `symtrs train <this file> --dry-run` prints it without launching anything, which is
+# the quickest way to see which two folders a scale will read.
+#
+
+task: superresolution
+model: autoencoder
+resolution: 2048
+seed: 42
+
+data:
+  root: /data/SyMTRS
+  split: train
+  val_split: val
+  test_split: test
+  num_workers: 8
+  pin_memory: true
+
+train:
+  epochs: 40
+  batch_size: 8
+  lr: 1.0e-4
+  save_samples_every: 1
+  gpus: 1
+  device: cuda
+  # A path here resumes a previous run; `symtrs eval` scores the run directory's
+  # weights/best.pt without training at all.
+  resume: ""
+
+eval:
+  # The super-resolution scorer always reports PSNR, SSIM and MSE; `metrics` is the
+  # reported order, and the first name here is what `symtrs tables` prints first.
+  metrics: [psnr, ssim, mse]
+  batch_size: 1
+  amp: true
+  num_visualizations: 4

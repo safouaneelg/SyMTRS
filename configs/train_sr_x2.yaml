@@ -1,0 +1,70 @@
+# The ×2 low-resolution run, named for the `_lr/x2` folders it reads.
+#
+#     symtrs train_sr_x2.yaml --data-root /data/SyMTRS
+#
+# This is the quick-start config: the file name is the command, and it is the fastest way
+# to see the whole path - YAML in, run directory and metrics out - work end to end. The
+# full grid lives in the subfolders next to it (configs/depth/, configs/segmentation/,
+# configs/domain_adapt/, configs/superresolution/, one file per model and resolution);
+# this file is the same run as configs/depth/1024/midas_dpt_hybrid_1024.yaml, kept at the
+# top level because it is the one you will type by hand.
+#
+# On the name: `x2` here is the *input* scale, not a super-resolution factor. This run
+# reads train/rgb_day_lr/x2 and train/depth_lr/x2 - both 1024px - and trains and scores a
+# depth model entirely at 1024. Nothing upsamples anything, and the ground truth is the
+# 1024px depth map, not the 2048px one. The `_lr/x2` directory naming is inherited from
+# the dataset generator; the task is multi-resolution depth estimation. A run that took
+# 1024px input and scored against 2048px depth would be a super-resolution task, and this
+# package does not implement one.
+#
+# Run `symtrs sweep --task depth` to walk every (model, resolution) cell instead of
+# naming them one at a time.
+
+task: depth
+model: midas_dpt_hybrid
+# 2048 -> native, 1024 -> _lr/x2, 512 -> _lr/x4, 256 -> _lr/x8.
+resolution: 1024
+seed: 42
+
+data:
+  root: /data/SyMTRS
+  split: train
+  val_split: val
+  test_split: test
+  depth_scale: 1.0
+  depth_channel: 0
+  depth_backend: auto
+  num_workers: 8
+  pin_memory: true
+
+train:
+  epochs: 20
+  batch_size: 8
+  lr: 1.0e-5
+  weight_decay: 0.01
+  optim: adamw
+  sched: cosine
+  warmup_epochs: 1
+  min_lr_ratio: 0.01
+  # At 1024 the whole image fits, so no cropping is needed here. The same config at
+  # resolution: 2048 wants patch_size: 384; that is the only thing that has to change.
+  patch_size: 0
+  val_patch_size: 0
+  amp: true
+  gpus: 1
+  grad_clip: 1.0
+  grad_accum: 1
+  loss: silog
+  freeze: ""
+  log_every: 50
+  save_samples_every: 1
+  device: cuda
+
+eval:
+  metrics: [rmse, mae, abs_rel, sq_rel, d1, d2, d3, silog]
+  batch_size: 1
+  amp: true
+  tile_size: 0
+  tile_overlap: 128
+  align: scale
+  num_visualizations: 4

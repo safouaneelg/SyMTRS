@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "symtrs"
+version = "0.1.0"
+description = "SyMTRS multi-task benchmark: multi-resolution monocular depth, semantic segmentation and day/night domain adaptation, plus the existing super-resolution script"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "numpy",
+    "torch",
+    "torchvision",
+    "pillow",
+    "tqdm",
+    "matplotlib",
+    "PyYAML",
+]
+
+[project.optional-dependencies]
+# Extra depth-reading backend. Either this or the cv2 extra is needed to read the
+# .exr depth maps; .npy depth works with no extra dependency.
+exr = ["OpenEXR"]
+cv2 = ["opencv-python-headless"]
+# Needed only for the Depth Anything 3 adapters.
+da3 = ["transformers"]
+# Needed only for the Depth Pro adapter.
+depthpro = ["depth-pro @ git+https://github.com/apple/ml-depth-pro.git"]
+# Needed only by the domain-adaptation task, and needed to *start* it: the vendored
+# upstream `train.py` and `test.py` both reach `util/visualizer.py`, which imports these
+# two at module level before any option is parsed, so their absence is not a missing
+# feature - it is a run that cannot begin. `symtrs doctor` reports them.
+adapt = ["dominate", "wandb"]
+# timm is needed by more than the SegFormer encoders: the MiDaS and ZoeDepth checkpoints are
+# loaded through torch.hub, and that repo's `hubconf.py` imports `midas.blocks`, which
+# imports `backbones.beit`, which does `import timm` at module level. So it is required to
+# load those weights at all, not just to use our own encoders.
+timm = ["timm"]
+# Kept because the earlier install instructions named it; identical to the `timm` extra.
+segformer = ["timm"]
+dev = ["pytest"]
+
+[project.scripts]
+symtrs = "symtrs.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["symtrs*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "network: test needs to download pretrained weights",
+    "gpu: test needs a CUDA device",
+]

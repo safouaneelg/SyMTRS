@@ -1,0 +1,68 @@
+# SRGAN at x1 (input 2048px -> target 2048px).
+#
+#     symtrs train configs/superresolution/srgan_x1.yaml --data-root /data/SyMTRS
+#     symtrs eval  configs/superresolution/srgan_x1.yaml --data-root /data/SyMTRS --eval-split test
+#
+# resolution: 2048 means scale x1: the LR input and the HR target are the *same* folder
+# (rgb_day), and the model is an image-to-image refiner rather than an upsampler. It is
+# a legitimate control row - it isolates how much of a x4 result is restoration rather
+# than resolution, which is the question worth asking when the low-resolution folders
+# were produced by downsampling the same captures - but it is not super-resolution, and
+# the run's own summary says so. Nothing is upsampled here.
+#
+# The only model in this task with a discriminator, and the only one whose loss is
+# adversarial. That has a consequence for how its numbers should be read: an
+# adversarial term improves perceived sharpness and *can* lower PSNR and SSIM while
+# producing images a human prefers. Report all three metrics for this row, and do not
+# quietly drop it from the table if it loses on PSNR - the disagreement is the finding.
+#
+# `adv_weight` is the adversarial term's weight against the pixel loss. 1e-3 is the
+# SRGAN paper's order of magnitude; above ~1e-2 the run usually collapses into
+# artefacts, which shows up as a falling PSNR with a rising discriminator accuracy in
+# metrics.csv. 60 epochs rather than 40 because GAN training needs longer to settle.
+#
+# The real super-resolution cells of this row are srgan_x2.yaml,
+# srgan_x4.yaml and srgan_x8.yaml in this folder.
+#
+# The training code for this task predates the `symtrs` package and now lives inside
+# it: `symtrs/legacy/superres/train.py` owns the model set, the data loading and the
+# metrics, launched as `python -m symtrs.legacy.superres.train`. `symtrs` translates
+# this config into that command line and reads test_metrics.json back.
+# `symtrs train <this file> --dry-run` prints it without launching anything, which is
+# the quickest way to see which two folders a scale will read.
+#
+
+task: superresolution
+model: srgan
+resolution: 2048
+seed: 42
+
+model_kwargs:
+  adv_weight: 1.0e-3
+
+data:
+  root: /data/SyMTRS
+  split: train
+  val_split: val
+  test_split: test
+  num_workers: 8
+  pin_memory: true
+
+train:
+  epochs: 60
+  batch_size: 4
+  lr: 1.0e-4
+  save_samples_every: 1
+  gpus: 1
+  device: cuda
+  # A path here resumes a previous run; `symtrs eval` scores the run directory's
+  # weights/best.pt without training at all.
+  resume: ""
+
+eval:
+  # The super-resolution scorer always reports PSNR, SSIM and MSE; `metrics` is the
+  # reported order, and the first name here is what `symtrs tables` prints first.
+  metrics: [psnr, ssim, mse]
+  batch_size: 1
+  amp: true
+  num_visualizations: 4

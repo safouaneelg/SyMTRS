@@ -1,0 +1,74 @@
+# Depth Anything 3 Large (metric) at 2048px (x1 of native).
+#
+#     symtrs train configs/depth/2048/da3_metric_large_2048.yaml --data-root /data/SyMTRS
+#     symtrs eval  configs/depth/2048/da3_metric_large_2048.yaml --data-root /data/SyMTRS --eval-split test
+#
+# resolution: 2048 reads train/rgb_day and train/depth - the native folders. Nothing
+# is downsampled and nothing is upsampled: this is the data as it was generated.
+#
+# The metric head: metres, no alignment, BErHu. Same loader caveats as da3_large.
+# One extra: the DA3 Hugging Face repos do not all ship an image-processor config,
+# so `AutoImageProcessor.from_pretrained` can refuse. That raises with the model id
+# and the command to run - `symtrs doctor --model da3_metric_large --build` - rather
+# than silently substituting some other normalisation.
+#
+# The other three cells of this row are the same file at 1024, 512 and 256, in the
+# sibling folders. `symtrs sweep --task depth --models da3_metric_large` walks them.
+#
+
+task: depth
+model: da3_metric_large
+resolution: 2048
+seed: 42
+
+data:
+  root: /data/SyMTRS
+  split: train
+  val_split: val
+  test_split: test
+  # Metres are what the metric models predict. Check the raw encoding before trusting
+  # it: 0.01 for millimetres stored as uint16, 1.0 for metres.
+  depth_scale: 1.0
+  depth_channel: 0
+  depth_backend: auto
+  num_workers: 8
+  pin_memory: true
+
+train:
+  epochs: 20
+  batch_size: 4
+  lr: 1.0e-5
+  weight_decay: 0.01
+  optim: adamw
+  sched: cosine
+  warmup_epochs: 1
+  min_lr_ratio: 0.01
+  # Random 512px crops: a full 2048px batch is more memory than this
+  # encoder can hold, and the crop still shows a representative slice of the scene
+  # at this ground sampling distance.
+  patch_size: 512
+  val_patch_size: 0
+  amp: true
+  gpus: 1
+  grad_clip: 1.0
+  grad_accum: 2
+  # Effective batch = 4 x 2 = 8,
+  # which is what the learning rate was chosen against.
+  loss: berhu
+  freeze: ""
+  log_every: 50
+  save_samples_every: 1
+  device: cuda
+
+eval:
+  # The first name here that the depth scorer can minimise decides which checkpoint
+  # weights/best.pt holds. The rest are reported but do not select it.
+  metrics: [rmse, mae, abs_rel, sq_rel, d1, d2, d3, silog]
+  batch_size: 1
+  amp: true
+  # 0 runs the whole image in one forward pass, which is what the published numbers
+  # use. If you hit OOM, a sweep over 512/128 tiles scores the same metres.
+  tile_size: 0
+  tile_overlap: 128
+  align: none
+  num_visualizations: 4

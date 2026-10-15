@@ -1,0 +1,76 @@
+# ZoeDepth-NK at 512px (x4 of native).
+#
+#     symtrs train configs/depth/512/zoedepth_nk_512.yaml --data-root /data/SyMTRS
+#     symtrs eval  configs/depth/512/zoedepth_nk_512.yaml --data-root /data/SyMTRS --eval-split test
+#
+# resolution: 512 reads train/rgb_day_lr/x4 and train/depth_lr/x4. Input and ground
+# truth are both 512, so this is the same task on smaller imagery, not a model being
+# asked to upsample. The 2048 and 512 runs are two rows of one table, not two stages
+# of a pipeline.
+#
+# ZoeDepth-NK is described in full at configs/depth/2048/zoedepth_nk_2048.yaml -
+# read that one for the protocol and the memory posture. What changes here is only
+# the numbers on the resolution axis.
+#
+# This model is metric-depth at every resolution, so the loss stays
+# berhu and eval.align stays none. A row that switches protocol
+# between resolutions is not comparable to itself.
+#
+
+task: depth
+model: zoedepth_nk
+resolution: 512
+seed: 42
+
+model_kwargs:
+  domain_id: null
+
+data:
+  root: /data/SyMTRS
+  split: train
+  val_split: val
+  test_split: test
+  # Metres are what the metric models predict. Check the raw encoding before trusting
+  # it: 0.01 for millimetres stored as uint16, 1.0 for metres.
+  depth_scale: 1.0
+  depth_channel: 0
+  depth_backend: auto
+  num_workers: 8
+  pin_memory: true
+
+train:
+  epochs: 20
+  batch_size: 8
+  lr: 5.0e-6
+  weight_decay: 0.01
+  optim: adamw
+  sched: cosine
+  warmup_epochs: 1
+  min_lr_ratio: 0.01
+  # The whole image fits at this resolution, so no cropping is needed.
+  patch_size: 0
+  val_patch_size: 0
+  amp: true
+  gpus: 1
+  grad_clip: 1.0
+  grad_accum: 4
+  # Effective batch = 8 x 4 = 32,
+  # which is what the learning rate was chosen against.
+  loss: berhu
+  freeze: encoder
+  log_every: 50
+  save_samples_every: 1
+  device: cuda
+
+eval:
+  # The first name here that the depth scorer can minimise decides which checkpoint
+  # weights/best.pt holds. The rest are reported but do not select it.
+  metrics: [rmse, mae, abs_rel, sq_rel, d1, d2, d3, silog]
+  batch_size: 1
+  amp: true
+  # 0 runs the whole image in one forward pass, which is what the published numbers
+  # use. If you hit OOM, a sweep over 512/128 tiles scores the same metres.
+  tile_size: 0
+  tile_overlap: 128
+  align: none
+  num_visualizations: 4

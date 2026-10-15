@@ -1,0 +1,76 @@
+# SegFormer (MiT-B2) at 2048px.
+#
+#     symtrs train configs/segmentation/2048/segformer_b2_2048.yaml --data-root /data/SyMTRS
+#     symtrs eval  configs/segmentation/2048/segformer_b2_2048.yaml --data-root /data/SyMTRS --eval-split test
+#
+# resolution: 2048 reads train/rgb_day and train/semantic - the native folders. The
+# model is scored at 2048 against 2048 masks.
+#
+# Six classes: the dataset's semantic/ masks are graylevel PNGs, one byte per pixel, and
+# 255 is the ignore index for pixels that belong to no class. Both numbers are written
+# into the checkpoint, so a model trained here cannot be silently scored against a
+# differently-labelled mask set later. If the mask generator ever writes 0 for "no class"
+# instead of 255, change data.ignore_index in the config and not the metric - a metric
+# that guesses which pixels to ignore is worse than one that does not.
+#
+# The largest SegFormer in the pack and the strongest of the torchvision+timm
+# baselines. Fully convolutional with a cheap decode head, so 512px crops are
+# affordable and still contain several whole objects at this ground sampling
+# distance.
+#
+# ce_dice rather than plain cross-entropy: with six classes over aerial imagery the
+# rare ones (vehicle, water) can be a fraction of a percent of the pixels, and
+# cross-entropy alone is free to ignore them. The Dice term is what pulls them up.
+# `loss_kwargs.class_weights` is the other way to do it, but Dice needs no per-class
+# statistics estimated first.
+#
+# The other three cells of this row are the same file at 1024, 512 and 256, in the
+# sibling folders. `symtrs sweep --task segmentation --models segformer_b2` walks
+# them.
+#
+
+task: segmentation
+model: segformer_b2
+resolution: 2048
+seed: 42
+
+data:
+  root: /data/SyMTRS
+  split: train
+  val_split: val
+  test_split: test
+  num_classes: 6
+  # Pixels labelled 255 are excluded from both the loss and the confusion matrix.
+  ignore_index: 255
+  num_workers: 8
+  pin_memory: true
+
+train:
+  epochs: 40
+  batch_size: 4
+  lr: 6.0e-5
+  weight_decay: 0.01
+  optim: adamw
+  sched: cosine
+  warmup_epochs: 2
+  min_lr_ratio: 0.01
+  patch_size: 512
+  val_patch_size: 0
+  amp: true
+  gpus: 1
+  grad_clip: 1.0
+  grad_accum: 2
+  loss: ce_dice
+  freeze: ""
+  log_every: 50
+  save_samples_every: 1
+  device: cuda
+
+eval:
+  metrics: [miou, pixel_acc, mean_acc, mean_dice, fwiou]
+  batch_size: 1
+  amp: true
+  tile_size: 0
+  tile_overlap: 128
+  align: ""
+  num_visualizations: 4

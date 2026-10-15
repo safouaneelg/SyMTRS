@@ -1,0 +1,71 @@
+# SwinIR at x8 (input 256px -> target 2048px).
+#
+#     symtrs train configs/superresolution/swinir_x8.yaml --data-root /data/SyMTRS
+#     symtrs eval  configs/superresolution/swinir_x8.yaml --data-root /data/SyMTRS --eval-split test
+#
+# resolution: 256 means scale x8: the LR input is rgb_day_lr/x8 and the HR target is
+# native rgb_day. This is the hardest cell of the ladder and the one where a model that
+# merely smooths and one that reconstructs separate most clearly - watch SSIM and the
+# sample panels, not just PSNR, which rewards blur.
+#
+# SwinIR is described in full at configs/superresolution/
+# swinir_x1.yaml - read that one for the loss, the batch size and the
+# model-specific caveats. Only the scale changes here.
+#
+# This is the one model whose training cost grows with the input size, so
+# train.patch_size matters more as the scale rises: the crop is in LR pixels,
+# so a 64px crop is a 512px region of the target. Raise it if memory
+# allows, and set model_kwargs.swinir_checkpoint: true at x8 if it does not.
+#
+# The training code for this task predates the `symtrs` package and now lives inside
+# it: `symtrs/legacy/superres/train.py` owns the model set, the data loading and the
+# metrics, launched as `python -m symtrs.legacy.superres.train`. `symtrs` translates
+# this config into that command line and reads test_metrics.json back.
+# `symtrs train <this file> --dry-run` prints it without launching anything, which is
+# the quickest way to see which two folders a scale will read.
+#
+
+task: superresolution
+model: swinir
+resolution: 256
+seed: 42
+
+model_kwargs:
+  swinir_embed_dim: 96
+  swinir_depths: [6, 6, 6, 6]
+  swinir_num_heads: [6, 6, 6, 6]
+  swinir_window: 7
+  swinir_mlp_ratio: 4.0e0
+  swinir_upsampler: pixelshuffle
+  swinir_checkpoint: false
+
+data:
+  root: /data/SyMTRS
+  split: train
+  val_split: val
+  test_split: test
+  num_workers: 8
+  pin_memory: true
+
+train:
+  epochs: 40
+  batch_size: 4
+  lr: 2.0e-4
+  save_samples_every: 1
+  gpus: 1
+  device: cuda
+  # A path here resumes a previous run; `symtrs eval` scores the run directory's
+  # weights/best.pt without training at all.
+  resume: ""
+  # LR-space crops, SwinIR only: the other three models train on the whole image.
+  patch_size: 64
+  val_patch_size: 0
+  amp: true
+
+eval:
+  # The super-resolution scorer always reports PSNR, SSIM and MSE; `metrics` is the
+  # reported order, and the first name here is what `symtrs tables` prints first.
+  metrics: [psnr, ssim, mse]
+  batch_size: 1
+  amp: true
+  num_visualizations: 4

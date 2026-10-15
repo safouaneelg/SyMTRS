@@ -1,0 +1,74 @@
+# MiDaS small at 2048px (x1 of native).
+#
+#     symtrs train configs/depth/2048/midas_small_2048.yaml --data-root /data/SyMTRS
+#     symtrs eval  configs/depth/2048/midas_small_2048.yaml --data-root /data/SyMTRS --eval-split test
+#
+# resolution: 2048 reads train/rgb_day and train/depth - the native folders. Nothing
+# is downsampled and nothing is upsampled: this is the data as it was generated.
+#
+# The cheapest cell in the grid: EfficientNet-lite3 backbone, a DPT-lite head, and
+# a 256px training resolution inside MiDaS itself. A full four-resolution sweep
+# finishes in the time DPT-BEiT-Large takes for one cell, which makes it the model
+# to use while the dataset is still being regenerated.
+#
+# It is relative-depth, so it is scored with align: scale and trained with the
+# scale-invariant SILog loss MiDaS was trained with.
+#
+# The other three cells of this row are the same file at 1024, 512 and 256, in the
+# sibling folders. `symtrs sweep --task depth --models midas_small` walks them.
+#
+
+task: depth
+model: midas_small
+resolution: 2048
+seed: 42
+
+data:
+  root: /data/SyMTRS
+  split: train
+  val_split: val
+  test_split: test
+  # Metres are what the metric models predict. Check the raw encoding before trusting
+  # it: 0.01 for millimetres stored as uint16, 1.0 for metres.
+  depth_scale: 1.0
+  depth_channel: 0
+  depth_backend: auto
+  num_workers: 8
+  pin_memory: true
+
+train:
+  epochs: 20
+  batch_size: 8
+  lr: 2.0e-5
+  weight_decay: 0.01
+  optim: adamw
+  sched: cosine
+  warmup_epochs: 1
+  min_lr_ratio: 0.01
+  # Random 384px crops: a full 2048px batch is more memory than this
+  # encoder can hold, and the crop still shows a representative slice of the scene
+  # at this ground sampling distance.
+  patch_size: 384
+  val_patch_size: 0
+  amp: true
+  gpus: 1
+  grad_clip: 1.0
+  grad_accum: 1
+  loss: silog
+  freeze: ""
+  log_every: 50
+  save_samples_every: 1
+  device: cuda
+
+eval:
+  # The first name here that the depth scorer can minimise decides which checkpoint
+  # weights/best.pt holds. The rest are reported but do not select it.
+  metrics: [rmse, mae, abs_rel, sq_rel, d1, d2, d3, silog]
+  batch_size: 1
+  amp: true
+  # 0 runs the whole image in one forward pass, which is what the published numbers
+  # use. If you hit OOM, a sweep over 512/128 tiles scores the same metres.
+  tile_size: 0
+  tile_overlap: 128
+  align: scale
+  num_visualizations: 4

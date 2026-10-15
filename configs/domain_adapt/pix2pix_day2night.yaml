@@ -1,0 +1,96 @@
+# pix2pix day -> night, at native resolution.
+#
+#     symtrs train configs/domain_adapt/pix2pix_day2night.yaml --data-root /data/SyMTRS
+#     symtrs eval  configs/domain_adapt/pix2pix_day2night.yaml --data-root /data/SyMTRS --eval-split test
+#
+# Both directions of this pair are in this folder: pix2pix_day2night.yaml and
+# pix2pix_night2day.yaml. They are separate runs with separate checkpoints, and
+# the direction changes the upstream experiment name too, so the two cannot overwrite
+# each other. Report both or neither - a quality claim in one direction says nothing
+# about the other, since the two domains are not equally hard.
+#
+# pix2pix is *paired* and conditional: it needs an A image and the B image of the same
+# scene, matched by filename. SyMTRS day and night frames share their stems, so the
+# matching exists - but it is a stronger assumption than CycleGAN makes, and the gap
+# between the two models on this dataset is a measurement of how well that assumption
+# holds. If the night rendering was produced independently of the day frame rather
+# than from the same geometry, pix2pix is being asked for something the data does not
+# contain and its FID should be read as a lower bound on what paired supervision could
+# buy, not as a fair comparison.
+#
+# This is not a SyMTRS model and the run does not train one. The network is upstream
+# junyanz/pytorch-CycleGAN-and-pix2pix, built, optimised and saved entirely inside that
+# project, which is vendored in this repository under pytorch-CycleGAN-and-pix2pix/ at
+# a pinned revision and launched as a subprocess. Nothing is cloned or downloaded at
+# run time.
+#
+# What SyMTRS adds on top is the input staging and the scoring:
+#
+#   * Before each phase, the split's day and night folders are symlinked into
+#     <run_dir>/staging/<split>/{train,val,test}{A,B}. That is not decoration.
+#     Upstream's UnalignedDataset re-splits the data by --train_ratio whenever phase
+#     folders are absent, which would ignore the SyMTRS train/val/test split entirely.
+#   * After training, test.py generates the translations and the result is scored with
+#     FID and KID against the real target domain.
+#
+# `symtrs setup-adapt --check` verifies the vendored tree in one call;
+# `symtrs setup-adapt --fetch` diffs it against upstream at the pinned revision.
+#
+# Two dependencies are not optional here: upstream's train.py and test.py both import
+# dominate and wandb (through util/visualizer.py) before they parse an option, so the
+# run cannot start without them. `pip install -e '.[adapt]'` installs both, and
+# `symtrs doctor` reports them.
+#
+
+task: domain_adapt
+model: pix2pix
+resolution: 2048
+seed: 42
+
+model_kwargs:
+  direction: day2night
+  # aligned is derived from the model key automatically; it is stated
+  # here so the pairing assumption is visible in the file that depends on it.
+  dataset_mode: aligned
+  # gpu_ids: "1"      # which GPUs upstream may see, as CUDA_VISIBLE_DEVICES.
+  # Upstream picks its own device inside the process and has no --gpu_ids flag,
+  # so this is the lever, and train.device: cpu hides every GPU.
+  # Anything upstream's train.py / test.py accepts can go in extra_args. A typo is
+  # reported by upstream's own argument parser, which is the parser that matters.
+  extra_args: []
+  # name: a_custom_experiment_name
+
+data:
+  root: /data/SyMTRS
+  split: train
+  val_split: val
+  test_split: test
+  num_workers: 8
+  pin_memory: true
+
+train:
+  # The *total* number of epochs, as for every other task here. Upstream takes two
+  # flags (--n_epochs and --n_epochs_decay) and defaults the second to 100, so the
+  # wrapper splits this budget following CycleGAN's own flat-then-decay shape: two
+  # thirds flat, one third decaying to zero. Set model_kwargs.decay_epochs to override
+  # the split, or put --n_epochs_decay in extra_args to take the schedule over.
+  epochs: 40
+  batch_size: 1
+  lr: 2.0e-4
+  amp: true
+  gpus: 1
+  device: cuda
+
+eval:
+  # FID and KID are computed outside the tensor pipeline, over the folders upstream
+  # wrote to, so nothing here selects them; eval.batch_size is the batch used for the
+  # Inception feature extraction.
+  metrics: []
+  batch_size: 8
+  amp: true
+  align: ""
+  num_visualizations: 4
+
+# Extra arguments for the upstream script, on top of model_kwargs.extra_args. Kept
+# separate so a CLI `--set model_kwargs.extra_args=...` does not clobber them.
+upstream_args: []

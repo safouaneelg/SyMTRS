@@ -1,0 +1,425 @@
+"""Run configuration: the single source of truth for every SyMTRS run.
+
+Three front-ends build the same `RunConfig`:
+
+  * a YAML file      -> ``RunConfig.from_yaml(path)``
+  * command line     -> ``RunConfig.from_overrides(cfg, {...})`` on top of a YAML base
+  * python kwargs    -> ``RunConfig(task=..., model=..., ...)`` then ``with_overrides``
+
+Nothing else in the package defines configuration defaults. Keeping one schema is
+what stops the YAML files and the CLI flags from drifting apart.
+
+Override keys may be dotted paths into the nested dataclasses, e.g.
+``{"train.epochs": 30, "data.root": "/data/SyMTRS"}``.
+"""
+
+from __future__ import annotations
+
+import copy
+from dataclasses import asdict, dataclass, field, fields, is_dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Mapping, Optional, Sequence
+
+import yaml
+
+from symtrs import CONFIG_FORMAT_VERSION
+# The reader owns the list of backend names; validating against a second copy here would
+# let the two drift, and the symptom would be a backend that works but the config refuses.
+from symtrs.data.exr import VALID_BACKENDS
+
+TASKS: tuple = ("superresolution", "depth", "segmentation", "domain_adapt")
+
+#: Resolutions are named by their pixel dimension, not by a scale factor.
+RESOLUTIONS: tuple = (2048, 1024, 512, 256)
+
+#: Evaluation modes. "zero_shot" evaluates released pretrained weights with no
+#: training on SyMTRS; "finetune" trains on train/ first. Both share one eval path.
+MODES: tuple = ("zero_shot", "finetune")
+
+
+class ConfigError(ValueError):
+    """Raised when a configuration is internally inconsistent or unknown."""
+
+
+@dataclass
+class DataConfig:
+    """Where a run reads its data from."""
+
+    root: str = ""
+    split: str = "train"
+    val_split: str = "val"
+    test_split: str = "test"
+
+    # Depth reading.
+    depth_scale: float = 1.0
+    depth_channel: int = 0
+    # Which library reads the EXR files. "auto" tries them in order; "numpy" reads .npy
+    # only and is rejected on an EXR rather than silently returning something else. The
+    # list of names lives in the reader, not here, so the two cannot disagree about what
+    # is supported.
+    depth_backend: str = "auto"
+
+    # Segmentation.
+    num_classes: int = 6
+    ignore_index: int = 255
+
+    # Loading.
+    num_workers: int = 4
+    pin_memory: bool = True
+    max_samples: int = 0  # 0 = all
+    limit_train_batches: int = 0  # 0 = all; useful for smoke runs
+    limit_val_batches: int = 0
+
+    def validate(self) -> None:
+        if not self.root:
+            raise ConfigError("data.root is required (path to the SyMTRS dataset root)")
+        if self.split == self.val_split or self.split == self.test_split:
+            raise ConfigError(
+                f"data.split ({self.split!r}) must differ from the evaluation splits "
+                f"({self.val_split!r}, {self.test_split!r})"
+            )
+        if self.depth_backend not in VALID_BACKENDS:
+            raise ConfigError(
+                f"unknown data.depth_backend: {self.depth_backend!r}; expected one of "
+                f"{VALID_BACKENDS}"
+            )
+        if self.depth_scale <= 0:
+            raise ConfigError("data.depth_scale must be positive")
+        if self.num_classes < 2:
+            raise ConfigError("data.num_classes must be at least 2")
+
+
+@dataclass
+class TrainConfig:
+    """How a run trains. Ignored entirely for zero-shot evaluation."""
+
+    epochs: int = 20
+    batch_size: int = 4
+    lr: float = 1e-4
+    weight_decay: float = 0.01
+    optim: str = "adamw"  # adamw | adam | sgd
+    sched: str = "cosine"  # cosine | poly | none
+    warmup_epochs: int = 0
+    min_lr_ratio: float = 0.01
+
+    # Random-crop patch training. 0 trains on the full image, which only fits at
+    # the lower resolutions.
+    patch_size: int = 0
+    val_patch_size: int = 0
+
+    amp: bool = True
+    gpus: int = 1
+    grad_clip: float = 0.0
+    grad_accum: int = 1
+
+    # "" -> the model's registry default for its protocol.
+    loss: str = ""
+    loss_kwargs: Dict[str, Any] = field(default_factory=dict)
+    # "" | "encoder" | "head" | "last_n:<k>"
+    freeze: str = ""
+
+    log_every: int = 50
+    save_samples_every: int = 1
+    resume: str = ""
+    device: str = "cuda"
+
+    def validate(self) -> None:
+        if self.epochs < 1:
+            raise ConfigError("train.epochs must be at least 1")
+        if self.batch_size < 1:
+            raise ConfigError("train.batch_size must be at least 1")
+        if self.lr <= 0:
+            raise ConfigError("train.lr must be positive")
+        if self.optim not in {"adamw", "adam", "sgd"}:
+            raise ConfigError(f"unknown train.optim: {self.optim!r}")
+        if self.sched not in {"cosine", "poly", "none"}:
+            raise ConfigError(f"unknown train.sched: {self.sched!r}")
+        if self.gpus < 1:
+            raise ConfigError("train.gpus must be at least 1")
+        if self.grad_accum < 1:
+            raise ConfigError("train.grad_accum must be at least 1")
+        if self.freeze and not (
+            self.freeze in {"encoder", "head"} or self.freeze.startswith("last_n:")
+        ):
+            raise ConfigError(
+                "train.freeze must be '', 'encoder', 'head' or 'last_n:<k>'; "
+                f"got {self.freeze!r}"
+            )
+
+
+@dataclass
+class EvalConfig:
+    """How a run is evaluated. Used by zero-shot eval and at the end of training."""
+
+    # Does not filter what is computed - the task's scorer always reports everything it
+    # can. It selects which metric decides "best": the first name here that the task
+    # knows how to minimise or maximise wins, and if none match, the task default in
+    # `symtrs.engine.trainer.MONITORS` applies. This matters more than it sounds, since
+    # the checkpoint kept for the paper is whichever one won here.
+    metrics: List[str] = field(default_factory=list)  # [] -> task defaults
+    batch_size: int = 1
+    amp: bool = True
+    # Sliding-window inference for images that do not fit at full resolution.
+    tile_size: int = 0  # 0 = whole image in one forward pass
+    tile_overlap: int = 128
+    # "" -> the model's own published alignment convention.
+    align: str = ""
+    num_visualizations: int = 4
+
+    def validate(self) -> None:
+        if self.batch_size < 1:
+            raise ConfigError("eval.batch_size must be at least 1")
+        if self.tile_size < 0:
+            raise ConfigError("eval.tile_size must be >= 0")
+        if self.tile_size and self.tile_overlap >= self.tile_size:
+            raise ConfigError("eval.tile_overlap must be smaller than eval.tile_size")
+
+
+@dataclass
+class RunConfig:
+    """A complete description of one run."""
+
+    task: str = "depth"
+    model: str = ""
+    resolution: int = 2048
+    seed: int = 42
+    out_dir: str = ""
+
+    data: DataConfig = field(default_factory=DataConfig)
+    train: TrainConfig = field(default_factory=TrainConfig)
+    eval: EvalConfig = field(default_factory=EvalConfig)
+
+    # Forwarded verbatim to the model builder; recorded in the checkpoint so the
+    # architecture can be rebuilt without the YAML file.
+    model_kwargs: Dict[str, Any] = field(default_factory=dict)
+
+    # Extra arguments forwarded to the vendored upstream script (domain_adapt only).
+    upstream_args: List[str] = field(default_factory=list)
+
+    format_version: int = CONFIG_FORMAT_VERSION
+
+    # ---------------------------------------------------------------- validation
+
+    def validate(self) -> "RunConfig":
+        if self.task not in TASKS:
+            raise ConfigError(f"unknown task {self.task!r}; expected one of {TASKS}")
+        if not self.model:
+            raise ConfigError("model is required")
+        if self.resolution not in RESOLUTIONS:
+            raise ConfigError(
+                f"resolution must be one of {RESOLUTIONS}; got {self.resolution}"
+            )
+        if self.format_version != CONFIG_FORMAT_VERSION:
+            raise ConfigError(
+                f"config format_version {self.format_version} does not match this "
+                f"build ({CONFIG_FORMAT_VERSION})"
+            )
+        self.data.validate()
+        self.train.validate()
+        self.eval.validate()
+        return self
+
+    # ------------------------------------------------------------------ defaults
+
+    @property
+    def resolved_out_dir(self) -> Path:
+        """Where this run writes. Explicit `out_dir` wins, otherwise a canonical path."""
+        if self.out_dir:
+            return Path(self.out_dir)
+        return Path("runs") / self.task / self.model / str(self.resolution)
+
+    # --------------------------------------------------------------- conversion
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> "RunConfig":
+        if not isinstance(raw, Mapping):
+            raise ConfigError(f"config must be a mapping, got {type(raw).__name__}")
+        known = {f.name for f in fields(cls)}
+        unknown = set(raw) - known
+        if unknown:
+            raise ConfigError(
+                f"unknown top-level config keys: {sorted(unknown)}; known keys are "
+                f"{sorted(known)}"
+            )
+        kwargs: Dict[str, Any] = {}
+        for key, value in raw.items():
+            if key == "data":
+                kwargs["data"] = _build_section(DataConfig, value, "data")
+            elif key == "train":
+                kwargs["train"] = _build_section(TrainConfig, value, "train")
+            elif key == "eval":
+                kwargs["eval"] = _build_section(EvalConfig, value, "eval")
+            else:
+                kwargs[key] = value
+        return cls(**kwargs)
+
+    # ---------------------------------------------------------------------- yaml
+
+    def to_yaml(self, path: Optional[str] = None) -> str:
+        text = yaml.safe_dump(self.to_dict(), sort_keys=False, default_flow_style=False)
+        if path:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_text(text, encoding="utf-8")
+        return text
+
+    @classmethod
+    def from_yaml(cls, path: str) -> "RunConfig":
+        raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+        if raw is None:
+            raise ConfigError(f"config file is empty: {path}")
+        return cls.from_dict(raw).validate()
+
+    # ----------------------------------------------------------------- overrides
+
+    def with_overrides(self, overrides: Mapping[str, Any]) -> "RunConfig":
+        """Return a copy with dotted-path overrides applied.
+
+        Values are coerced to the type of the field they replace, so a CLI string
+        ``"30"`` lands in an ``int`` field. ``None`` values are ignored, which lets
+        callers pass a whole parsed namespace without filtering it first.
+        """
+        cfg = copy.deepcopy(self)
+        for dotted, value in overrides.items():
+            if value is None:
+                continue
+            _set_dotted(cfg, dotted, value)
+        return cfg
+
+    def set_many(self, **overrides: Any) -> "RunConfig":
+        return self.with_overrides(overrides)
+
+
+# --------------------------------------------------------------------- helpers
+
+
+def _build_section(cls, raw: Any, name: str):
+    if raw is None:
+        return cls()
+    if not isinstance(raw, Mapping):
+        raise ConfigError(f"config section {name!r} must be a mapping")
+    known = {f.name for f in fields(cls)}
+    unknown = set(raw) - known
+    if unknown:
+        raise ConfigError(
+            f"unknown keys in {name!r}: {sorted(unknown)}; known keys are {sorted(known)}"
+        )
+    return cls(**dict(raw))
+
+
+def _set_dotted(obj: Any, dotted: str, value: Any) -> None:
+    parts = dotted.split(".")
+    target = obj
+    for part in parts[:-1]:
+        if isinstance(target, dict):
+            # Free-form sections such as model_kwargs and loss_kwargs accept new keys,
+            # so a nested path into one is created rather than rejected.
+            nested = target.get(part)
+            if not isinstance(nested, (dict,)):
+                nested = {}
+                target[part] = nested
+            target = nested
+            continue
+        if not hasattr(target, part):
+            raise ConfigError(f"unknown config key {dotted!r} (no attribute {part!r})")
+        target = getattr(target, part)
+        if not is_dataclass(target) and not isinstance(target, dict):
+            raise ConfigError(f"config key {dotted!r} does not point into a section")
+
+    leaf = parts[-1]
+    if isinstance(target, dict):
+        target[leaf] = _coerce_unknown(value)
+        return
+    if not hasattr(target, leaf):
+        raise ConfigError(f"unknown config key {dotted!r}")
+    setattr(target, leaf, _coerce(getattr(target, leaf), value, dotted))
+
+
+def _coerce_unknown(value: Any) -> Any:
+    """Guess a type for a value going into a free-form section.
+
+    There is no schema to read a type from inside `model_kwargs`, so `--set
+    model_kwargs.metric=true` has to become a bool and `--set loss_kwargs.threshold=0.2`
+    a float. The guess is conservative: anything that is not a boolean or a number
+    stays a string, so a model id or a path is never mangled.
+    """
+    if not isinstance(value, str):
+        return value
+    lowered = value.strip().lower()
+    if lowered in {"true", "false"}:
+        return lowered == "true"
+    try:
+        return int(value)
+    except ValueError:
+        pass
+    try:
+        return float(value)
+    except ValueError:
+        return value
+
+
+def _coerce(current: Any, value: Any, dotted: str) -> Any:
+    """Coerce an override value to the type of the field being replaced."""
+    if isinstance(current, bool):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            low = value.strip().lower()
+            if low in {"1", "true", "yes", "on"}:
+                return True
+            if low in {"0", "false", "no", "off"}:
+                return False
+            raise ConfigError(f"cannot read {value!r} as a boolean for {dotted!r}")
+        return bool(value)
+    if isinstance(current, list):
+        if isinstance(value, (list, tuple)):
+            return list(value)
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        raise ConfigError(f"cannot read {value!r} as a list for {dotted!r}")
+    if isinstance(current, dict):
+        if isinstance(value, Mapping):
+            return dict(value)
+        raise ConfigError(f"cannot read {value!r} as a mapping for {dotted!r}")
+    if isinstance(current, int) and not isinstance(current, bool):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            raise ConfigError(f"cannot read {value!r} as an integer for {dotted!r}") from None
+    if isinstance(current, float):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            raise ConfigError(f"cannot read {value!r} as a number for {dotted!r}") from None
+    if isinstance(current, str):
+        return str(value)
+    if is_dataclass(current) and isinstance(value, Mapping):
+        # `train={...}` - the shape the YAML file itself has, and the first thing an SDK user
+        # reaches for, since the config they just read is nested. Assigning it would put a
+        # plain dict where a section object belongs; nothing complains until `validate()` is
+        # called on it several frames later, and the error there is
+        # `AttributeError: 'dict' object has no attribute 'validate'`, which names neither the
+        # key nor the fix. Naming the dotted form is cheaper than making the reader work it
+        # out.
+        flattened = ", ".join(f"{dotted}.{key}" for key in value)
+        raise ConfigError(
+            f"{dotted!r} is a config section, so a nested mapping cannot replace it. "
+            f"Set the fields by dotted path instead: {flattened}"
+        )
+    return value
+
+
+def load_config(
+    yaml_path: Optional[str] = None,
+    overrides: Optional[Mapping[str, Any]] = None,
+    **kwargs: Any,
+) -> RunConfig:
+    """Build a validated config from a YAML base, then overrides, then kwargs."""
+    cfg = RunConfig.from_yaml(yaml_path) if yaml_path else RunConfig()
+    if overrides:
+        cfg = cfg.with_overrides(overrides)
+    if kwargs:
+        cfg = cfg.with_overrides(kwargs)
+    return cfg.validate()

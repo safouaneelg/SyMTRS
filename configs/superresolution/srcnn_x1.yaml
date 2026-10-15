@@ -1,0 +1,69 @@
+# SRCNN at x1 (input 2048px -> target 2048px).
+#
+#     symtrs train configs/superresolution/srcnn_x1.yaml --data-root /data/SyMTRS
+#     symtrs eval  configs/superresolution/srcnn_x1.yaml --data-root /data/SyMTRS --eval-split test
+#
+# resolution: 2048 means scale x1: the LR input and the HR target are the *same* folder
+# (rgb_day), and the model is an image-to-image refiner rather than an upsampler. It is
+# a legitimate control row - it isolates how much of a x4 result is restoration rather
+# than resolution, which is the question worth asking when the low-resolution folders
+# were produced by downsampling the same captures - but it is not super-resolution, and
+# the run's own summary says so. Nothing is upsampled here.
+#
+# Three convolutional layers on a bicubic-upsampled input: the cheapest baseline
+# there is, and deliberately so - it establishes what a purely local, shallow mapping
+# recovers before any of the deep models get credit for it.
+#
+# `use_y_channel: true` is SRCNN's own convention: the network sees the luma channel
+# only and the chroma is carried over from the bicubic upsample. That is how the
+# published SRCNN numbers are produced, and it also makes this run about a third the
+# cost of the colour version.
+#
+# The real super-resolution cells of this row are srcnn_x2.yaml,
+# srcnn_x4.yaml and srcnn_x8.yaml in this folder.
+#
+# The training code for this task predates the `symtrs` package and now lives inside
+# it: `symtrs/legacy/superres/train.py` owns the model set, the data loading and the
+# metrics, launched as `python -m symtrs.legacy.superres.train`. `symtrs` translates
+# this config into that command line and reads test_metrics.json back.
+# `symtrs train <this file> --dry-run` prints it without launching anything, which is
+# the quickest way to see which two folders a scale will read.
+#
+
+task: superresolution
+model: srcnn
+resolution: 2048
+seed: 42
+
+model_kwargs:
+  use_y_channel: true
+  # Set use_y_channel false to train on RGB instead of luma; the
+  # published SRCNN numbers are Y-channel, so changing it also changes
+  # what you are comparing against.
+
+data:
+  root: /data/SyMTRS
+  split: train
+  val_split: val
+  test_split: test
+  num_workers: 8
+  pin_memory: true
+
+train:
+  epochs: 40
+  batch_size: 16
+  lr: 1.0e-4
+  save_samples_every: 1
+  gpus: 1
+  device: cuda
+  # A path here resumes a previous run; `symtrs eval` scores the run directory's
+  # weights/best.pt without training at all.
+  resume: ""
+
+eval:
+  # The super-resolution scorer always reports PSNR, SSIM and MSE; `metrics` is the
+  # reported order, and the first name here is what `symtrs tables` prints first.
+  metrics: [psnr, ssim, mse]
+  batch_size: 1
+  amp: true
+  num_visualizations: 4

@@ -1,0 +1,80 @@
+# SwinIR at x1 (input 2048px -> target 2048px).
+#
+#     symtrs train configs/superresolution/swinir_x1.yaml --data-root /data/SyMTRS
+#     symtrs eval  configs/superresolution/swinir_x1.yaml --data-root /data/SyMTRS --eval-split test
+#
+# resolution: 2048 means scale x1: the LR input and the HR target are the *same* folder
+# (rgb_day), and the model is an image-to-image refiner rather than an upsampler. It is
+# a legitimate control row - it isolates how much of a x4 result is restoration rather
+# than resolution, which is the question worth asking when the low-resolution folders
+# were produced by downsampling the same captures - but it is not super-resolution, and
+# the run's own summary says so. Nothing is upsampled here.
+#
+# Window-attention transformer: the heaviest SR baseline and, unlike the other
+# three, one whose cost grows with the *input* size rather than being fixed by the
+# network. That is what train.patch_size is for - the other three models train on the
+# whole image.
+#
+# The architecture keys in model_kwargs (embed_dim, depths, num_heads, window,
+# mlp_ratio, upsampler) are fixed at build time and have to match the checkpoint, so
+# they are recorded in the run's config instead of being left to the script's
+# defaults. Set `swinir_checkpoint: true` to trade ~30% of the speed for a much
+# smaller activation footprint, which is the lever to reach for if x8 runs out of
+# memory. train.amp is also passed for this model only; the script implements AMP for
+# SwinIR and for nothing else.
+#
+# The real super-resolution cells of this row are swinir_x2.yaml,
+# swinir_x4.yaml and swinir_x8.yaml in this folder.
+#
+# The training code for this task predates the `symtrs` package and now lives inside
+# it: `symtrs/legacy/superres/train.py` owns the model set, the data loading and the
+# metrics, launched as `python -m symtrs.legacy.superres.train`. `symtrs` translates
+# this config into that command line and reads test_metrics.json back.
+# `symtrs train <this file> --dry-run` prints it without launching anything, which is
+# the quickest way to see which two folders a scale will read.
+#
+
+task: superresolution
+model: swinir
+resolution: 2048
+seed: 42
+
+model_kwargs:
+  swinir_embed_dim: 96
+  swinir_depths: [6, 6, 6, 6]
+  swinir_num_heads: [6, 6, 6, 6]
+  swinir_window: 7
+  swinir_mlp_ratio: 4.0e0
+  swinir_upsampler: pixelshuffle
+  swinir_checkpoint: false
+
+data:
+  root: /data/SyMTRS
+  split: train
+  val_split: val
+  test_split: test
+  num_workers: 8
+  pin_memory: true
+
+train:
+  epochs: 40
+  batch_size: 4
+  lr: 2.0e-4
+  save_samples_every: 1
+  gpus: 1
+  device: cuda
+  # A path here resumes a previous run; `symtrs eval` scores the run directory's
+  # weights/best.pt without training at all.
+  resume: ""
+  # LR-space crops, SwinIR only: the other three models train on the whole image.
+  patch_size: 64
+  val_patch_size: 0
+  amp: true
+
+eval:
+  # The super-resolution scorer always reports PSNR, SSIM and MSE; `metrics` is the
+  # reported order, and the first name here is what `symtrs tables` prints first.
+  metrics: [psnr, ssim, mse]
+  batch_size: 1
+  amp: true
+  num_visualizations: 4
