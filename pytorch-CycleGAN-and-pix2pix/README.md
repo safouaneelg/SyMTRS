@@ -1,292 +1,100 @@
-# CycleGAN and pix2pix on SyMTRS
+# CycleGAN and pix2pix, vendored
 
-This directory contains a local copy of the CycleGAN/pix2pix codebase adapted for the SyMTRS dataset.
+This is the **complete** source tree of
+[`junyanz/pytorch-CycleGAN-and-pix2pix`](https://github.com/junyanz/pytorch-CycleGAN-and-pix2pix),
+committed into the SyMTRS repository so that domain adaptation needs no clone, no
+submodule and no network access at run time.
 
-The important change in this workspace is that the dataset loaders support:
+| | |
+|---|---|
+| Upstream | `https://github.com/junyanz/pytorch-CycleGAN-and-pix2pix.git` |
+| Revision | `2a7afba2895d52556dd5dfe07e8555ef657ced6f` (2025-08-06, `master`) |
+| Licence | BSD-2-Clause, see [`LICENSE`](LICENSE) |
+| Excluded | `imgs/` — the README's teaser gallery (7.4 MB, almost all one animated GIF) |
 
-- training directly from raw SyMTRS folders
-- automatic train/val/test splitting
-- optional image tiling for large remote-sensing images
-- paired loading by filename matching for pix2pix
+Upstream's own README is kept as [`README.upstream.md`](README.upstream.md) and is the
+reference for `train.py` / `test.py` flags; this file describes only what SyMTRS adds.
 
-Clone the github repo inside SyMTRS root path:
+Check the tree at any time with:
 
 ```bash
-git clone https://github.com/junyanz/pytorch-CycleGAN-and-pix2pix.git
+symtrs setup-adapt            # present and complete? prints the pinned revision
+symtrs setup-adapt --fetch    # clone the pinned revision and print the exact delta
 ```
 
-## What Was Modified
+`--fetch` never writes to this directory. It reports which files differ from upstream,
+and warns if any differing file is not in `MODIFIED_FILES` below.
 
-Local changes are concentrated in:
+## What SyMTRS modified
 
-- `data/unaligned_dataset.py`
-- `data/aligned_dataset.py`
+Two files, both dataset loaders. Their upstream originals are kept beside them in
+[`upstream_originals/`](upstream_originals/) so the delta is readable offline:
 
-These modifications let you train without manually creating `trainA`, `trainB`, `testA`, `testB`, or concatenated AB pair images, as long as your raw folders follow the expected structure.
+- `data/unaligned_dataset.py` (CycleGAN)
+- `data/aligned_dataset.py` (pix2pix)
+
+Both gained the same three things:
+
+- **Auto-split fallback.** If `dataroot/<phase>A` and `<phase>B` are absent, the loader
+  splits `--raw_A_dir` / `--raw_B_dir` by `--train_ratio`, `--val_ratio` and
+  `--split_seed` instead of failing.
+- **Tiling.** `--tile_size > 0` crops `tile_size x tile_size` tiles in place of the
+  upstream `resize_and_crop` preprocessing, which matters for 2048px aerial imagery.
+  `--tile_mode random|center` selects the tile.
+- **Paired loading for pix2pix.** Aligned pairs are formed by basename intersection of
+  the two raw folders, so the AB-concatenated image format is not required.
+
+Everything else in this tree is upstream, unmodified.
+
+> **The auto-split fallback is a trap when SyMTRS drives this code.** It fires whenever
+> `trainA`/`trainB` do not exist, and it would then re-split the data itself, ignoring
+> the SyMTRS `train`/`val`/`test` split. `symtrs` avoids it by materialising those six
+> directories as symlinks before launching anything — see
+> `symtrs/model/domain/upstream.py::build_staging_dir`. Running `train.py` here by hand
+> against a raw folder does hit it, which is what the upstream README's
+> `--train_ratio`/`--split_seed` examples are for.
+
+## Running it
+
+Prefer the `symtrs` front-end, which stages the split as symlinks, pins the checkpoints
+and results directories into the run directory, translates the direction into
+`--direction AtoB|BtoA`, and scores the translations with FID/KID afterwards:
+
+```bash
+symtrs train configs/domain_adapt/cyclegan_day2night.yaml --data-root /data/SyMTRS
+```
+
+`train.py` and `test.py` are also runnable directly, as upstream intends:
+
+```bash
+python train.py --dataroot <staging> --model cycle_gan --dataset_mode unaligned \
+                --direction AtoB --name symtrs_cyclegan_day2night --n_epochs 100
+```
 
 ## Environment
 
-Use the provided conda environment:
+Upstream ships `environment.yml` (Python 3.11, PyTorch 2.4, torchvision 0.19, numpy,
+scikit-image, Pillow, dominate, wandb). Installing it is not needed for a `symtrs` run —
+the domain-adaptation task uses whatever `torch` the `symtrs` environment already has —
+but **`dominate` and `wandb` are**, because `train.py` and `test.py` both import
+`util/visualizer.py`, which imports them at module level before it parses a single
+option. They are not optional here in practice, whatever the flags say:
 
 ```bash
-conda env create -f environment.yml
-conda activate pytorch-img2img
+pip install -e '.[adapt]'       # dominate + wandb, the two upstream start-up imports
 ```
 
-The environment file currently installs:
-
-- Python 3.11
-- PyTorch 2.4
-- torchvision 0.19
-- numpy
-- scikit-image
-- Pillow
-- dominate
-- wandb
-
-If you want HTML visualization only, `wandb` is optional.
-
-## Expected SyMTRS Layout
-
-The modified loaders can work directly on raw folders like this:
-
-```text
-/path/to/SyMTRS/
-├── hr/
-│   ├── RS.0.png
-│   ├── RS.100200.png
-│   └── ...
-└── night/
-    ├── RS.0.png
-    ├── RS.100200.png
-    └── ...
-```
-
-For unpaired CycleGAN:
-
-- domain A defaults to `hr/`
-- domain B defaults to `night/`
-
-For paired pix2pix:
-
-- filenames must match between `hr/` and `night/`
-- pairs are formed by common basename
-
-You can override these defaults with:
-
-- `--raw_A_dir`
-- `--raw_B_dir`
-- `--raw_A_subdir`
-- `--raw_B_subdir`
-
-## Auto-splitting Behavior
-
-If the usual folders such as `trainA`, `trainB`, `testA`, `testB`, or `train/`, `test/` are missing, the custom loaders will auto-split the raw folders.
-
-Relevant arguments:
-
-- `--phase train|val|test`
-- `--train_ratio`
-- `--val_ratio`
-- `--split_seed`
-
-Default behavior:
-
-- `train_ratio=0.9`
-- `val_ratio=0.0`
-- the remaining samples are used for `test`
-
-Example:
-
-```bash
---phase train --train_ratio 0.8 --val_ratio 0.1 --split_seed 42
-```
-
-This produces:
-
-- 80% train
-- 10% val
-- 10% test
-
-## Tiling Behavior
-
-Large remote-sensing images can be tiled instead of resized.
-
-Relevant arguments:
-
-- `--tile_size`
-- `--tile_mode random|center`
-
-When `--tile_size > 0`:
-
-- the loaders crop tiles of size `tile_size x tile_size`
-- `resize_and_crop` preprocessing is bypassed for those samples
-
-This is useful when full-resolution SyMTRS images are too large for direct CycleGAN or pix2pix training.
-
-## CycleGAN Reproduction
-
-CycleGAN uses the custom `unaligned_dataset.py`.
-
-### Training
-
-```bash
-python train.py \
-  --dataroot /path/to/SyMTRS \
-  --raw_A_subdir hr \
-  --raw_B_subdir night \
-  --tile_size 512 \
-  --tile_mode random \
-  --model cycle_gan \
-  --dataset_mode unaligned \
-  --name symtrs_cyclegan_t512_e200_s42 \
-  --n_epochs 100 \
-  --n_epochs_decay 100 \
-  --split_seed 42
-```
-
-Notes:
-
-- `--dataset_mode unaligned` is the default for CycleGAN, but keeping it explicit is clearer.
-- `--phase train` is implicit in `train.py`.
-- checkpoints are saved under `checkpoints/symtrs_cyclegan_t512_e200_s42/`
-
-### Validation or test split inference
-
-To run inference on the held-out split produced by the same seed:
-
-```bash
-python test.py \
-  --dataroot /path/to/SyMTRS \
-  --raw_A_subdir hr \
-  --raw_B_subdir night \
-  --model cycle_gan \
-  --dataset_mode unaligned \
-  --name symtrs_cyclegan_t512_e200_s42 \
-  --phase test \
-  --split_seed 42 \
-  --num_test 50
-```
-
-Results are written to:
-
-```text
-results/symtrs_cyclegan_t512_e200_s42/test_latest/
-```
-
-## pix2pix Reproduction
-
-pix2pix uses the custom `aligned_dataset.py`.
-
-### Training
-
-```bash
-python train.py \
-  --dataroot /path/to/SyMTRS \
-  --raw_A_subdir hr \
-  --raw_B_subdir night \
-  --tile_size 512 \
-  --tile_mode random \
-  --model pix2pix \
-  --dataset_mode aligned \
-  --direction AtoB \
-  --name symtrs_pix2pix_t512_e200_s42 \
-  --n_epochs 100 \
-  --n_epochs_decay 100 \
-  --split_seed 42
-```
-
-Notes:
-
-- `AtoB` means `hr -> night` with the default subdirectory mapping above.
-- paired samples are built by basename intersection between the two folders.
-
-### Test
-
-```bash
-python test.py \
-  --dataroot /path/to/SyMTRS \
-  --raw_A_subdir hr \
-  --raw_B_subdir night \
-  --model pix2pix \
-  --dataset_mode aligned \
-  --direction AtoB \
-  --name symtrs_pix2pix_t512_e200_s42 \
-  --phase test \
-  --split_seed 42 \
-  --num_test 50
-```
-
-## Using Explicit Absolute Paths
-
-Instead of relying on `--dataroot/hr` and `--dataroot/night`, you can point directly to the domains:
-
-```bash
-python train.py \
-  --dataroot /tmp/placeholder \
-  --raw_A_dir /path/to/SyMTRS/hr \
-  --raw_B_dir /path/to/SyMTRS/night \
-  --model cycle_gan \
-  --dataset_mode unaligned \
-  --name symtrs_cyclegan_abs_paths
-```
-
-`--dataroot` is still required by the base CLI, even when `--raw_A_dir` and `--raw_B_dir` are used.
-
-## Common Options That Matter
-
-- `--name`: experiment name
-- `--checkpoints_dir`: where models are saved
-- `--results_dir`: where test outputs are saved
-- `--load_size` and `--crop_size`: standard preprocessing sizes when tiling is disabled
-- `--preprocess`: preprocessing mode from the upstream codebase
-- `--no_flip`: disable random horizontal flips
-- `--batch_size`: batch size
-- `--num_threads`: dataloader workers
-- `--continue_train`: resume training from latest checkpoint
-
-Full CLI help:
-
-```bash
-python train.py --help
-python test.py --help
-```
-
-## Outputs
-
-Training writes to:
-
-```text
-checkpoints/<experiment_name>/
-```
-
-Typical contents:
-
-- saved model checkpoints
-- `train_opt.txt`
-- HTML training visualizations unless `--no_html` is used
-- loss logs
-
-Testing writes to:
-
-```text
-results/<experiment_name>/<phase>_<epoch>/
-```
-
-## Notebooks
-
-This directory also includes:
-
-- `CycleGAN.ipynb`
-- `pix2pix.ipynb`
-- `symtrs_inference.ipynb`
-
-Use them for exploratory runs or visualization, but the reproducible commands are the CLI commands above.
-
-## Known Caveats
-
-- `test.py` forces `batch_size=1`, `num_threads=0`, `serial_batches=True`, and `no_flip=True`.
-- For pix2pix, pairing depends on exact matching filenames across the two raw folders.
-- For CycleGAN, the two domains are split independently, so it remains unpaired even when filenames overlap.
-- If auto-splitting yields no samples, adjust `--train_ratio`, `--val_ratio`, or the folder contents.
-- When `--tile_size` is disabled, the upstream resize/crop preprocessing path is used instead.
+`symtrs doctor` lists them, and a run started without them stops with the install
+command rather than upstream's traceback.
+
+## Known caveats
+
+Inherited from upstream, and worth knowing before reading a result:
+
+- `test.py` forces `batch_size=1`, `num_threads=0`, `serial_batches=True` and
+  `no_flip=True`.
+- For pix2pix, pairing depends on exactly matching filenames across the two raw folders.
+- For CycleGAN, the two domains are split independently, so it stays unpaired even when
+  filenames overlap.
+- Checkpoints land in `<checkpoints_dir>/<name>/`; SyMTRS points `checkpoints_dir` at the
+  run directory so a run does not scatter weights into the working directory.
