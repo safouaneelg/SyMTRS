@@ -84,19 +84,21 @@ reaches `import timm` via `midas.blocks` → `backbones.beit`. The upstream `hub
 declares only `dependencies = ["torch"]`, so nothing warns you — the load simply fails.
 `symtrs doctor` reports it correctly, which is why the registry entries list `timm`.
 
-Second, and more awkward: **ZoeDepth and SegFormer cannot share one environment.**
+Second, and more awkward: **ZoeDepth and MiDaS Swin-V2 need their own environment.**
 
 - ZoeDepth's checkpoint and its vendored MiDaS backbone were built against
   `timm==0.6.12`, the version pinned in ZoeDepth's own `environment.yml`. That is the
   version it was verified to work on. Under `timm==0.9.16` and `1.0.30` the released
   weights no longer load cleanly and the forward pass then raises
   `AttributeError: 'Block' object has no attribute 'drop_path'`.
-- SegFormer needs a `timm` that provides `mit_b0`, which 0.6.12 does not have
-  (`RuntimeError: Unknown model (mit_b0)`).
+- `midas_dpt_swin2_tiny` is the same story: on timm 1.0.30 its state_dict reports
+  `pretrained.model.layers.3.downsample.reduction.weight` missing; on 0.6.12 it loads.
+- SegFormer is *not* part of this: timm has never shipped MiT, so the encoder comes from
+  `transformers` (`pip install -e '.[segformer]'`) and works on any timm.
 
-MiDaS works on both. `symtrs doctor` prints a warning naming whichever side of this you
-are currently on. Practically: one environment for ZoeDepth + MiDaS, a second for
-SegFormer.
+The other MiDaS models work on both. `symtrs doctor` prints a warning naming whichever side
+of this you are currently on. Practically: one environment for ZoeDepth + MiDaS Swin-V2
+(timm 0.6.12, Python 3.10), a second for everything else.
 
 ## Dataset layout
 

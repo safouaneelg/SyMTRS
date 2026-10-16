@@ -27,7 +27,7 @@ from symtrs import CONFIG_FORMAT_VERSION
 # let the two drift, and the symptom would be a backend that works but the config refuses.
 from symtrs.data.exr import VALID_BACKENDS
 
-TASKS: tuple = ("superresolution", "depth", "segmentation", "domain_adapt")
+TASKS: tuple = ("superresolution", "depth", "segmentation", "domain_adapt", "shadow_removal")
 
 #: Resolutions are named by their pixel dimension, not by a scale factor.
 RESOLUTIONS: tuple = (2048, 1024, 512, 256)
@@ -51,7 +51,13 @@ class DataConfig:
     test_split: str = "test"
 
     # Depth reading.
-    depth_scale: float = 1.0
+    # File units -> metres. The real EXRs store CENTIMETRES, so 0.01 is the default; a
+    # metric model scored against unconverted centimetres is wrong by a constant 100x.
+    depth_scale: float = 0.01
+    # Metres, after depth_scale. Pixels farther than this are invalid. The real depth marks
+    # sky with huge values rather than zero, which would dominate every loss and metric if
+    # it counted as geometry. None keeps every positive finite pixel.
+    max_depth: Optional[float] = None
     depth_channel: int = 0
     # Which library reads the EXR files. "auto" tries them in order; "numpy" reads .npy
     # only and is rejected on an EXR rather than silently returning something else. The
@@ -60,7 +66,12 @@ class DataConfig:
     depth_backend: str = "auto"
 
     # Segmentation.
-    num_classes: int = 6
+    # The real masks hold class_id * label_step as 8-bit gray (current export: 63, so
+    # 0/63/126/189/252 -> background, building, green, road, car; older ones used 51 with 6
+    # classes). Pixels not within a couple of grey levels of a multiple become ignore_index.
+    # make-dummy writes the same encoding, so a config that runs on it runs on the real data.
+    num_classes: int = 5
+    label_step: int = 63
     ignore_index: int = 255
 
     # Loading.
@@ -85,8 +96,14 @@ class DataConfig:
             )
         if self.depth_scale <= 0:
             raise ConfigError("data.depth_scale must be positive")
+        if self.max_depth is not None and self.max_depth <= 0:
+            raise ConfigError("data.max_depth must be positive (metres) or unset")
         if self.num_classes < 2:
             raise ConfigError("data.num_classes must be at least 2")
+        if self.label_step < 1:
+            raise ConfigError(
+                "data.label_step must be at least 1 (1 = masks hold raw class ids)"
+            )
 
 
 @dataclass
@@ -176,6 +193,45 @@ class EvalConfig:
 
 
 @dataclass
+class ShadowConfig:
+    """Settings that exist only for `shadow_removal`; ignored by every other task."""
+
+    # The dataset has no shadow masks, and ShadowFormer needs one as an input while the
+    # shadow / non-shadow metric split needs one for every model. The mask is derived once,
+    # at staging, from the pair itself: a pixel is shadow when the shadow-free image is
+    # brighter than the shadowed one by more than this fraction of its own luminance,
+    # (Y_noshadow - Y_day) / max(Y_noshadow, eps) > mask_threshold. 0.1 is above 8-bit
+    # rounding and render noise (the two renders differ only by the shadows) while keeping
+    # penumbra; changing it changes the regional metrics, so it is recorded in the summary.
+    mask_threshold: float = 0.1
+    # Side of the square structuring element of the opening that removes isolated pixels
+    # from the mask. 0 disables it.
+    mask_open: int = 3
+    # Training length. 0 -> `train.epochs`, where one epoch is one random crop from every
+    # training image (ceil(n_train / batch_size) iterations). A positive value wins, which
+    # is how a ~500 iteration validation run is asked for: `--set shadow.iterations=500`.
+    iterations: int = 0
+    # Select "best" on a fixed set of random validation crops every `val_every` iterations
+    # (full 2048 images are only run once, at the end). 0 validates only at the end.
+    val_every: int = 250
+    val_crops: int = 32
+    # Optional upstream checkpoint to initialise from. "" trains from scratch. Only tensors
+    # whose name and shape match are loaded, and the count is printed.
+    init_weights: str = ""
+    # Skip the final full-image prediction / scoring (smoke tests of the training loop).
+    skip_final_eval: bool = False
+
+    def validate(self) -> None:
+        if not 0.0 < self.mask_threshold < 1.0:
+            raise ConfigError("shadow.mask_threshold must be in (0, 1)")
+        if self.mask_open < 0 or self.iterations < 0 or self.val_every < 0 or self.val_crops < 0:
+            raise ConfigError(
+                "shadow.mask_open, iterations, val_every and val_crops must not be negative"
+            )
+
+
+
+@dataclass
 class RunConfig:
     """A complete description of one run."""
 
@@ -188,6 +244,7 @@ class RunConfig:
     data: DataConfig = field(default_factory=DataConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
+    shadow: ShadowConfig = field(default_factory=ShadowConfig)
 
     # Forwarded verbatim to the model builder; recorded in the checkpoint so the
     # architecture can be rebuilt without the YAML file.
@@ -217,6 +274,7 @@ class RunConfig:
         self.data.validate()
         self.train.validate()
         self.eval.validate()
+        self.shadow.validate()
         return self
 
     # ------------------------------------------------------------------ defaults
@@ -252,6 +310,8 @@ class RunConfig:
                 kwargs["train"] = _build_section(TrainConfig, value, "train")
             elif key == "eval":
                 kwargs["eval"] = _build_section(EvalConfig, value, "eval")
+            elif key == "shadow":
+                kwargs["shadow"] = _build_section(ShadowConfig, value, "shadow")
             else:
                 kwargs[key] = value
         return cls(**kwargs)

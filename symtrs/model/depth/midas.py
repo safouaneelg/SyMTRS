@@ -46,12 +46,16 @@ _TRANSFORM_NAMES = {
     "MiDaS_small": "small_transform",
     "DPT_Hybrid": "dpt_transform",
     "DPT_Large": "dpt_transform",
-    "DPT_SwinV2_T_256": "dpt_transform",
-    "DPT_SwinV2_B_384": "dpt_transform",
-    "DPT_SwinV2_L_384": "dpt_transform",
-    "DPT_SwinV2_B_512": "dpt_transform",
+    # Upstream `hubconf.transforms()` has one entry per backbone input size. Swin-V2-T used
+    # to be mapped to `dpt_transform` (384), which fed a 256-pixel checkpoint 384-pixel
+    # images and failed in the first forward with "Input image height (384) doesn't match
+    # model (256)" - the build succeeded, so only a forward pass shows it.
+    "DPT_SwinV2_T_256": "swin256_transform",
+    "DPT_SwinV2_B_384": "swin384_transform",
+    "DPT_SwinV2_L_384": "swin384_transform",
+    "DPT_SwinV2_B_512": "beit512_transform",
     "DPT_BEiT_L_384": "dpt_transform",
-    "DPT_BEiT_L_512": "dpt_transform",
+    "DPT_BEiT_L_512": "beit512_transform",
 }
 
 
@@ -101,10 +105,24 @@ class MiDaSAdapter(DepthAdapter):
         # `relative_position_index` in their released weights, and the hub entry point runs
         # its own `load_state_dict`, so a newer timm that no longer persists that buffer makes
         # the load fail from inside `torch.hub`. See `symtrs.model.depth._hub`.
-        with load_dropping_position_index():
-            return _torch.hub.load(
-                "intel-isl/MiDaS", hub_model, pretrained=pretrained, trust_repo=True
-            )
+        try:
+            with load_dropping_position_index():
+                return _torch.hub.load(
+                    "intel-isl/MiDaS", hub_model, pretrained=pretrained, trust_repo=True
+                )
+        except RuntimeError as exc:
+            # The Swin-V2 checkpoints predate timm's move of the patch-merging
+            # (`downsample.reduction`) between stages, so on timm >= 0.9 the load reports
+            # it missing. Renaming keys by hand would be a guess about which stage owns
+            # the weights; the environment MiDaS v3.1 was released against is the fix.
+            if "SwinV2" in hub_model and "downsample.reduction" in str(exc):
+                raise RuntimeError(
+                    f"{hub_model} does not load on this timm: its checkpoint was written "
+                    "for timm==0.6.12 (Swin-V2 patch-merging layout). Run it from the "
+                    "second environment (`.venv-zoe`, timm==0.6.12); `symtrs doctor` "
+                    f"reports the installed timm. Original error: {exc}"
+                ) from exc
+            raise
 
     @staticmethod
     def _load_transform(hub_model: str):

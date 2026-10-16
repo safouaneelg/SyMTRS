@@ -178,7 +178,7 @@ REGISTRY: Dict[str, ModelSpec] = {
         default_kwargs={"model_id": "depth-anything/DA3-LARGE"},
         aliases=("da3",),
         description="Depth Anything 3 Large, relative. The un-metriced DA3 checkpoint.",
-        requires=("transformers",),
+        requires=("torch", "depth_anything_3", "omegaconf", "addict", "safetensors"),
         protocol="relative",
         default_align="scale",
     ),
@@ -188,7 +188,7 @@ REGISTRY: Dict[str, ModelSpec] = {
         f"{_DEPTH}.da3:DepthAnything3Adapter",
         default_kwargs={"model_id": "depth-anything/DA3METRIC-LARGE", "metric": True},
         description="Depth Anything 3 Large, metric head (metres).",
-        requires=("transformers",),
+        requires=("torch", "depth_anything_3", "omegaconf", "addict", "safetensors"),
         protocol="metric",
         default_align="none",
     ),
@@ -233,16 +233,16 @@ REGISTRY: Dict[str, ModelSpec] = {
         "segmentation",
         f"{_SEMANTIC}.segformer:SegFormerSegmentation",
         default_kwargs={"variant": "b0"},
-        description="SegFormer with a MiT-B0 encoder (timm) and the SegFormer decode head.",
-        requires=("torch", "timm"),
+        description="SegFormer with a MiT-B0 encoder (transformers) and the SegFormer decode head.",
+        requires=("torch", "transformers"),
     ),
     "segformer_b1": _spec(
         "segformer_b1",
         "segmentation",
         f"{_SEMANTIC}.segformer:SegFormerSegmentation",
         default_kwargs={"variant": "b1"},
-        description="SegFormer with a MiT-B1 encoder (timm) and the SegFormer decode head.",
-        requires=("torch", "timm"),
+        description="SegFormer with a MiT-B1 encoder (transformers) and the SegFormer decode head.",
+        requires=("torch", "transformers"),
     ),
     "segformer_b2": _spec(
         "segformer_b2",
@@ -250,8 +250,8 @@ REGISTRY: Dict[str, ModelSpec] = {
         f"{_SEMANTIC}.segformer:SegFormerSegmentation",
         default_kwargs={"variant": "b2"},
         aliases=("segformer",),
-        description="SegFormer with a MiT-B2 encoder (timm) and the SegFormer decode head.",
-        requires=("torch", "timm"),
+        description="SegFormer with a MiT-B2 encoder (transformers) and the SegFormer decode head.",
+        requires=("torch", "transformers"),
     ),
     # ----------------------------------------------------------- domain adaptation
     "cyclegan": _spec(
@@ -275,6 +275,35 @@ REGISTRY: Dict[str, ModelSpec] = {
             "model_kwargs.direction."
         ),
         requires=("torch",),
+    ),
+    # ------------------------------------------------------------- shadow removal
+    # Like domain adaptation, the networks are upstream's (third_party/, pinned in
+    # third_party/PINS.md); `symtrs.model.shadow` stages the data, launches the worker that
+    # imports the class, and scores the result. Architecture arguments live in
+    # `symtrs/model/shadow/archs.py`, so this table only says that the models exist.
+    "shadowformer": _spec(
+        "shadowformer",
+        "shadow_removal",
+        "symtrs.model.shadow:ShadowRemoval",
+        description=(
+            "ShadowFormer (guolanqing/ShadowFormer), shadow-interaction transformer; takes the "
+            "derived shadow mask as a second input. 2048 only."
+        ),
+        requires=("torch", "timm", "einops"),
+    ),
+    "restormer": _spec(
+        "restormer",
+        "shadow_removal",
+        "symtrs.model.shadow:ShadowRemoval",
+        description="Restormer (swz30/Restormer), channel-attention transformer. 2048 only.",
+        requires=("torch", "einops"),
+    ),
+    "uformer": _spec(
+        "uformer",
+        "shadow_removal",
+        "symtrs.model.shadow:ShadowRemoval",
+        description="Uformer-B (ZhendongWang6/Uformer), windowed U-shaped transformer. 2048 only.",
+        requires=("torch", "timm", "einops"),
     ),
     # ------------------------------------------------------------ super-resolution
     # These four are not built by this package. `symtrs/legacy/superres/models/` owns the

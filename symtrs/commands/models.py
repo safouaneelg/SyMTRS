@@ -10,7 +10,7 @@ import sys
 def add_parser(subparsers) -> None:
     parser = subparsers.add_parser("models", help="list the model registry")
     parser.add_argument("--task", default=None,
-                        help="restrict to one task: depth, segmentation, domain_adapt")
+                        help="restrict to one task: depth, segmentation, domain_adapt, superresolution, shadow_removal")
     parser.add_argument("--available", action="store_true",
                         help="hide entries whose optional dependency is missing")
     parser.set_defaults(handler=_run)

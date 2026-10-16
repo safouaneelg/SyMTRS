@@ -14,28 +14,40 @@ root, and do not "fix" the code to make a dummy number look better.
 ## 1. What this is
 
 `symtrs` is the reproducibility package for the SyMTRS benchmark: a multi-task synthetic
-aerial dataset benchmark with four tasks.
+aerial dataset benchmark with five tasks.
 
 | Task | Registry models | Input → target |
 | --- | --- | --- |
 | `depth` | 11 (MiDaS ×5, ZoeDepth ×3, Depth Anything 3 ×2, Depth Pro) | `rgb_day{_lr}` → `depth{_lr}` |
 | `segmentation` | 6 (U-Net, DeepLabV3 ×2, SegFormer ×3) | `rgb_day{_lr}` → `semantic{_lr}` |
 | `domain_adapt` | 2 (CycleGAN, pix2pix) × 2 directions | `rgb_day` ⇄ `rgb_night`, native only |
+| `shadow_removal` | 3 (ShadowFormer, Restormer, Uformer), 2048 only | `rgb_day` → `rgb_noshadow` |
 | `superresolution` | 4 (SRCNN, autoencoder, SRGAN, SwinIR) × 4 scales | `rgb_day_lr/xN` → native `rgb_day` |
 
-Two of the four are not trained by this package at all and are driven as subprocesses:
+Two of the five are not trained by this package at all and are driven as subprocesses (shadow
+removal is a third case, below):
 
 - **domain adaptation** runs the vendored `pytorch-CycleGAN-and-pix2pix/` tree.
 - **super-resolution** runs the trainer at `symtrs/legacy/superres/train.py` (launched as
   `python -m symtrs.legacy.superres.train`), which predates the package and was moved
   inside it unchanged in 2026-10-15 — see `symtrs/legacy/README.md`.
 
+**Shadow removal** takes only the network *class* from three upstream checkouts under
+`third_party/` (pinned in `third_party/PINS.md`, cloned by `python scripts/fetch_third_party.py`,
+gitignored). `symtrs/model/shadow/` stages `rgb_day`/`rgb_noshadow` pairs plus a *derived* shadow
+mask (the dataset has none; `shadow.mask_threshold`/`mask_open`), runs one shared worker loop
+(`python -m symtrs.model.shadow.worker`, cwd = the upstream repo, so paths must be absolute),
+and scores the written PNGs with `symtrs/metrics/shadow.py` (PSNR/SSIM/LAB on all, shadow and
+non-shadow pixels). 2048 only; zero-shot is refused (the released weights are ISTD/SIDD, not
+SyMTRS); `shadow.init_weights` loads an upstream checkpoint. On a 12 GB card Restormer needs
+batch 1 (batch 2 spills).
+
 For both, `symtrs` owns exactly three things: the folder mapping, the launch, and folding the
 result into the `summary.json` shape every task writes. Do not reimplement their models in
 `symtrs/` — a second copy is a second thing to keep in step with the checkpoints.
 
 The CLI, the YAML loader and the Python SDK all build the same `RunConfig` and reach the
-same entry points, so all four tasks are reachable from all three:
+same entry points, so all five tasks are reachable from all three:
 `autoloader("srcnn").train(...)` launches that trainer and
 `autoloader("cyclegan").train(...)` the vendored upstream, exactly as `symtrs train` does.
 
@@ -74,7 +86,7 @@ changing anything.
    and `data.split` must differ from the evaluation splits. Never carve a validation set out
    of `train/` in code — upstream's loaders will happily do that if you let them (see §7).
 
-7. **`configs/` is generated output.** 88 of the YAML files are written by
+7. **`configs/` is generated output.** 91 of the YAML files are written by
    `configs/generate_grid.py` from one table per task. Change the table and re-run it;
    `python3 configs/generate_grid.py --check` and the test suite both fail if a committed
    file has drifted. `configs/train_sr_x2.yaml` is the one hand-written file (the
@@ -87,13 +99,20 @@ changing anything.
    other drift; `--check` verifies the tree is complete.
 
 9. **Dependencies stay inside torch + torchvision + timm + numpy/PIL/matplotlib/tqdm/yaml.**
-   Depth Anything 3 (`transformers`) and Depth Pro are optional extras, imported lazily
+   SegFormer (`transformers`), Depth Anything 3 (the `depth_anything_3` package, installed
+   with `pip install --no-deps depth-anything-3==0.1.1` because its wheel pins numpy<2) and
+   Depth Pro are optional extras, imported lazily
    inside the adapter that needs them so `symtrs doctor` can report the model as unavailable
    instead of the whole package failing to import.
 
 10. **timm cannot serve everything from one environment.** ZoeDepth's released weights need
-    `timm==0.6.12`; SegFormer needs a timm with `mit_b0`, which 0.6.12 does not have. MiDaS
-    works on both. `symtrs doctor` reports which side you are on. Plan on two environments.
+    `timm==0.6.12`, and so does the MiDaS Swin-V2 checkpoint (`midas_dpt_swin2_tiny`: timm
+    >= 0.9 moved the Swin-V2 patch-merging between stages, so its state_dict loads with a
+    missing `downsample.reduction` key). The other MiDaS models work on both. SegFormer is no
+    longer part of the conflict: timm has never shipped MiT, so its encoder comes from
+    `transformers` (`nvidia/mit-b{0,1,2}`). `symtrs doctor` reports which side you are on.
+    Plan on two environments (`.venv` and `.venv-zoe`); `scripts/run_queue.py` takes the
+    environment per job.
 
 ## 3. Setup
 
@@ -179,7 +198,7 @@ symtrs/
     semantic/          segmentation models
     domain/            the CycleGAN/pix2pix subprocess front-end + vendored-tree check
     superres/          the SR subprocess front-end
-configs/               88 generated YAMLs + generate_grid.py (see configs/README.md)
+configs/               91 generated YAMLs + generate_grid.py (see configs/README.md)
 symtrs/legacy/          the SR implementation and datasets: moved inside, byte-identical
 train_superresolution.py, dataloader/   shims that re-export from symtrs/legacy/
 pytorch-CycleGAN-and-pix2pix/                           vendored upstream, pinned

@@ -44,6 +44,7 @@ def _run(args: argparse.Namespace) -> int:
         ("default_align", "depth only: the alignment convention this model is compared under"),
         ("align", "depth only: the alignment actually used"),
         ("num_classes", "segmentation only: the size of the prediction head"),
+        ("label_step", "segmentation only: grey-level step of the masks (class = round(value / step))"),
         ("ignore_index", "segmentation only: the label excluded from the loss and metrics"),
         ("seed", "the seed the run started from"),
         ("tag", "best or last"),

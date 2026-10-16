@@ -25,6 +25,11 @@ COLUMN_ORDER = {
     "depth": ("rmse", "mae", "abs_rel", "sq_rel", "d1", "d2", "d3", "silog"),
     "segmentation": ("miou", "pixel_acc", "mean_acc", "mean_dice", "fwiou", "loss"),
     "domain_adapt": ("fid", "kid", "kid_std"),
+    "shadow_removal": (
+        "psnr", "ssim", "mae_lab", "rmse_lab",
+        "psnr_shadow", "ssim_shadow", "mae_lab_shadow", "rmse_lab_shadow",
+        "psnr_nonshadow", "ssim_nonshadow", "mae_lab_nonshadow", "rmse_lab_nonshadow",
+    ),
 }
 
 
@@ -35,7 +40,7 @@ def add_parser(subparsers) -> None:
     parser.add_argument("--model", default=None, help="only runs whose model key contains this")
     parser.add_argument("--resolution", type=int, default=None)
     parser.add_argument("--metric", default=None,
-                        help="restrict the columns to one metric group: depth, segmentation, domain_adapt")
+                        help="restrict the columns to one metric group: depth, segmentation, domain_adapt, shadow_removal")
     parser.add_argument("--format", choices=["markdown", "csv", "json"], default="markdown")
     parser.add_argument("--out", default=None, help="write to a file instead of stdout")
     parser.add_argument("--sort-by", dest="sort_by", default="", help="column to sort on")

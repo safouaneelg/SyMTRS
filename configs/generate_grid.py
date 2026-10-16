@@ -269,9 +269,9 @@ DEPTH_MODELS: List[DepthModel] = [
             "eval.align is none and the BErHu loss is used. Compare it against a relative model\n"
             "only after checking that both were scored under their own protocol.\n"
             "\n"
-            "This is the cell most sensitive to data.depth_scale: if the dataset stores depth in\n"
-            "millimetres or as uint16 centimetres, a model predicting metres is wrong by a\n"
-            "constant factor and every metric is bad in a way that looks like a broken model.\n"
+            "This is the cell most sensitive to data.depth_scale: the real EXRs store CENTIMETRES\n"
+            "(hence 0.01), and a model predicting metres scored against unconverted values is\n"
+            "wrong by a constant factor, which looks like a broken model.\n"
             "Check `symtrs inspect` reports the same unit for the native and the _lr depth\n"
             "folders before reading a single number from this file."
         ),
@@ -490,7 +490,7 @@ SEG_MODELS: List[SegModel] = [
             "affordable and still contain several whole objects at this ground sampling\n"
             "distance.\n"
             "\n"
-            "ce_dice rather than plain cross-entropy: with six classes over aerial imagery the\n"
+            "ce_dice rather than plain cross-entropy: with five classes over aerial imagery the\n"
             "rare ones (vehicle, water) can be a fraction of a percent of the pixels, and\n"
             "cross-entropy alone is free to ignore them. The Dice term is what pulls them up.\n"
             "`loss_kwargs.class_weights` is the other way to do it, but Dice needs no per-class\n"
@@ -502,8 +502,9 @@ SEG_MODELS: List[SegModel] = [
 #: Every segmentation file repeats this, because the numbers it names are recorded in the
 #: checkpoint and a wrong one silently invalidates a score.
 SEG_CLASS_NOTE = (
-    "Six classes: the dataset's semantic/ masks are graylevel PNGs, one byte per pixel, and\n"
-    "255 is the ignore index for pixels that belong to no class. Both numbers are written\n"
+    "Five classes (background, building, green, road, car): the dataset's semantic/ masks are\n"
+    "graylevel PNGs holding class_id * 63 (label_step), decoded as round(value / 63); a grey\n"
+    "level not near a multiple of 63 becomes the ignore index, 255. These numbers are written\n"
     "into the checkpoint, so a model trained here cannot be silently scored against a\n"
     "differently-labelled mask set later. If the mask generator ever writes 0 for \"no class\"\n"
     "instead of 255, change data.ignore_index in the config and not the metric - a metric\n"
@@ -697,6 +698,102 @@ SR_RESOLUTION_NOTE = {
 
 
 
+# ------------------------------------------------------------------ shadow removal
+
+
+class ShadowModel:
+    def __init__(
+        self,
+        key: str,
+        title: str,
+        repo: str,
+        patch: int,
+        batch: int,
+        lr: float,
+        weight_decay: float,
+        min_lr_ratio: float,
+        warmup_epochs: int,
+        tile_overlap: int,
+        note: str = "",
+    ) -> None:
+        self.key = key
+        self.title = title
+        self.repo = repo
+        self.patch = patch
+        self.batch = batch
+        self.lr = lr
+        self.weight_decay = weight_decay
+        self.min_lr_ratio = min_lr_ratio
+        self.warmup_epochs = warmup_epochs
+        self.tile_overlap = tile_overlap
+        self.note = note
+
+
+#: Optimiser settings are each paper's own shadow / restoration recipe (AdamW, Charbonnier
+#: loss, cosine decay). `patch` is the training crop and, because these networks are not
+#: trained above it, also the inference tile. The epoch budget is the same for all three so
+#: the comparison is not decided by who got longer; one epoch is one random crop from each
+#: of the 96 training images (24 iterations at batch 4).
+SHADOW_MODELS: List[ShadowModel] = [
+    ShadowModel(
+        "shadowformer",
+        "ShadowFormer",
+        "guolanqing/ShadowFormer",
+        patch=320,
+        batch=4,
+        lr=2.0e-4,
+        weight_decay=0.02,
+        min_lr_ratio=0.005,
+        warmup_epochs=3,
+        tile_overlap=64,
+        note=(
+            "ShadowFormer is the only one of the three that is shadow-aware: it takes a shadow\n"
+            "mask as a second input. The dataset has none, so the mask is derived at staging from\n"
+            "the rgb_day / rgb_noshadow pair (see `shadow:` below); the model is therefore given a\n"
+            "mask no real-world deployment would have unless a detector supplied it, and the\n"
+            "other two models are not. Read the comparison with that in mind. 320 px and a\n"
+            "window of 10 are upstream's own settings."
+        ),
+    ),
+    ShadowModel(
+        "restormer",
+        "Restormer",
+        "swz30/Restormer",
+        patch=256,
+        batch=1,
+        lr=3.0e-4,
+        weight_decay=1.0e-4,
+        min_lr_ratio=0.0033,
+        warmup_epochs=0,
+        tile_overlap=64,
+        note=(
+            "Restormer is a general restoration network with no notion of shadow: it sees the\n"
+            "shadowed image only. Its published recipe uses progressive patch sizes; this run\n"
+            "uses one fixed 256 px crop, which is the first stage of that recipe.\n"
+            "Batch 1: on a 12 GB card batch 2 at 256 px peaks at 12.4 GB and spills (8.7 s/it vs\n"
+            "0.33 s/it); raise it on a larger GPU."
+        ),
+    ),
+    ShadowModel(
+        "uformer",
+        "Uformer",
+        "ZhendongWang6/Uformer",
+        patch=256,
+        batch=4,
+        lr=2.0e-4,
+        weight_decay=0.02,
+        min_lr_ratio=0.005,
+        warmup_epochs=3,
+        tile_overlap=64,
+        note=(
+            "Uformer-B, the configuration of Uformer's own shadow-removal experiments (windowed\n"
+            "attention with the multi-scale modulator), at its default 256 px crop. Like\n"
+            "Restormer it sees the shadowed image only."
+        ),
+    ),
+]
+
+
 def _banner(parts: List[str]) -> str:
     """Comment a block: every line becomes `# ...`, blank lines become a bare `#`.
 
@@ -764,9 +861,11 @@ def depth_yaml(model: DepthModel, resolution: int) -> str:
         "  split: train",
         "  val_split: val",
         "  test_split: test",
-        "  # Metres are what the metric models predict. Check the raw encoding before trusting",
-        "  # it: 0.01 for millimetres stored as uint16, 1.0 for metres.",
-        "  depth_scale: 1.0",
+        "  # Metres are what the metric models predict. The real EXRs store CENTIMETRES (hence",
+        "  # 0.01); `symtrs doctor --data-root` prints the median in metres to check it.",
+        "  depth_scale: 0.01",
+        "  # Metres, after depth_scale: the sky is a huge value, not zero, so it is cut here.",
+        "  max_depth: 1000",
         "  depth_channel: 0",
         "  depth_backend: auto",
         "  num_workers: 8",
@@ -871,7 +970,9 @@ def segmentation_yaml(model: SegModel, resolution: int) -> str:
         "  split: train",
         "  val_split: val",
         "  test_split: test",
-        "  num_classes: 6",
+        "  num_classes: 5",
+        "  # Masks hold class_id * 63 as 8-bit gray (background, building, green, road, car).",
+        "  label_step: 63",
         "  # Pixels labelled 255 are excluded from both the loss and the confusion matrix.",
         "  ignore_index: 255",
         "  num_workers: 8",
@@ -1115,6 +1216,77 @@ def superresolution_yaml(model: SuperResModel, resolution: int) -> str:
     return _render(header, body)
 
 
+def shadow_yaml(model: ShadowModel) -> str:
+    where = f"configs/shadow_removal/{model.key}.yaml"
+    header = [
+        f"{model.title}: remove the shadows from rgb_day, scored against rgb_noshadow (2048).",
+        "",
+        f"    symtrs train {where} --data-root /data/SyMTRS",
+        f"    symtrs train {where} --data-root /data/SyMTRS --set shadow.iterations=500",
+        f"    symtrs eval  {where} --data-root /data/SyMTRS --eval-split test",
+        "",
+    ]
+    header += model.note.split("\n") + [""]
+    header += [
+        f"This is not a SyMTRS model. The network class is upstream {model.repo}, cloned at the",
+        "revision in third_party/PINS.md by `python scripts/fetch_third_party.py` (the clones are",
+        "not committed). SyMTRS stages the data, runs one shared training loop and one shared",
+        "tiled inference around the upstream class, and scores the PNGs it writes with",
+        "symtrs/metrics/shadow.py - the same numbers for all three models:",
+        "PSNR, SSIM and LAB error on all pixels, in the shadow region and outside it.",
+        "",
+        "Native resolution only: rgb_noshadow has no downsampled twin. The training budget is",
+        "train.epochs, or shadow.iterations when positive (`--set shadow.iterations=500` is a",
+        "validation-sized run). The weights are trained from scratch unless",
+        "shadow.init_weights points at an upstream checkpoint.",
+        "",
+    ]
+    body = [
+        "task: shadow_removal",
+        f"model: {model.key}",
+        "resolution: 2048",
+        "seed: 42",
+        "",
+        "data:",
+        "  root: /data/SyMTRS",
+        "  split: train",
+        "  val_split: val",
+        "  test_split: test",
+        "",
+        "train:",
+        "  epochs: 500",
+        f"  batch_size: {model.batch}",
+        f"  lr: {_float(model.lr)}",
+        f"  weight_decay: {_float(model.weight_decay)}",
+        "  optim: adamw",
+        "  sched: cosine",
+        f"  warmup_epochs: {model.warmup_epochs}",
+        f"  min_lr_ratio: {_float(model.min_lr_ratio)}",
+        f"  patch_size: {model.patch}",
+        "  amp: true",
+        "  log_every: 50",
+        "  device: cuda",
+        "",
+        "eval:",
+        "  # The inference tile is the training patch: none of these networks was trained",
+        "  # above it, and a whole 2048 px image does not fit in 12 GB.",
+        f"  tile_size: {model.patch}",
+        f"  tile_overlap: {model.tile_overlap}",
+        "  num_visualizations: 4",
+        "",
+        "shadow:",
+        "  # The dataset has no shadow masks; they are derived from the rgb_day / rgb_noshadow",
+        "  # pair (symtrs/metrics/shadow.py). Changing these changes the regional metrics.",
+        "  mask_threshold: 0.1",
+        "  mask_open: 3",
+        "  iterations: 0",
+        "  val_every: 500",
+        "  val_crops: 32",
+        '  init_weights: ""',
+    ]
+    return _render(header, body)
+
+
 def _float(value: float) -> str:
     """`1.0e-5` rather than `1e-05`: the same value, and it reads like the other configs."""
     text = f"{value:.1e}"
@@ -1156,6 +1328,8 @@ def build_tree() -> Dict[Path, str]:
             scale = SCALE_FACTOR[resolution]
             path = HERE / "superresolution" / f"{model.key}_x{scale}.yaml"
             files[path] = superresolution_yaml(model, resolution)
+    for model in SHADOW_MODELS:
+        files[HERE / "shadow_removal" / f"{model.key}.yaml"] = shadow_yaml(model)
     return files
 
 
@@ -1196,11 +1370,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     seg = count("segmentation")
     domain = count("domain_adapt")
     sr = count("superresolution")
+    shadow = count("shadow_removal")
     print(f"wrote {len(files)} configs")
     print(f"  depth           {depth:3}  ({len(DEPTH_MODELS)} models x {len(RESOLUTIONS)} resolutions)")
     print(f"  segmentation    {seg:3}  ({len(SEG_MODELS)} models x {len(RESOLUTIONS)} resolutions)")
     print(f"  domain_adapt    {domain:3}  ({len(DOMAIN_MODELS)} models x {len(DOMAIN_DIRECTIONS)} directions)")
     print(f"  superresolution {sr:3}  ({len(SUPERRES_MODELS)} models x {len(RESOLUTIONS)} scales)")
+    print(f"  shadow_removal  {shadow:3}  ({len(SHADOW_MODELS)} models, native only)")
     return 0
 
 

@@ -6,8 +6,14 @@
 
 Produces exactly the folder structure the real dataset uses:
 
-    <out>/<split>/rgb_day/  rgb_night/  depth/  semantic/
+    <out>/<split>/rgb_day/  rgb_night/  rgb_noshadow/  depth/  semantic/
     <out>/<split>/rgb_day_lr/{x2,x4,x8}/  depth_lr/...  semantic_lr/...
+
+`rgb_night` and `rgb_noshadow` are native-only, as in the real data. File names are the
+real ones, `{rgb_day|rgb_night|rgb_noshadow|seg_day|depth_day}_{pixels}_{key}`; RGB
+files are RGBA PNGs; masks hold `class_id * 63` with 5 classes; depth is in CENTIMETRES
+with sky as a huge value. Every default in `symtrs/config.py` therefore works on the dummy
+and on the real dataset alike - that equivalence is what a smoke run on the dummy is for.
 
 so that every code path - resolution selection, EXR reading, class remapping, the
 trainer, the metrics, `symtrs tables` - can be exercised and debugged before the real
@@ -29,8 +35,23 @@ from typing import Dict, Tuple
 
 import numpy as np
 
-#: The six SyMTRS classes, in label order.
-CLASSES: Tuple[str, ...] = ("terrain", "road", "building", "vegetation", "water", "vehicle")
+#: The five SyMTRS classes, in label order, and the grey-level step the masks use.
+CLASSES: Tuple[str, ...] = ("background", "building", "green", "road", "car")
+LABEL_STEP = 63
+
+#: The scene is built with six internal ids (terrain, road, building, vegetation, water,
+#: vehicle); this table maps them to the dataset's five. Water has no class of its own in
+#: the real labels and is background there too.
+_INTERNAL_TO_CLASS = np.array([0, 3, 1, 2, 0, 4], dtype=np.uint8)
+
+#: Depth is written in centimetres, as the real EXRs are, so the default
+#: `data.depth_scale: 0.01` is right for both. The sky is a huge finite value, as in the
+#: real renders, so `data.max_depth` is exercised too (NaN would hide that).
+CM_PER_METRE = 100.0
+SKY_CM = 1.0e7
+
+#: Real file-name key, varied by scene index only in the location counter.
+_KEY = "loc{index:03d}_rot152deg_h00_x-049013_y+035369_z+009230"
 
 #: Native resolution -> the scale factor of its `_lr` folders.
 LR_SCALES = {"x2": 2, "x4": 4, "x8": 8}
@@ -131,12 +152,24 @@ def _scene(size: int, generator: np.random.Generator) -> Dict[str, np.ndarray]:
     return {"depth": depth, "classes": classes, "columns": columns}
 
 
-def _render(scene: Dict[str, np.ndarray], night: bool, generator: np.random.Generator) -> np.ndarray:
-    """RGB for one illumination, from the same geometry."""
+def _render(
+    scene: Dict[str, np.ndarray],
+    night: bool,
+    generator: np.random.Generator,
+    shadows: bool = True,
+    noise: np.ndarray = None,
+) -> np.ndarray:
+    """RGBA for one illumination, from the same geometry.
+
+    `shadows=False` is the `rgb_noshadow` twin of the day image: identical (same `noise`)
+    except for the darkened strip cast beside each building.
+    """
     size = scene["depth"].shape[0]
     classes = scene["classes"]
     depth = scene["depth"]
 
+    if noise is None:
+        noise = generator.normal(0.0, 3.0, (size, size, 3))
     rgb = np.zeros((size, size, 3), dtype=np.float32)
     for label, colour in CLASS_COLORS.items():
         mask = classes == label
@@ -160,9 +193,16 @@ def _render(scene: Dict[str, np.ndarray], night: bool, generator: np.random.Gene
         rgb *= 0.6 + 0.4 * haze[..., None]
     else:
         rgb *= 0.55 + 0.45 * haze[..., None]
+        if shadows:
+            shift = max(2, size // 32)
+            cast = np.roll(classes == 2, shift, axis=1) & (classes != 2)
+            rgb[cast] *= 0.6
 
-    rgb += generator.normal(0.0, 3.0, rgb.shape)
-    return np.clip(rgb, 0, 255).astype(np.uint8)
+    rgb += noise
+    rgba = np.empty((size, size, 4), dtype=np.uint8)
+    rgba[..., :3] = np.clip(rgb, 0, 255).astype(np.uint8)
+    rgba[..., 3] = 255  # the real PNGs are RGBA; the loaders must drop this channel
+    return rgba
 
 
 def _resize(array: np.ndarray, size: int, nearest: bool) -> np.ndarray:
@@ -184,9 +224,9 @@ def _resize(array: np.ndarray, size: int, nearest: bool) -> np.ndarray:
 
 def _write_depth(array: np.ndarray, path: Path, fmt: str) -> None:
     if fmt == "npy":
-        # NaN is kept rather than zeroed: the reader and the metrics both treat a
-        # non-finite depth as invalid, and writing 0 would make "invalid" and "at the
-        # camera" indistinguishable.
+        # Non-finite values are kept as given: the reader and the metrics both treat them
+        # as invalid, and writing 0 would make "invalid" and "at the camera"
+        # indistinguishable. `_write_split` has already replaced the sky by SKY_CM.
         np.save(path.with_suffix(".npy"), array.astype(np.float32))
         return
 
@@ -194,10 +234,14 @@ def _write_depth(array: np.ndarray, path: Path, fmt: str) -> None:
         import OpenEXR
 
         header = OpenEXR.Header(array.shape[1], array.shape[0])
-        header["channels"] = {"R": OpenEXR.Imath.Channel(OpenEXR.Imath.UINT)}
+        # One float32 channel "Y", like the real files (it was UINT, which stored the
+        # float bytes under the wrong type).
+        header["channels"] = {
+            "Y": OpenEXR.Imath.Channel(OpenEXR.Imath.PixelType(OpenEXR.Imath.PixelType.FLOAT))
+        }
         filled = np.nan_to_num(array, nan=0.0).astype(np.float32)
         file = OpenEXR.OutputFile(str(path.with_suffix(".exr")), header)
-        file.writePixels({"R": filled.tobytes()})
+        file.writePixels({"Y": filled.tobytes()})
         file.close()
     except ImportError as exc:
         raise ImportError(
@@ -218,6 +262,7 @@ def _write_split(
     directories = {
         "rgb_day": root / split / "rgb_day",
         "rgb_night": root / split / "rgb_night",
+        "rgb_noshadow": root / split / "rgb_noshadow",
         "depth": root / split / "depth",
         "semantic": root / split / "semantic",
     }
@@ -226,24 +271,35 @@ def _write_split(
 
     if with_lr:
         for suffix in LR_SCALES:
-            for name in directories:
+            # rgb_night and rgb_noshadow have no downsampled twin in the real data.
+            for name in ("rgb_day", "depth", "semantic"):
                 (root / split / f"{name}_lr" / suffix).mkdir(parents=True, exist_ok=True)
 
     from PIL import Image
 
+    def native(prefix: str, key: str, ext: str) -> str:
+        return f"{prefix}_{size}_{key}{ext}"
+
     for index in range(count):
         scene = _scene(size, generator)
-        stem = f"{index:06d}"
+        key = _KEY.format(index=index)
 
-        day = _render(scene, night=False, generator=generator)
+        grain = generator.normal(0.0, 3.0, (size, size, 3))
+        day = _render(scene, night=False, generator=generator, noise=grain)
+        noshadow = _render(scene, night=False, generator=generator, shadows=False, noise=grain)
         night = _render(scene, night=True, generator=generator)
-        labels = scene["classes"]
-        depth = scene["depth"]
+        labels = _INTERNAL_TO_CLASS[scene["classes"]] * np.uint8(LABEL_STEP)
+        # Sky (NaN above the horizon) -> a huge finite value; metres -> centimetres.
+        depth = np.where(np.isfinite(scene["depth"]), scene["depth"] * CM_PER_METRE, SKY_CM)
+        depth = depth.astype(np.float32)
 
-        Image.fromarray(day).save(directories["rgb_day"] / f"{stem}.png")
-        Image.fromarray(night).save(directories["rgb_night"] / f"{stem}.png")
-        Image.fromarray(labels).save(directories["semantic"] / f"{stem}.png")
-        _write_depth(depth, directories["depth"] / f"{stem}.exr", fmt)
+        Image.fromarray(day).save(directories["rgb_day"] / native("rgb_day", key, ".png"))
+        Image.fromarray(night).save(directories["rgb_night"] / native("rgb_night", key, ".png"))
+        Image.fromarray(noshadow).save(
+            directories["rgb_noshadow"] / native("rgb_noshadow", key, ".png")
+        )
+        Image.fromarray(labels).save(directories["semantic"] / native("seg_day", key, ".png"))
+        _write_depth(depth, directories["depth"] / native("depth_day", key, ".exr"), fmt)
 
         if not with_lr:
             continue
@@ -252,17 +308,15 @@ def _write_split(
             if target < 16:
                 continue
             Image.fromarray(_resize(day, target, nearest=False)).save(
-                root / split / "rgb_day_lr" / suffix / f"{stem}.png"
-            )
-            Image.fromarray(_resize(night, target, nearest=False)).save(
-                root / split / "rgb_night_lr" / suffix / f"{stem}.png"
+                root / split / "rgb_day_lr" / suffix / f"rgb_day_{target}_{key}.png"
             )
             Image.fromarray(_resize(labels, target, nearest=True)).save(
-                root / split / "semantic_lr" / suffix / f"{stem}.png"
+                root / split / "semantic_lr" / suffix / f"seg_day_{target}_{key}.png"
             )
+            # Picked, not averaged: averaging across the sky edge would invent depths.
             _write_depth(
-                _resize(depth, target, nearest=False),
-                root / split / "depth_lr" / suffix / f"{stem}.exr",
+                _resize(depth, target, nearest=True),
+                root / split / "depth_lr" / suffix / f"depth_day_{target}_{key}.exr",
                 fmt,
             )
 
@@ -285,8 +339,9 @@ def _run(args: argparse.Namespace) -> int:
         "real_dataset_native_resolution": 2048,
         "lr_scales": LR_SCALES,
         "depth_format": args.format,
-        "depth_units": "metres",
-        "depth_invalid": "NaN, and any value <= 0",
+        "depth_units": "centimetres",
+        "depth_invalid": "non-finite, <= 0, or sky (a huge value; set data.max_depth)",
+        "label_step": LABEL_STEP,
         "num_classes": len(CLASSES),
         "class_names": list(CLASSES),
         "splits": {name: count for name, count in splits.items() if count > 0},

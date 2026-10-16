@@ -323,18 +323,57 @@ def _print_drift(root: Path, report: Dict[str, List[str]], revision: str) -> Non
 # ------------------------------------------------------------------- staging
 
 
+def link_file(source: Path, destination: Path) -> str:
+    """Make `destination` point at `source`; return how ("symlink", "hardlink", "copy").
+
+    A symlink is preferred (nothing is copied), but on Windows `os.symlink` needs Developer
+    Mode or an elevated shell and fails with `OSError` otherwise. A hardlink costs no disk
+    either but only works within one volume; across volumes the last resort is a real copy.
+    The fallbacks are silent to upstream - it just opens files - and reported by the caller,
+    so a surprising disk bill has a visible cause.
+    """
+    if destination.is_symlink() or destination.exists():
+        destination.unlink()
+    try:
+        destination.symlink_to(source)
+        return "symlink"
+    except (OSError, NotImplementedError):
+        pass
+    try:
+        os.link(source, destination)
+        return "hardlink"
+    except OSError:
+        pass
+    shutil.copy2(source, destination)
+    return "copy"
+
+
+def staged_name(path: Path) -> str:
+    """The name a file is staged under: its pairing key plus its extension.
+
+    pix2pix's `AlignedDataset` pairs A and B by *exact basename*, but the real files are
+    `rgb_day_2048_<key>.png` and `rgb_night_2048_<key>.png`. Staging both under `<key>.png`
+    makes the names agree without touching the vendored tree.
+    """
+    from symtrs.data.io import normalize_stem
+
+    return normalize_stem(path.stem) + path.suffix.lower()
+
+
 def build_staging_dir(
     root: str,
     run_dir: str,
     split: str = "train",
     require_all: bool = False,
 ) -> Path:
-    """Symlink `trainA/trainB/valA/valB/testA/testB` to the real split folders.
+    """Stage `trainA/trainB/valA/valB/testA/testB` as folders of per-file links.
 
     `dataroot` is then the staging directory and upstream's `--phase` selects the split
-    as it always did. Symlinks mean no image is copied, and because the directories
-    exist, upstream never reaches its auto-splitting branch.
+    as it always did. Links mean (normally) no image is copied, and because the
+    directories exist, upstream never reaches its auto-splitting branch. Each file is linked
+    under its normalised key (`staged_name`) so day and night names match for pix2pix.
     """
+    from symtrs.data.io import list_images
     from symtrs.data.splits import resolve_split_dirs
 
     staging = Path(run_dir) / "staging" / split
@@ -349,22 +388,55 @@ def build_staging_dir(
             print(f"[symtrs] staging skipped split {name!r}: {exc}")
             continue
 
+        keys = {}
         for domain, folder in (("A", directories.day), ("B", directories.night)):
             link = staging / f"{name}{domain}"
             if folder is None:
                 print(f"[symtrs] {name}: no folder for domain {domain}; skipping")
-                if link.is_symlink():
-                    link.unlink()
                 continue
             if not Path(folder).is_dir():
                 raise UpstreamError(f"the {name} split has no {folder}")
-            if link.is_symlink() or link.exists():
+            # An earlier run staged this as a directory symlink (or junction); a real
+            # directory of links is rebuilt from scratch.
+            if link.is_symlink():
                 link.unlink()
-            # Absolute target: the run directory is typically moved (or written to
-            # shared storage and read from a different mount) after training, and a
-            # relative link computed from here would break the moment it is.
-            link.symlink_to(Path(folder).resolve())
-            print(f"[symtrs] staged {link.name} -> {folder}")
+            elif link.is_dir():
+                shutil.rmtree(link)
+            link.mkdir(parents=True)
+
+            methods = set()
+            names = set()
+            for image in list_images(folder):
+                target = staged_name(image)
+                # Absolute source: the run directory is typically moved (or written to
+                # shared storage and read from a different mount) after training, and a
+                # relative link would break the moment it is.
+                methods.add(link_file(image.resolve(), link / target))
+                names.add(target)
+            keys[domain] = names
+            print(
+                f"[symtrs] staged {link.name}: {len(names)} files from {folder} "
+                f"({'/'.join(sorted(methods)) or 'empty'})"
+            )
+            if methods - {"symlink"}:
+                print(
+                    "[symtrs]   symlinks are unavailable here (on Windows: enable Developer "
+                    "Mode); fell back to hardlinks/copies, which behave the same for upstream"
+                )
+
+        if len(keys) == 2:
+            shared = keys["A"] & keys["B"]
+            if not shared:
+                raise UpstreamError(
+                    f"the {name} split has no day/night pair with a matching name "
+                    f"({len(keys['A'])} day, {len(keys['B'])} night files); run "
+                    "`symtrs doctor --data-root <dataset root>` for a coverage report"
+                )
+            if len(shared) < len(keys["A"]) or len(shared) < len(keys["B"]):
+                print(
+                    f"[symtrs] WARNING: {name}: only {len(shared)} names appear in both "
+                    "domains; pix2pix (aligned) will fail on the others"
+                )
 
     return staging
 

@@ -1,7 +1,7 @@
 """Resolution-to-directory mapping for the revised SyMTRS layout.
 
     <root>/train/ | val/ | test/
-        rgb_day/            rgb_night/
+        rgb_day/            rgb_night/          rgb_noshadow/
         rgb_day_lr/x2|x4|x8
         depth/              depth_lr/x2|x4|x8
         semantic/           semantic_lr/x2|x4|x8
@@ -14,8 +14,8 @@ about, and maps to a directory suffix:
      512 -> _lr/x4
      256 -> _lr/x8
 
-`rgb_night` has no low-resolution variant, which is why domain adaptation is
-2048-only.
+`rgb_night` and `rgb_noshadow` have no low-resolution variant, which is why domain
+adaptation (and any shadow-removal task) is 2048-only.
 
 Every accessor raises `MissingDirectoryError` naming the exact path it looked for.
 There is deliberately no fallback to a different resolution: silently training at
@@ -65,7 +65,11 @@ def scale_for_resolution(resolution: int) -> int:
 def subdir_for(role: str, resolution: int) -> str:
     """Relative subdirectory for `role` at `resolution`.
 
-    role is one of "day", "night", "depth", "semantic".
+    role is one of "day", "night", "noshadow", "depth", "semantic".
+
+    `noshadow` exists at native resolution only and raises below it: there is no
+    downsampled shadow-free imagery, and approximating it would change what a
+    shadow-removal number means.
     """
     suffix = RESOLUTION_TO_SUFFIX.get(resolution)
     if suffix is None and resolution not in RESOLUTION_TO_SUFFIX:
@@ -77,11 +81,18 @@ def subdir_for(role: str, resolution: int) -> str:
         return "rgb_day" if suffix is None else f"rgb_day_lr/{suffix}"
     if role == "night":
         return "rgb_night"  # native only
+    if role == "noshadow":
+        if suffix is not None:
+            raise ValueError(
+                f"role 'noshadow' exists at native resolution only (2048), not "
+                f"{resolution}: there is no rgb_noshadow_lr folder. Use --resolution 2048."
+            )
+        return "rgb_noshadow"
     if role == "depth":
         return "depth" if suffix is None else f"depth_lr/{suffix}"
     if role == "semantic":
         return "semantic" if suffix is None else f"semantic_lr/{suffix}"
-    raise ValueError(f"unknown role {role!r}; expected day, night, depth or semantic")
+    raise ValueError(f"unknown role {role!r}; expected day, night, noshadow, depth or semantic")
 
 
 @dataclass(frozen=True)
@@ -89,7 +100,7 @@ class SplitDirs:
     """Resolved directory paths for one (split, resolution) pair.
 
     A field is None when that role does not exist at this resolution, which is only
-    ever true of `night` below 2048.
+    ever true of `night` and `noshadow` below 2048.
     """
 
     root: Path
@@ -99,6 +110,7 @@ class SplitDirs:
     night: Optional[Path]
     depth: Optional[Path]
     semantic: Optional[Path]
+    noshadow: Optional[Path] = None
 
     @property
     def scale(self) -> int:
@@ -112,7 +124,8 @@ class SplitDirs:
         """The path for `role`, raising if the directory is missing on disk."""
         path = getattr(self, role, None)
         if path is None:
-            raise MissingDirectoryError(role, self.root / subdir_for(role, self.resolution), self.resolution, self.split)
+            # subdir_for raises its own ValueError for a native-only role below 2048.
+            raise MissingDirectoryError(role, self.root / self.split / subdir_for(role, self.resolution), self.resolution, self.split)
         if not path.is_dir():
             raise MissingDirectoryError(role, path, self.resolution, self.split)
         return path
@@ -121,6 +134,7 @@ class SplitDirs:
         return {
             "day": self.day,
             "night": self.night,
+            "noshadow": self.noshadow,
             "depth": self.depth,
             "semantic": self.semantic,
         }
@@ -147,12 +161,17 @@ def resolve_split_dirs(root: str, split: str, resolution: int) -> SplitDirs:
 
     night = (split_root / subdir_for("night", resolution)) if resolution == max(RESOLUTIONS) else None
 
+    noshadow = (
+        (split_root / subdir_for("noshadow", resolution)) if resolution == max(RESOLUTIONS) else None
+    )
+
     return SplitDirs(
         root=root_path,
         split=split,
         resolution=resolution,
         day=split_root / subdir_for("day", resolution),
         night=night,
+        noshadow=noshadow,
         depth=split_root / subdir_for("depth", resolution),
         semantic=split_root / subdir_for("semantic", resolution),
     )
@@ -177,6 +196,7 @@ def available_resolutions(root: str, split: str = "train") -> Tuple[int, ...]:
 def iter_roles() -> Iterator[str]:
     yield "day"
     yield "night"
+    yield "noshadow"
     yield "depth"
     yield "semantic"
 

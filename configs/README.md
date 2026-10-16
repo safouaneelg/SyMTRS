@@ -11,7 +11,8 @@ configs/
   segmentation/<...>/         <model>_<resolution>.yaml    6 models x 4 resolutions
   domain_adapt/               <model>_<direction>.yaml     2 models x 2 directions
   superresolution/            <model>_x<scale>.yaml        4 models x 4 scales
-  generate_grid.py            the tables these 88 files are expanded from
+  shadow_removal/             <model>.yaml                 3 models, 2048 only
+  generate_grid.py            the tables these 91 files are expanded from
 ```
 
 ```bash
@@ -47,7 +48,7 @@ control row - LR and HR are the same native folder - and not super-resolution.
 ## Regenerating
 
 `generate_grid.py` holds the model tables (protocol, loss, batch size, memory posture, the
-prose) and writes all 88 files. Change a shared hyper-parameter there rather than in 44
+prose) and writes all 91 files. Change a shared hyper-parameter there rather than in 44
 placeholders, then:
 
 ```bash

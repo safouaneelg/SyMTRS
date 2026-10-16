@@ -41,8 +41,16 @@ OPTIONAL = {
     # checkpoints come from torch.hub, whose `hubconf.py` reaches `import timm` through
     # `midas.blocks` -> `backbones.beit` - so it is a load-time requirement of the published
     # weights, not only of our own SegFormer encoders.
-    "timm": ("MiDaS, ZoeDepth and SegFormer", "timm"),
-    "transformers": ("Depth Anything 3", "da3"),
+    "timm": ("MiDaS and ZoeDepth", "timm"),
+    # SegFormer's MiT encoder comes from transformers: timm has never shipped MiT.
+    "transformers": ("SegFormer encoders", "segformer"),
+    # DA3 checkpoints are `depth_anything_3` object graphs, not transformers models. The
+    # package is installed with `pip install --no-deps depth-anything-3==0.1.1` (its wheel
+    # pins numpy<2 and lists 3D-export packages the adapter never imports).
+    "depth_anything_3": ("Depth Anything 3 (pip install --no-deps depth-anything-3==0.1.1)", "da3"),
+    "omegaconf": ("Depth Anything 3 config", "da3"),
+    "addict": ("Depth Anything 3 outputs", "da3"),
+    "safetensors": ("Depth Anything 3 weights", "da3"),
     "depth_pro": ("Apple Depth Pro", "depthpro"),
     # The vendored CycleGAN/pix2pix `train.py` imports both at module level (through
     # `util/visualizer.py`), before it parses an option, so a domain-adaptation run
@@ -119,10 +127,15 @@ def _installed(module: str) -> bool:
 #: vendored backbone were built against. Measured: `ZoeD_N` builds, runs and predicts under
 #: 0.6.12; under 0.9.16 and 1.0.30 the checkpoint's `relative_position_index` buffers are no
 #: longer persisted and the forward then raises `AttributeError: 'Block' object has no
-#: attribute 'drop_path'`. SegFormer is the other way round - `mit_b0` does not exist in
-#: 0.6.12 - so the two cannot share one environment, which is worth knowing before a
-#: resolution x model grid starts downloading weights.
+#: attribute 'drop_path'`. The MiDaS v3.1 Swin-V2 checkpoint is from the same era: under
+#: timm 1.0.30 it fails with `Missing key(s) ... pretrained.model.layers.3.downsample.
+#: reduction.weight` because timm moved the Swin-V2 patch-merging between stages; under 0.6.12
+#: it loads. (SegFormer used to be the other half of this conflict; its encoder now comes
+#: from transformers, so only these models pin timm.)
 _ZOEDEPTH_TIM_PIN = "0.6.12"
+
+#: Registry keys that must run in the timm==0.6.12 environment (`.venv-zoe`).
+TIMM_PINNED_KEYS = ("zoedepth_n", "zoedepth_k", "zoedepth_nk", "midas_dpt_swin2_tiny")
 
 
 def _timm_notes() -> List[str]:
@@ -140,18 +153,10 @@ def _timm_notes() -> List[str]:
 
     if version != _ZOEDEPTH_TIM_PIN:
         notes.append(
-            f"timm {version} is installed, but the ZoeDepth adapters need "
-            f"timm=={_ZOEDEPTH_TIM_PIN} (ZoeDepth's own environment.yml pin). They are "
-            "verified working there and verified failing on 0.9.16 and 1.0.30."
-        )
-    try:
-        has_mit = "mit_b0" in timm.list_models()
-    except Exception:  # noqa: BLE001
-        has_mit = True
-    if not has_mit:
-        notes.append(
-            f"timm {version} has no `mit_b0`, so the SegFormer adapters cannot be built. "
-            "SegFormer and ZoeDepth need separate environments."
+            f"timm {version} is installed, but {', '.join(TIMM_PINNED_KEYS)} need "
+            f"timm=={_ZOEDEPTH_TIM_PIN} (ZoeDepth's own environment.yml pin; MiDaS "
+            "Swin-V2's checkpoint layout). They are verified working there and verified "
+            "failing on 0.9.16 and 1.0.30; run them from the second environment."
         )
     return notes
 
@@ -159,6 +164,8 @@ def _timm_notes() -> List[str]:
 def _report_dataset(root: str, backend: str) -> None:
     print("dataset")
     from symtrs.data.exr import read_depth_file
+    import numpy as np
+
     from symtrs.data.io import list_images
     from symtrs.data.splits import available_resolutions, describe_layout, resolve_split_dirs
 
@@ -183,24 +190,64 @@ def _report_dataset(root: str, backend: str) -> None:
     print(f"  rgb_day files    {len(rgb)}")
     print(f"  depth files      {len(depth_files)}")
     print(f"  semantic files   {len(labels)}")
+    for role in ("night", "noshadow"):
+        folder = getattr(dirs, role)
+        count = len(list_images(folder)) if folder is not None and folder.is_dir() else 0
+        print(f"  rgb_{role:<9}   {count}")
+
+    # Pairing is by the key after the `rgb_day_2048_`-style prefix. Say how well each
+    # modality lines up with rgb_day here, so a naming mismatch is a number in this report
+    # and not a training run that finds no data.
+    from symtrs.data.depth_dataset import depth_coverage
+    from symtrs.data.io import coverage_report
+    from symtrs.data.semantic_dataset import semantic_coverage
+
+    coverage = {"depth": depth_coverage(root), "semantic": semantic_coverage(root)}
+    for role in ("night", "noshadow"):
+        folder = getattr(dirs, role)
+        if folder is not None and folder.is_dir():
+            coverage[role] = coverage_report(rgb, list_images(folder))
+    for name, report in coverage.items():
+        flag = "" if report["matched"] == report["primary"] == report["secondary"] else "  <-- MISMATCH"
+        print(
+            f"  pairing {name:<9}rgb_day {report['primary']} / {name} {report['secondary']} "
+            f"-> matched {report['matched']}{flag}"
+        )
+        if flag and report["primary_only_examples"]:
+            print(f"    only in rgb_day: {report['primary_only_examples'][:3]}")
+
+    if labels:
+        from symtrs.data.semantic_dataset import detect_class_values
+
+        grey = detect_class_values(root)
+        print(f"  semantic values  {dict(sorted(grey.items()))} (grey levels; expect 0,63,126,189,252)")
 
     if depth_files:
         try:
             array = read_depth_file(depth_files[0], backend=backend)
-            finite = array[array > 0]
-            import numpy as np
-
+            finite = array[np.isfinite(array) & (array > 0)]
             print(
                 f"  depth sample     {depth_files[0].name}: shape={array.shape} "
                 f"dtype={array.dtype} min={float(finite.min()) if finite.size else 'n/a'} "
                 f"median={float(np.median(finite)) if finite.size else 'n/a'} "
                 f"max={float(finite.max()) if finite.size else 'n/a'}"
             )
-            if finite.size and float(np.median(finite)) > 3000:
+            if finite.size:
+                # The real EXRs hold centimetres (depth_scale 0.01 is the default) and mark
+                # the sky with huge values, which data.max_depth cuts off.
+                metres = finite * 0.01
+                sky = float(np.mean(metres > 1000.0))
                 print(
-                    "  WARNING          median depth is above 3000. If the EXR stores "
-                    "millimetres, set --depth-scale 0.01 or the metrics will be off by 100x."
+                    f"  depth as cm      median {float(np.median(metres)):.1f} m, "
+                    f"{sky:.1%} of pixels beyond 1000 m (sky; the generated configs "
+                    "set data.max_depth: 1000)"
                 )
+                if float(np.median(finite)) < 3.0:
+                    print(
+                        "  WARNING          median depth is below 3 in file units. If the EXR "
+                        "stores metres, pass --depth-scale 1.0; the default 0.01 assumes "
+                        "centimetres and would shrink every depth 100x."
+                    )
         except Exception as exc:
             print(f"  depth sample     FAILED: {exc}")
 

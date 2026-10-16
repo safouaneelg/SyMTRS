@@ -213,6 +213,7 @@ def checkpoint_metadata(model, cfg: RunConfig, extra: Optional[Dict[str, Any]] =
     if cfg.task == "segmentation":
         metadata["num_classes"] = cfg.data.num_classes
         metadata["ignore_index"] = cfg.data.ignore_index
+        metadata["label_step"] = cfg.data.label_step
         metadata["class_names"] = getattr(model, "class_names", None)
     if extra:
         metadata.update(extra)
@@ -285,6 +286,12 @@ def train(
         from symtrs.model.domain import run_domain_adaptation
 
         return run_domain_adaptation(cfg, mode=mode)
+
+    # Shadow removal likewise: the networks are upstream's, trained by a worker process.
+    if cfg.task == "shadow_removal":
+        from symtrs.model.shadow import run_shadow_removal
+
+        return run_shadow_removal(cfg, mode=mode)
 
     # A configured multi-GPU run that has not been launched by torchrun yet has to
     # spawn its own processes; a run already inside a distributed context must not.
@@ -588,6 +595,12 @@ def evaluate_run(
         # "score" rather than "zero_shot": there are no released adaptation weights, so
         # this re-generates and re-measures whatever the run directory already holds.
         return run_domain_adaptation(cfg, mode="score")
+
+    if cfg.task == "shadow_removal":
+        from symtrs.model.shadow import run_shadow_removal
+
+        # Re-predicts and re-scores the run's own weights (or `--checkpoint`) on one split.
+        return run_shadow_removal(cfg, mode="score", split=split, checkpoint=checkpoint)
 
     resolved = resolve_device(device or cfg.train.device)
     run_dir = cfg.resolved_out_dir

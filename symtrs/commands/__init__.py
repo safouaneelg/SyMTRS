@@ -22,6 +22,7 @@ COMMANDS: Dict[str, str] = {
     "models": "symtrs.commands.models",
     "inspect": "symtrs.commands.inspect",
     "doctor": "symtrs.commands.doctor",
+    "view": "symtrs.commands.view",
     "setup-adapt": "symtrs.commands.setup_adapt",
     "make-dummy": "symtrs.commands.make_dummy",
 }

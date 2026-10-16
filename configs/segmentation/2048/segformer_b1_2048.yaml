@@ -6,8 +6,9 @@
 # resolution: 2048 reads train/rgb_day and train/semantic - the native folders. The
 # model is scored at 2048 against 2048 masks.
 #
-# Six classes: the dataset's semantic/ masks are graylevel PNGs, one byte per pixel, and
-# 255 is the ignore index for pixels that belong to no class. Both numbers are written
+# Five classes (background, building, green, road, car): the dataset's semantic/ masks are
+# graylevel PNGs holding class_id * 63 (label_step), decoded as round(value / 63); a grey
+# level not near a multiple of 63 becomes the ignore index, 255. These numbers are written
 # into the checkpoint, so a model trained here cannot be silently scored against a
 # differently-labelled mask set later. If the mask generator ever writes 0 for "no class"
 # instead of 255, change data.ignore_index in the config and not the metric - a metric
@@ -32,7 +33,9 @@ data:
   split: train
   val_split: val
   test_split: test
-  num_classes: 6
+  num_classes: 5
+  # Masks hold class_id * 63 as 8-bit gray (background, building, green, road, car).
+  label_step: 63
   # Pixels labelled 255 are excluded from both the loss and the confusion matrix.
   ignore_index: 255
   num_workers: 8

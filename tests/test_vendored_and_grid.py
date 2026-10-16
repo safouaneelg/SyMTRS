@@ -193,7 +193,8 @@ def test_depth_protocol_is_consistent_down_each_row() -> None:
 def test_segmentation_always_states_the_class_count_and_ignore_index() -> None:
     for path in sorted((REPO_ROOT / "configs" / "segmentation").rglob("*.yaml")):
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-        assert raw["data"]["num_classes"] == 6, path
+        assert raw["data"]["num_classes"] == 5, path
+        assert raw["data"]["label_step"] == 63, path
         assert raw["data"]["ignore_index"] == 255, path
 
 

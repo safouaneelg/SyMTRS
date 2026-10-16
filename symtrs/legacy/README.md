@@ -11,6 +11,12 @@ The one file whose text changed is `superres/train.py`, and only its module head
 docstring, the import block, and the two `sys.path.append` lines its script form needed. No
 model, loss, metric, dataset or training-loop line changed anywhere.
 
+One later, deliberate exception (2026-10-16): `dataloader/utils.py`'s default stem function
+now strips the real capture prefix (`rgb_day_512_<key>` -> `<key>`), because the regenerated
+dataset names every file `<modality>_<light>_<resolution>_<key>` and exact-name matching
+paired nothing. Unprefixed names still match exactly as before; no model, loss or metric
+changed.
+
 ## Where every file came from
 
 | now | before |

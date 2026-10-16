@@ -1,4 +1,4 @@
-"""SegFormer: the official MLP decoder, reimplemented on a timm MiT encoder.
+"""SegFormer: the official MLP decoder, reimplemented on a transformers MiT encoder.
 
 SegFormer is a plain transformer encoder with a hierarchical, convolution-like feature
 pyramid - strides 4/8/16/32 - and a head that does nothing but mix those four scales.
@@ -7,12 +7,21 @@ with: the encoder is fully convolutional in its spatial behaviour, so a model tr
 at one resolution can be evaluated at another, which matters when the same checkpoint
 is run at 256 and at 2048.
 
-This is not a port of the official `SegFormer` repository. The encoder is timm's MiT
-(`mit_b0`/`mit_b1`/`mit_b2`), and the head below is a reimplementation of the
+This is not a port of the official `SegFormer` repository. The encoder is the MiT
+backbone of `transformers.SegformerModel` (`nvidia/mit-b0`/`-b1`/`-b2`, ImageNet-1k
+pretrained), and the head below is a reimplementation of the
 published MLP-decoder structure on top of it: linear projections of the four stages to
 a common width, a 1x1 fusion convolution, dropout, a 1x1 classifier, and a x4
 bilinear upsample. It is faithful to the structure, not to the original weights, so
 it is a from-pretrained-encoder fine-tune, not a reproduction of a published number.
+
+Why `transformers` and not timm: timm has never shipped MiT (`timm.create_model("mit_b0")`
+is "Unknown model" in every release, 0.6.12 and 1.0.x alike), so an earlier version of this
+adapter could not build at all. `nvidia/mit-*` are the official MiT weights, and they load
+in `SegformerModel` without any key remapping. `transformers` is imported lazily, here,
+so the registry and `symtrs doctor` work without it. This also means SegFormer no longer
+constrains the timm version, which is what lets ZoeDepth keep its own timm==0.6.12
+environment (AGENTS.md ground rule 10).
 """
 
 from __future__ import annotations
@@ -25,12 +34,20 @@ import torch.nn.functional as F
 
 from symtrs.model.semantic import SegmentationModel
 
-#: Registry variant -> the timm encoder name. `variant` is the short form used in the
-#: registry key; the encoder is `mit_<variant>`.
+#: Registry variant -> the Hub id of the pretrained MiT encoder.
 SEGFORMER_ENCODERS: Dict[str, str] = {
-    "b0": "mit_b0",
-    "b1": "mit_b1",
-    "b2": "mit_b2",
+    "b0": "nvidia/mit-b0",
+    "b1": "nvidia/mit-b1",
+    "b2": "nvidia/mit-b2",
+}
+
+#: The MiT architecture per variant (Xie et al. 2021, table 6), used when
+#: `pretrained=False` so that a from-scratch build needs neither network nor cache.
+#: Everything else in `SegformerConfig` is the library default, which is the paper's.
+_MIT_ARCHITECTURE: Dict[str, Dict[str, list]] = {
+    "b0": {"hidden_sizes": [32, 64, 160, 256], "depths": [2, 2, 2, 2]},
+    "b1": {"hidden_sizes": [64, 128, 320, 512], "depths": [2, 2, 2, 2]},
+    "b2": {"hidden_sizes": [64, 128, 320, 512], "depths": [3, 4, 6, 3]},
 }
 
 #: The MiT encoder emits four stages, at output strides 4, 8, 16 and 32. The head is
@@ -97,7 +114,7 @@ class SegFormerSegmentation(SegmentationModel):
 
     task = "segmentation"
     default_loss = "ce"
-    requires = ("torch", "timm")
+    requires = ("torch", "transformers")
 
     def __init__(
         self,
@@ -145,52 +162,48 @@ class SegFormerSegmentation(SegmentationModel):
     @staticmethod
     def _build_encoder(variant: str, pretrained: bool) -> nn.Module:
         try:
-            import timm
+            from transformers import SegformerConfig, SegformerModel
         except ImportError as exc:
             raise ImportError(
-                "SegFormer needs timm for its MiT encoder; install it with `pip install timm`"
+                "SegFormer needs `transformers` for its MiT encoder; install it with "
+                "`pip install -e '.[segformer]'`"
             ) from exc
 
-        return timm.create_model(
-            SEGFORMER_ENCODERS[variant], pretrained=pretrained, features_only=True
-        )
+        if pretrained:
+            return SegformerModel.from_pretrained(SEGFORMER_ENCODERS[variant])
+        return SegformerModel(SegformerConfig(**_MIT_ARCHITECTURE[variant]))
 
     @staticmethod
     def _stage_tensors(output) -> List[torch.Tensor]:
-        """Normalise a timm feature-extraction result to a list of tensors.
+        """The four `[B, C, H, W]` stage maps of a `SegformerModel` output.
 
-        timm has returned feature maps as either a plain list of tensors or, in newer
-        versions, a list of dicts carrying a `"feat"` key alongside metadata. Both
-        shapes appear across the timm versions this benchmark runs on, and the
-        difference is an import-time surprise rather than a modelling choice, so it is
-        absorbed here once instead of at each of the two call sites.
+        `output_hidden_states=True` returns one tensor per encoder stage, already
+        reshaped to `[B, C, H, W]` (`config.reshape_last_stage` defaults to True, and the
+        count is checked so a config that disabled it is a clear error rather than a
+        shape mismatch in the decoder).
         """
-        stages: List[torch.Tensor] = []
-        for item in output:
-            if isinstance(item, dict):
-                if "feat" not in item:
-                    raise RuntimeError(
-                        f"timm feature map dict has no 'feat' key (keys: {sorted(item)})"
-                    )
-                item = item["feat"]
-            if not torch.is_tensor(item):
-                raise RuntimeError(
-                    f"unexpected timm feature map of type {type(item).__name__}; "
-                    "expected a tensor or a dict with a 'feat' key"
-                )
-            stages.append(item)
+        stages = list(output.hidden_states)
         if len(stages) != NUM_STAGES:
             raise RuntimeError(
                 f"the MiT encoder produced {len(stages)} stages; the SegFormer head is "
                 f"built for {NUM_STAGES}"
             )
+        for stage in stages:
+            if stage.dim() != 4:
+                raise RuntimeError(
+                    "the MiT encoder returned a non-spatial stage; keep "
+                    "`reshape_last_stage=True` in the SegformerConfig"
+                )
         return stages
+
+    def _encode(self, image: torch.Tensor) -> List[torch.Tensor]:
+        return self._stage_tensors(self.encoder(pixel_values=image, output_hidden_states=True))
 
     def _discover_channels(self) -> List[int]:
         """Read the four stage widths from the encoder with a probe forward pass.
 
-        The channel counts differ between b0 (32/64/160/256) and b1/b2, and timm's
-        configuration can change them, so they are measured rather than hardcoded:
+        The channel counts differ between b0 (32/64/160/256) and b1/b2, and the
+        encoder configuration can change them, so they are measured rather than hardcoded:
         guessing them is a shape mismatch in the decoder that only shows up at the
         first training step, with a stack trace that points at the fusion convolution
         rather than at the wrong number. The probe runs under `no_grad` and on a
@@ -200,8 +213,7 @@ class SegFormerSegmentation(SegmentationModel):
         self.encoder.eval()
         try:
             with torch.no_grad():
-                probe = self.encoder(torch.zeros(1, 3, _PROBE_SIZE, _PROBE_SIZE))
-                stages = self._stage_tensors(probe)
+                stages = self._encode(torch.zeros(1, 3, _PROBE_SIZE, _PROBE_SIZE))
                 channels = [int(stage.shape[1]) for stage in stages]
         finally:
             if was_training:
@@ -212,5 +224,4 @@ class SegFormerSegmentation(SegmentationModel):
 
     def forward(self, image: torch.Tensor) -> torch.Tensor:
         """Logits `[B, num_classes, H, W]`, at the input resolution for even sizes."""
-        stages = self._stage_tensors(self.encoder(image))
-        return self.head(stages)
+        return self.head(self._encode(image))

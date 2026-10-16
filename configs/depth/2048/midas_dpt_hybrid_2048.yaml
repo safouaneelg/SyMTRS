@@ -31,9 +31,11 @@ data:
   split: train
   val_split: val
   test_split: test
-  # Metres are what the metric models predict. Check the raw encoding before trusting
-  # it: 0.01 for millimetres stored as uint16, 1.0 for metres.
-  depth_scale: 1.0
+  # Metres are what the metric models predict. The real EXRs store CENTIMETRES (hence
+  # 0.01); `symtrs doctor --data-root` prints the median in metres to check it.
+  depth_scale: 0.01
+  # Metres, after depth_scale: the sky is a huge value, not zero, so it is cut here.
+  max_depth: 1000
   depth_channel: 0
   depth_backend: auto
   num_workers: 8
