@@ -45,6 +45,15 @@ VALIDATION_FLAGS = {
     "default": ["--epochs", "2"],
     "shadow_removal": ["--set", "shadow.iterations=500"],
 }
+# Shadow removal is fine-tuned from the authors' released weights (decision 2026-10-16):
+# 500 iterations from scratch leave ShadowFormer far from even the identity mapping (test PSNR
+# ~11 on the dummy), so a from-scratch number would say nothing about the model. All three
+# load fully (274/274, 406/406, 759/759 tensors, see docs/claude/PROGRESS.md).
+SHADOW_INIT = {
+    "shadowformer": ".cache/third_party/ShadowFormer/istd_plus.pth",
+    "restormer": ".cache/third_party/Restormer/real_denoising.pth",
+    "uformer": ".cache/third_party/Uformer/Uformer_B_SIDD.pth",
+}
 
 
 def read_header(path: Path) -> dict:
@@ -145,7 +154,9 @@ def main() -> int:
             continue
         head = read_header(config)
         venv = ".venv-zoe" if head["model"] in ZOE_VENV_MODELS else ".venv"
-        flags = VALIDATION_FLAGS.get(head["task"], VALIDATION_FLAGS["default"])
+        flags = list(VALIDATION_FLAGS.get(head["task"], VALIDATION_FLAGS["default"]))
+        if head["model"] in SHADOW_INIT:
+            flags += ["--set", f"shadow.init_weights={SHADOW_INIT[head['model']]}"]
         rel = config.relative_to(REPO).as_posix()
         lines.append(f"{venv} {rel} {' '.join(flags)} --batch-size {done[config.stem]} "
                      f"--num-workers {args.num_workers}")

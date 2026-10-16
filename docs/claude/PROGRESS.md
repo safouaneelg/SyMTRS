@@ -64,3 +64,8 @@ dataset preview (144 transforms, 96/24/24). Pas de convergence recherchée ; auc
   puis `runs/queue.txt`. Documentation des runs : `docs/claude/DATASET.md` (empreinte dataset
   `02b1b436c745c3fc`) et `docs/claude/RUNS.md` généré par `scripts/runs_report.py` (commande
   exacte, config résolue, env, versions, batch, budget, métriques test par run).
+- 2026-10-16 19:55 : commit local `2843b46` sur `features` (tout le travail jusqu'ici). Smoke tests
+  11/91 faits. **Pour reprendre après extinction** :
+  `.venv\Scripts\python.exe -u scripts\smoke_all.py --data-root "C:\Users\bapti\Documents\Unreal Projects\SyMTRS\Saved\DatasetCaptures"`
+  (saute les configs déjà `ok` dans `runs/smoke/smoke.tsv`).
+- 2026-10-16 : **décision utilisateur** : shadow removal en fine-tuning depuis les poids publiés (ShadowFormer ISTD+, Restormer real_denoising, Uformer-B SIDD), inscrit dans `scripts/smoke_all.py` (SHADOW_INIT → `--set shadow.init_weights=...` dans la file).
