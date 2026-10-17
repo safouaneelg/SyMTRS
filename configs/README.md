@@ -9,9 +9,10 @@ configs/
   train_sr_x2.yaml            quick-start: the whole path, in one file
   depth/<2048|1024|512|256>/  <model>_<resolution>.yaml   11 models x 4 resolutions
   segmentation/<...>/         <model>_<resolution>.yaml    6 models x 4 resolutions
-  domain_adapt/               <model>_<direction>.yaml     2 models x 2 directions
+  domain_adapt/               <model>_<direction>.yaml     2 models x 4 directions
   superresolution/            <model>_x<scale>.yaml        4 models x 4 scales
-  generate_grid.py            the tables these 88 files are expanded from
+  shadow_removal/             <model>.yaml                 4 models, 2048 only
+  generate_grid.py            the tables these 96 files are expanded from
 ```
 
 ```bash
@@ -35,7 +36,7 @@ thing in every task:
 
 The four cells of a row are four separate runs over four separate datasets of the same
 scenes. They are rows of one table, not stages of a pipeline: nothing in depth or
-segmentation upsamples anything. Domain adaptation is native-only, because `rgb_night` has
+segmentation upsamples anything. Domain adaptation is native-only, because `rgb_night` and `rgb_noshadow` have
 no `_lr` counterpart.
 
 Super-resolution is the one task where the axis is a factor as well as a size: there
@@ -47,7 +48,7 @@ control row - LR and HR are the same native folder - and not super-resolution.
 ## Regenerating
 
 `generate_grid.py` holds the model tables (protocol, loss, batch size, memory posture, the
-prose) and writes all 88 files. Change a shared hyper-parameter there rather than in 44
+prose) and writes all 96 files. Change a shared hyper-parameter there rather than in 44
 placeholders, then:
 
 ```bash
@@ -57,5 +58,6 @@ python3 configs/generate_grid.py --check   # fail if the tree has drifted from t
 
 The per-model note lives on the native-resolution file of each row; the 1024/512/256 files
 carry only what changes, plus the invariant that must *not* change - a relative-depth model
-is `align: scale` and `loss: silog` at every resolution, and switching that between two
-cells of one row makes them incomparable.
+has the same loss and alignment at every resolution (`silog` + `scale` for depth outputs,
+`ssi` + `scale_shift_disparity` for MiDaS's disparity, see AGENTS.md rule 3), and switching
+that between two cells of one row makes them incomparable.

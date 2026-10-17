@@ -10,9 +10,18 @@ the split the benchmark asks for.
 The hub returns the model and a companion module of input transforms. Both are
 cached by torch.hub, so repeated construction is cheap.
 
-MiDaS's own evaluation aligns predictions per image before measuring, so
-`default_align` is `"scale"` - least-squares scale in depth space, which is the
-convention used when MiDaS-family models are compared against each other.
+Output convention, and why the alignment is in disparity space
+---------------------------------------------------------------
+MiDaS predicts `s / z + t` with BOTH the scale `s` and the shift `t` unknown per image. Its own
+evaluation therefore fits scale and shift by least squares in *disparity* space against
+`1 / ground truth` and only then inverts - `default_align = "scale_shift_disparity"`. The
+earlier setup inverted first (`to_metres` = `1 / disparity`) and aligned with a scale alone:
+`1 / (s / z + t)` is not proportional to `z` unless `t` is zero, and a scale cannot remove a
+shift. On nadir views, where depth varies by ~25% around its mean, `t` dominates and the
+numbers were uninterpretable (silog 41-111 against ~27 for a constant plane). The training
+loss follows: `ssi`, scale-and-shift-invariant in the same space (`output_space = "disparity"`
+is what `symtrs.registry.depth_pairing` keys on; `to_metres` is NOT the scored quantity here,
+see `DepthAdapter.scoring_input`).
 """
 
 from __future__ import annotations
@@ -46,12 +55,16 @@ _TRANSFORM_NAMES = {
     "MiDaS_small": "small_transform",
     "DPT_Hybrid": "dpt_transform",
     "DPT_Large": "dpt_transform",
-    "DPT_SwinV2_T_256": "dpt_transform",
-    "DPT_SwinV2_B_384": "dpt_transform",
-    "DPT_SwinV2_L_384": "dpt_transform",
-    "DPT_SwinV2_B_512": "dpt_transform",
+    # Upstream `hubconf.transforms()` has one entry per backbone input size. Swin-V2-T used
+    # to be mapped to `dpt_transform` (384), which fed a 256-pixel checkpoint 384-pixel
+    # images and failed in the first forward with "Input image height (384) doesn't match
+    # model (256)" - the build succeeded, so only a forward pass shows it.
+    "DPT_SwinV2_T_256": "swin256_transform",
+    "DPT_SwinV2_B_384": "swin384_transform",
+    "DPT_SwinV2_L_384": "swin384_transform",
+    "DPT_SwinV2_B_512": "beit512_transform",
     "DPT_BEiT_L_384": "dpt_transform",
-    "DPT_BEiT_L_512": "dpt_transform",
+    "DPT_BEiT_L_512": "beit512_transform",
 }
 
 
@@ -59,8 +72,13 @@ class MiDaSAdapter(DepthAdapter):
     """A MiDaS checkpoint behind the common depth interface."""
 
     protocol = "relative"
-    default_align = "scale"
+    default_align = "scale_shift_disparity"
+    output_space = "disparity"
     size_multiple = 32
+    # The whole MiDaS network lives under `backbone.` (ViT in `.pretrained`, decoder in
+    # `.scratch`), so the default "backbone" prefix would freeze the decoder as well and
+    # `freeze: encoder` would leave zero trainable parameters.
+    freeze_encoder_prefixes = ("backbone.pretrained",)
     # timm and cv2 are load-time requirements of the published checkpoints, not of this
     # adapter: the hub repo's `hubconf.py` reaches `import timm` through `midas.blocks` ->
     # `backbones.beit`, and its `transforms()` entry point - which we call, so that the
@@ -88,6 +106,7 @@ class MiDaSAdapter(DepthAdapter):
         self.key = f"midas_{hub_model.lower()}"
 
         self.backbone = self._load_backbone(hub_model, pretrained)
+        self._require_beit_compatible_timm(hub_model, self.backbone)
         self.transform = self._load_transform(hub_model)
 
     @staticmethod
@@ -101,10 +120,57 @@ class MiDaSAdapter(DepthAdapter):
         # `relative_position_index` in their released weights, and the hub entry point runs
         # its own `load_state_dict`, so a newer timm that no longer persists that buffer makes
         # the load fail from inside `torch.hub`. See `symtrs.model.depth._hub`.
-        with load_dropping_position_index():
-            return _torch.hub.load(
-                "intel-isl/MiDaS", hub_model, pretrained=pretrained, trust_repo=True
-            )
+        try:
+            with load_dropping_position_index():
+                return _torch.hub.load(
+                    "intel-isl/MiDaS", hub_model, pretrained=pretrained, trust_repo=True
+                )
+        except RuntimeError as exc:
+            # The Swin-V2 checkpoints predate timm's move of the patch-merging
+            # (`downsample.reduction`) between stages, so on timm >= 0.9 the load reports
+            # it missing. Renaming keys by hand would be a guess about which stage owns
+            # the weights; the environment MiDaS v3.1 was released against is the fix.
+            if "SwinV2" in hub_model and "downsample.reduction" in str(exc):
+                raise RuntimeError(
+                    f"{hub_model} does not load on this timm: its checkpoint was written "
+                    "for timm==0.6.12 (Swin-V2 patch-merging layout). Run it from the "
+                    "second environment (`.venv-zoe`, timm==0.6.12); `symtrs doctor` "
+                    f"reports the installed timm. Original error: {exc}"
+                ) from exc
+            raise
+
+    @staticmethod
+    def _require_beit_compatible_timm(hub_model: str, backbone) -> None:
+        """Fail at build time, not at the first forward, when timm is too new for MiDaS BEiT.
+
+        MiDaS's `backbones/beit.py` replaces timm's `Block.forward` with a copy that calls
+        `self.drop_path`. timm >= 0.9 split that attribute into `drop_path1` / `drop_path2`,
+        so the model builds and loads fine and then dies in the first forward with
+        `AttributeError: 'Block' object has no attribute 'drop_path'` - after the GPU has
+        been reserved and an epoch scheduled. Looking for the attribute itself, rather than
+        comparing version strings, keeps the check true to the cause. Patching the hub code
+        is not the fix: it is a cached copy of someone else's repository, and the checkpoint
+        was validated against the timm it was written for.
+        """
+        if "BEiT" not in hub_model:
+            return
+        pretrained = getattr(backbone, "pretrained", None)
+        blocks = getattr(getattr(pretrained, "model", None), "blocks", None)
+        if not blocks or hasattr(blocks[0], "drop_path"):
+            return
+        try:
+            import timm
+
+            version = getattr(timm, "__version__", "unknown")
+        except ImportError:  # pragma: no cover - the hub load above needed timm
+            version = "unknown"
+        raise RuntimeError(
+            f"{hub_model} does not run on timm {version}: MiDaS's BEiT backbone patches "
+            "timm's Block.forward with a copy that calls `self.drop_path`, which timm >= 0.9 "
+            "no longer has (it is `drop_path1` / `drop_path2`). Run it from the second "
+            "environment (`.venv-zoe`, timm==0.6.12); `symtrs doctor` reports the installed "
+            "timm and which models need it."
+        )
 
     @staticmethod
     def _load_transform(hub_model: str):

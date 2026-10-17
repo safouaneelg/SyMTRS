@@ -9,12 +9,18 @@
 # run to see what the lost detail costs, which is the question the resolution axis
 # exists to answer.
 #
-# Six classes: the dataset's semantic/ masks are graylevel PNGs, one byte per pixel, and
-# 255 is the ignore index for pixels that belong to no class. Both numbers are written
+# Five classes (background, building, green, road, car): the dataset's semantic/ masks are
+# graylevel PNGs holding class_id * 63 (label_step), decoded as round(value / 63); a grey
+# level not near a multiple of 63 becomes the ignore index, 255. These numbers are written
 # into the checkpoint, so a model trained here cannot be silently scored against a
 # differently-labelled mask set later. If the mask generator ever writes 0 for "no class"
 # instead of 255, change data.ignore_index in the config and not the metric - a metric
 # that guesses which pixels to ignore is worse than one that does not.
+#
+# Class 0 (background) has no pixel in any split of the current capture, so mIoU averages
+# the classes that have ground truth in the evaluated split (the same set for every model);
+# `miou_classes` says how many. A class absent from the ground truth but predicted keeps
+# IoU 0 and its false positives are in `fp_pixels_k`, but it is not averaged.
 #
 # DeepLabV3 (ResNet-50) is described in full at
 # configs/segmentation/2048/deeplabv3_r50_2048.yaml - read that one for why it uses
@@ -31,7 +37,9 @@ data:
   split: train
   val_split: val
   test_split: test
-  num_classes: 6
+  num_classes: 5
+  # Masks hold class_id * 63 as 8-bit gray (background, building, green, road, car).
+  label_step: 63
   # Pixels labelled 255 are excluded from both the loss and the confusion matrix.
   ignore_index: 255
   num_workers: 8
@@ -47,6 +55,7 @@ train:
   warmup_epochs: 2
   min_lr_ratio: 0.01
   patch_size: 512
+  # 0 = the whole image at val and test, whatever patch_size is (see eval.tile_size).
   val_patch_size: 0
   amp: true
   gpus: 1
@@ -64,7 +73,11 @@ eval:
   metrics: [miou, pixel_acc, mean_acc, mean_dice, fwiou]
   batch_size: 1
   amp: true
-  tile_size: 0
+  # The whole 1024px image is scored (val and test alike), in 512px windows
+  # with 128px overlap: the size this row trained on, so the network sees the same
+  # field of view at evaluation. Never a crop - every pixel is covered and the result is
+  # deterministic.
+  tile_size: 512
   tile_overlap: 128
   align: ""
   num_visualizations: 4

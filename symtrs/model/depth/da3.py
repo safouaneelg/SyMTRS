@@ -1,10 +1,32 @@
-"""Depth Anything 3 through `transformers`.
+"""Depth Anything 3 through the `depth_anything_3` package.
 
-Depth Anything 3 is distributed as a Hugging Face checkpoint and, unlike the other
-depth adapters, ships its own preprocessing: the model's `AutoImageProcessor` owns the
-resize, the normalisation and the size divisibility, and the model's own weights decide
-what the output means. So this adapter delegates all of that to the hub objects rather
-than reimplementing them.
+The `depth-anything/DA3-*` checkpoints on the Hub are not `transformers` models. Their
+`config.json` is a ByteDance object-graph (`{"__object__": {"path":
+"depth_anything_3.model.da3", "name": "DepthAnything3Net"}, ...}`), the repositories carry
+no image-processor config, and `model.safetensors` keys are prefixed `model.backbone.*`,
+`model.head.*`. `AutoImageProcessor` / `AutoModelForDepthEstimation` therefore cannot load
+them (the first version of this adapter failed with "no image processor could be loaded").
+This adapter builds the network the way the package's own `DepthAnything3.from_pretrained`
+does - `create_object(config)` on the checkpoint's own `config.json` - and loads the
+safetensors into it.
+
+Only the network is taken from the package. The package's high-level `api` module imports
+the whole export stack (open3d, moviepy, pycolmap, gradio...) and runs multi-view
+inference with a bf16 autocast, none of which this benchmark wants, so `depth_anything_3.api`
+is never imported. Install the package without its dependency list:
+
+    pip install -e '.[da3]'                   # omegaconf, addict, safetensors, huggingface_hub
+    pip install --no-deps depth-anything-3==0.1.1
+
+`--no-deps` is deliberate: the wheel pins `numpy<2` and lists xformers, open3d, evo, e3nn,
+pycolmap... for features (3D export, Gaussian splats) that `model.da3` never imports.
+
+Preprocessing is explicit, not delegated: the package's `InputProcessor` is ImageNet
+mean/std normalisation (`T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])`) plus an
+aspect-preserving resize to a multiple of the 14-pixel patch. The first is exactly
+`DepthAdapter.preprocess_image`; the second is `size_multiple = 14` here. Nothing resizes
+the image to the package's 504-pixel default: this benchmark's `resolution` names the pixel
+size of the data (AGENTS.md ground rule 1), so the network sees the data at that size.
 
 Two conventions have to be decided per checkpoint, and the model id is the only
 information available before the checkpoint is downloaded:
@@ -17,40 +39,37 @@ information available before the checkpoint is downloaded:
 `metric` infers that from the model id - an id containing "metric" (case-insensitive) is
 taken to be metric. That inference is a *guess* keyed on the naming convention of the
 released checkpoints (`depth-anything/DA3METRIC-LARGE` is metric,
-`depth-anything/DA3-LARGE` and `depth-anything/DA3MONO-LARGE` are not), and it is a guess
-about the checkpoint, not about the architecture. Pass `metric=True` or `metric=False`
-explicitly to overrule it. Getting it wrong is not silently absorbed: a metric model
-marked relative is trained against `1 / depth` instead of `depth`, so the loss will be
-visibly wrong rather than merely suboptimal.
+`depth-anything/DA3-LARGE` is not), and it is a guess about the checkpoint, not about the
+architecture. Pass `metric=True` or `metric=False` explicitly to overrule it.
+
+Canonical metric depth
+----------------------
+The DA3METRIC model card says "canonical metric depth; multiplying by focal length gives
+metric depth", and the package does `depth * focal / 300` (`apply_metric_scaling`). The
+dataset's camera intrinsics are not part of the depth interface, so `focal_px` is an
+explicit argument: when given, the metric output is scaled by `focal_px / 300`; when
+`None`, the output is the canonical depth, unscaled, and the metric numbers of this model
+are only meaningful up to that factor. It is not guessed here - but it is not left unset in
+a run either: `symtrs.model.wrapper.build_from_config` derives it from the data (registry
+`focal_kwarg`; `focal_px_for_resolution(resolution, data.camera_hfov_deg)`), because the
+capture camera's field of view is a property of the dataset and the focal length in pixels
+follows the resolution axis. With it unset the real-data smoke runs scored abs_rel 0.91-0.96
+and d1 = 0 (predictions ~4% of the ground truth).
 
 Depth, not disparity
 --------------------
 The base adapter assumes a relative model emits disparity, so it converts the target to
-`1 / depth` and inverts the prediction in `to_metres`. Depth Anything emits *depth*:
-its `predicted_depth` grows with distance, and the relative checkpoints are
-scale-invariant in depth space, not in disparity space. This adapter therefore keeps a
-relative model's target and prediction in depth space (see `prepare_target` and
-`to_metres`), the same override the ZoeDepth-N adapter makes and for the same reason.
+`1 / depth` and inverts the prediction in `to_metres`. Depth Anything 3 emits *depth*, so
+this adapter keeps a relative model's target and prediction in depth space (see
+`prepare_target` and `to_metres`), the same override the ZoeDepth-N adapter makes.
 
-Sizing
-------
-The processor resizes and pads to whatever divisibility the backbone needs, so
-`size_multiple` is left at 1: the inherited `_pad_to_multiple` must not re-pad an
-already-prepared tensor, because an extra reflect border would change the image the
-network sees. `native_input` is 0 for the same reason - the processor's own default
-resolution is the model's preferred resolution, and it is not knowable without the
-checkpoint.
-
-Unverified: the `transformers` route
-------------------------------------
-Loading through `AutoModelForDepthEstimation` / `AutoImageProcessor` is the API the task
-brief specifies, but it could not be exercised without `transformers` installed and it
-does not match what is published on the Hub: the `depth-anything/DA3-*` repositories are
-tagged `library_name: depth-anything-3`, and at least one of them lists only
-`config.json` and `model.safetensors`, i.e. no image-processor config. If that is true of
-the checkpoint you ask for, construction fails with a `RuntimeError` that says so,
-rather than falling back to an invented normalisation. Verify with
-`symtrs doctor --model da3_large`.
+Aux head weights
+----------------
+The released DA3-LARGE checkpoint omits the `scratch.output_conv2_aux.{1,2,3}.2` layers of
+the dual-DPT head. The package loads with `strict=False` for that reason; those layers
+belong to auxiliary levels whose output is discarded (only `output_conv2_aux[-1]` feeds the
+ray/pose branch). This adapter tolerates exactly those keys and raises on any other
+missing or unexpected key, so a genuinely wrong checkpoint is still an error.
 """
 
 from __future__ import annotations
@@ -59,7 +78,6 @@ import re
 from collections.abc import Mapping
 from typing import Any, Dict, Optional
 
-import numpy as np
 import torch
 
 from symtrs.model.base import DepthTarget
@@ -139,11 +157,20 @@ def _depth_target(depth_metres: torch.Tensor, valid: torch.Tensor) -> DepthTarge
     return DepthTarget(values=depth_metres, mask=valid, unit="relative_depth")
 
 
+#: The canonical focal length the metric head is normalised to (`apply_metric_scaling`'s
+#: default `scale_factor` in the package): metres = canonical_depth * focal_px / 300.
+CANONICAL_FOCAL = 300.0
+
+#: Keys the released DA3-LARGE checkpoint legitimately lacks; see the module docstring.
+_TOLERATED_MISSING = re.compile(r"^head\.scratch\.output_conv2_aux\.[123]\.2\.(weight|bias)$")
+
+
 class DepthAnything3Adapter(DepthAdapter):
     """A Depth Anything 3 checkpoint behind the common depth interface."""
 
-    requires = ("torch", "transformers")
-    size_multiple = 1
+    requires = ("torch", "depth_anything_3", "omegaconf", "addict", "safetensors")
+    # The backbone patch size; any other size is a shape error inside the ViT.
+    size_multiple = 14
     native_input = 0
 
     # Defaults describing the release's non-metric checkpoints; `__init__` replaces them
@@ -160,30 +187,33 @@ class DepthAnything3Adapter(DepthAdapter):
         loss_kwargs: Optional[Dict] = None,
         align: str = "",
         freeze: str = "",
+        focal_px: Optional[float] = None,
     ) -> None:
         """Args:
-            model_id: any `AutoModelForDepthEstimation`-compatible Depth Anything 3 id.
+            model_id: a `depth-anything/DA3*` Hub id (or a local directory holding the
+                checkpoint's `config.json` and `model.safetensors`).
             metric: True for a metric checkpoint, False for an affine-invariant one.
                 None (default) infers it from `model_id`; see the module docstring for
                 why that inference is a guess and how to overrule it.
             pretrained: Depth Anything 3 has no random-init mode, so False is rejected
                 rather than silently ignored.
+            focal_px: focal length in pixels of the image given to the network. Metric
+                output is scaled by `focal_px / 300`; None leaves it canonical.
         """
         if not pretrained:
             raise ValueError(
                 "Depth Anything 3 only ships trained weights; pretrained=False has no "
                 "meaning here. Omit it or pass True."
             )
-        try:
-            import transformers
-        except ImportError as exc:
-            raise ImportError(
-                "DepthAnything3Adapter needs the `transformers` package: "
-                "pip install transformers"
-            ) from exc
-
         self.model_id = model_id
         self.metric = _infer_metric(model_id) if metric is None else bool(metric)
+        self.focal_px = None if focal_px is None else float(focal_px)
+        if self.metric and self.focal_px is None:
+            print(
+                f"[symtrs] warning: {model_id} is metric but focal_px is unset, so it returns "
+                "canonical depth (a 300 px camera), not metres. A run built from a config gets "
+                "it from data.camera_hfov_deg; for SDK use pass focal_px=..."
+            )
 
         # DepthAdapter.__init__ reads both of these, so they must be set first.
         self.protocol = "metric" if self.metric else "relative"
@@ -191,72 +221,65 @@ class DepthAnything3Adapter(DepthAdapter):
         self.key = "da3_" + _slug_model_id(model_id)
         super().__init__(loss=loss, loss_kwargs=loss_kwargs, align=align, freeze=freeze)
 
-        self.processor = self._load_processor(transformers, model_id)
-        self.model = self._load_model(transformers, model_id)
+        self.model = self._load_model(model_id)
 
     # -------------------------------------------------------------------- loading
 
-    def _load_processor(self, transformers: Any, model_id: str):
-        """The checkpoint's `AutoImageProcessor`.
+    def _load_model(self, model_id: str):
+        """Build `DepthAnything3Net` from the checkpoint's own `config.json` + weights."""
+        import json
+        import os
 
-        Wrapped because this is the step that is least likely to be present: the
-        Depth Anything 3 repositories on the Hub are tagged `library_name:
-        depth-anything-3` and some publish only `config.json` and `model.safetensors`,
-        with no image-processor config at all. Guessing a substitute normalisation would
-        be silently wrong, so the failure is made explicit instead.
-        """
         try:
-            return transformers.AutoImageProcessor.from_pretrained(model_id)
-        except Exception as exc:
-            raise RuntimeError(
-                f"no image processor could be loaded for Depth Anything 3 checkpoint "
-                f"{model_id!r} ({type(exc).__name__}: {exc}). This adapter needs both an "
-                f"`AutoModelForDepthEstimation` config and an `AutoImageProcessor` config "
-                f"in the repository; a checkpoints-only repository cannot be used through "
-                f"`transformers`. Run `symtrs doctor --model {self.key}` and report its output."
+            from omegaconf import OmegaConf
+            from safetensors.torch import load_file
+
+            from depth_anything_3.cfg import create_object
+        except ImportError as exc:
+            raise ImportError(
+                f"{self.key} needs the `depth_anything_3` package and omegaconf/addict/"
+                f"safetensors ({exc}). Install with `pip install -e '.[da3]'` and then "
+                "`pip install --no-deps depth-anything-3==0.1.1` (--no-deps: the wheel pins "
+                "numpy<2 and lists 3D-export packages this adapter never imports)."
             ) from exc
 
-    def _load_model(self, transformers: Any, model_id: str):
         try:
-            return transformers.AutoModelForDepthEstimation.from_pretrained(model_id)
+            if os.path.isdir(model_id):
+                config_path = os.path.join(model_id, "config.json")
+                weights_path = os.path.join(model_id, "model.safetensors")
+            else:
+                from huggingface_hub import hf_hub_download
+
+                config_path = hf_hub_download(model_id, "config.json")
+                weights_path = hf_hub_download(model_id, "model.safetensors")
+            with open(config_path, encoding="utf-8") as handle:
+                config = json.load(handle)
+            network = create_object(OmegaConf.create(config["config"]))
+            state = load_file(weights_path)
         except Exception as exc:
             raise RuntimeError(
-                f"could not load Depth Anything 3 checkpoint {model_id!r} with "
-                f"AutoModelForDepthEstimation ({type(exc).__name__}: {exc}). "
-                f"Run `symtrs doctor --model {self.key}` and report its output."
+                f"could not load Depth Anything 3 checkpoint {model_id!r} "
+                f"({type(exc).__name__}: {exc}). Offline runs need the files in the Hugging "
+                f"Face cache (HF_HOME); run `python scripts/prefetch_weights.py --keys "
+                f"{self.key}` once with network access."
             ) from exc
 
-    # ------------------------------------------------------------- preprocessing
-
-    def preprocess_image(self, image: torch.Tensor) -> torch.Tensor:
-        """The checkpoint's own `AutoImageProcessor`, which is the model's input contract.
-
-        Reimplementing it would be a guess about the normalisation the weights were
-        trained with, so the tensor makes a round trip through a uint8 HWC array the way
-        the processor expects - the same discipline as the MiDaS adapter.
-        """
-        if image.dim() == 3:
-            image = image.unsqueeze(0)
-
-        arrays = []
-        for index in range(image.shape[0]):
-            array = (
-                image[index].detach().float().cpu().clamp(0, 1).permute(1, 2, 0).numpy() * 255.0
-            )
-            arrays.append(array.round().astype(np.uint8))
-
-        processed = self.processor(images=arrays, return_tensors="pt")
-        if isinstance(processed, Mapping):
-            pixel_values = processed.get("pixel_values")
-        else:
-            pixel_values = processed if torch.is_tensor(processed) else None
-        if pixel_values is None:
+        # The Hub files prefix every key with the wrapper attribute (`model.`) that the
+        # package's `DepthAnything3` class holds the network under.
+        state = {
+            (key[len("model."):] if key.startswith("model.") else key): value
+            for key, value in state.items()
+        }
+        result = network.load_state_dict(state, strict=False)
+        missing = [key for key in result.missing_keys if not _TOLERATED_MISSING.match(key)]
+        if missing or result.unexpected_keys:
             raise RuntimeError(
-                f"{type(self.processor).__name__} returned {type(processed).__name__} "
-                f"without a 'pixel_values' entry; Depth Anything 3 needs it. "
-                f"Run `symtrs doctor --model {self.key}` and report its output."
+                f"checkpoint {model_id!r} does not match the installed depth_anything_3 "
+                f"network: missing {missing[:5]}, unexpected {list(result.unexpected_keys)[:5]}. "
+                "Install the package version the checkpoint was released with "
+                "(`pip install --no-deps depth-anything-3==0.1.1`)."
             )
-        return pixel_values.to(image.device)
+        return network
 
     # -------------------------------------------------------------------- target
 
@@ -279,17 +302,20 @@ class DepthAnything3Adapter(DepthAdapter):
     # ------------------------------------------------------------------- forward
 
     def forward(self, image: torch.Tensor) -> torch.Tensor:
-        """Raw depth prediction at the processor's output resolution."""
+        """Depth `[B, 1, H, W]` for a preprocessed `[B, 3, H, W]` batch.
+
+        The network is multi-view (`[B, N, 3, H, W]`); a monocular image is one view, so
+        `N = 1` and nothing about cross-view attention is exercised.
+        """
         try:
-            try:
-                outputs = self.model(pixel_values=image)
-            except TypeError:
-                # A few depth heads take the tensor positionally only.
-                outputs = self.model(image)
+            outputs = self.model(image.unsqueeze(1))
         except Exception as exc:
             raise RuntimeError(
                 f"calling {type(self.model).__module__}.{type(self.model).__name__} "
                 f"({self.model_id!r}) failed: {type(exc).__name__}: {exc}. "
                 f"Run `symtrs doctor --model {self.key}` and report its output."
             ) from exc
-        return _as_depth_tensor(outputs, f"{type(self.model).__name__}.forward")
+        depth = _as_depth_tensor(outputs, f"{type(self.model).__name__}.forward")
+        if self.protocol == "metric" and self.focal_px is not None:
+            depth = depth * (self.focal_px / CANONICAL_FOCAL)
+        return depth

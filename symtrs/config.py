@@ -16,6 +16,7 @@ Override keys may be dotted paths into the nested dataclasses, e.g.
 from __future__ import annotations
 
 import copy
+import os
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
@@ -27,7 +28,7 @@ from symtrs import CONFIG_FORMAT_VERSION
 # let the two drift, and the symptom would be a backend that works but the config refuses.
 from symtrs.data.exr import VALID_BACKENDS
 
-TASKS: tuple = ("superresolution", "depth", "segmentation", "domain_adapt")
+TASKS: tuple = ("superresolution", "depth", "segmentation", "domain_adapt", "shadow_removal")
 
 #: Resolutions are named by their pixel dimension, not by a scale factor.
 RESOLUTIONS: tuple = (2048, 1024, 512, 256)
@@ -41,6 +42,19 @@ class ConfigError(ValueError):
     """Raised when a configuration is internally inconsistent or unknown."""
 
 
+def focal_px_for_resolution(resolution: int, hfov_deg: float) -> float:
+    """Focal length in pixels of a square image `resolution` pixels wide.
+
+    `f = (W / 2) / tan(hfov / 2)`. `resolution` names the pixel size of the data (ground rule
+    1 in AGENTS.md), so the focal length follows it by proportion: 1773.6 px at 2048 and 60
+    degrees, half of that at 1024, and so on. It is a property of the data level, not of the
+    network input, which is why a 512px training crop or a tile still uses the same value.
+    """
+    import math
+
+    return (resolution / 2.0) / math.tan(math.radians(hfov_deg) / 2.0)
+
+
 @dataclass
 class DataConfig:
     """Where a run reads its data from."""
@@ -51,8 +65,23 @@ class DataConfig:
     test_split: str = "test"
 
     # Depth reading.
-    depth_scale: float = 1.0
+    # File units -> metres. The real EXRs store CENTIMETRES, so 0.01 is the default; a
+    # metric model scored against unconverted centimetres is wrong by a constant 100x.
+    depth_scale: float = 0.01
+    # Metres, after depth_scale. Pixels farther than this are invalid. The real depth marks
+    # sky with huge values rather than zero, which would dominate every loss and metric if
+    # it counted as geometry. None keeps every positive finite pixel.
+    max_depth: Optional[float] = None
     depth_channel: int = 0
+    # Horizontal field of view of the capture camera, in degrees, for the metric models whose
+    # output needs the focal length in pixels (Depth Anything 3 metric: metres = canonical
+    # depth * focal_px / 300). 60 is confirmed by the dataset owner (2026-10-17: always 60 for
+    # the SyMTRS capture; a car-size estimate over 838 cars, 54-63 deg, agrees). The dataset does
+    # not store it and the actor property (`FieldOfView`) is editable per instance, so a capture
+    # with another FOV must set this. The images are square, so the
+    # vertical FOV is the same. `focal_px_for_resolution` turns it into pixels at the data's
+    # resolution; cropping and tiling do not change it, because a crop keeps the pixel size.
+    camera_hfov_deg: float = 60.0
     # Which library reads the EXR files. "auto" tries them in order; "numpy" reads .npy
     # only and is rejected on an EXR rather than silently returning something else. The
     # list of names lives in the reader, not here, so the two cannot disagree about what
@@ -60,7 +89,12 @@ class DataConfig:
     depth_backend: str = "auto"
 
     # Segmentation.
-    num_classes: int = 6
+    # The real masks hold class_id * label_step as 8-bit gray (current export: 63, so
+    # 0/63/126/189/252 -> background, building, green, road, car; older ones used 51 with 6
+    # classes). Pixels not within a couple of grey levels of a multiple become ignore_index.
+    # make-dummy writes the same encoding, so a config that runs on it runs on the real data.
+    num_classes: int = 5
+    label_step: int = 63
     ignore_index: int = 255
 
     # Loading.
@@ -85,8 +119,18 @@ class DataConfig:
             )
         if self.depth_scale <= 0:
             raise ConfigError("data.depth_scale must be positive")
+        if self.max_depth is not None and self.max_depth <= 0:
+            raise ConfigError("data.max_depth must be positive (metres) or unset")
+        if not 0.0 < self.camera_hfov_deg < 180.0:
+            raise ConfigError(
+                f"data.camera_hfov_deg must be in (0, 180) degrees; got {self.camera_hfov_deg}"
+            )
         if self.num_classes < 2:
             raise ConfigError("data.num_classes must be at least 2")
+        if self.label_step < 1:
+            raise ConfigError(
+                "data.label_step must be at least 1 (1 = masks hold raw class ids)"
+            )
 
 
 @dataclass
@@ -105,6 +149,10 @@ class TrainConfig:
     # Random-crop patch training. 0 trains on the full image, which only fits at
     # the lower resolutions.
     patch_size: int = 0
+    # Evaluation geometry, val AND test alike. 0 = the whole image (never `patch_size`: the
+    # training crop is a memory device, not part of the protocol). A positive value is a
+    # deterministic CENTRE crop, only for speed; images that do not fit in one pass are
+    # scored with `eval.tile_size` instead, which still covers every pixel.
     val_patch_size: int = 0
 
     amp: bool = True
@@ -176,6 +224,59 @@ class EvalConfig:
 
 
 @dataclass
+class ShadowConfig:
+    """Settings that exist only for `shadow_removal`; ignored by every other task."""
+
+    # The dataset has no shadow masks, and ShadowFormer / ShadowMaskFormer need one as an input while the
+    # shadow / non-shadow metric split needs one for every model. The mask is derived once,
+    # at staging, from the pair itself: a pixel is shadow when the shadow-free image is
+    # brighter than the shadowed one by more than this fraction of its own luminance,
+    # (Y_noshadow - Y_day) / max(Y_noshadow, eps) > mask_threshold. 0.1 is above 8-bit
+    # rounding and render noise (the two renders differ only by the shadows) while keeping
+    # penumbra; changing it changes the regional metrics, so it is recorded in the summary.
+    mask_threshold: float = 0.1
+    # Side of the square structuring element of the opening that removes isolated pixels
+    # from the mask. 0 disables it.
+    mask_open: int = 3
+    # Training length. 0 -> `train.epochs`, where one epoch is one random crop from every
+    # training image (ceil(n_train / batch_size) iterations). A positive value wins, which
+    # is how a ~500 iteration validation run is asked for: `--set shadow.iterations=500`.
+    iterations: int = 0
+    # Select "best" on a fixed set of random validation crops every `val_every` iterations
+    # (full 2048 images are only run once, at the end). 0 validates only at the end.
+    val_every: int = 250
+    val_crops: int = 32
+    # Optional upstream checkpoint to initialise from. "" trains from scratch. Only tensors
+    # whose name and shape match are loaded, and the count is printed.
+    init_weights: str = ""
+    # Skip the final full-image prediction / scoring (smoke tests of the training loop).
+    skip_final_eval: bool = False
+    # Where the derived masks are kept, shared by every run. Deriving one costs ~1 s per 2048 px
+    # pair and is a pure function of the pair and of mask_threshold / mask_open, so at 20,000+
+    # views re-deriving it in every run (4 shadow models + the shadow2noshadow translators) is
+    # hours of identical work. Entries are keyed by data root and settings and invalidated by
+    # the source files' size/mtime (see symtrs/model/shadow/mask_cache.py). Relative paths are
+    # resolved against the caller's cwd (`anchored`); .cache is gitignored; the folder must not
+    # be inside the dataset. "" turns the cache off: each run derives its own masks.
+    mask_cache: str = ".cache/shadow_masks"
+    # Processes that fill missing masks. Bounded on purpose: the development laptop
+    # blue-screens under combined CPU + GPU load, so this is half the cores, at most 8.
+    # 0 or 1 = serial.
+    mask_workers: int = field(default_factory=lambda: max(1, min(8, (os.cpu_count() or 2) // 2)))
+
+    def validate(self) -> None:
+        if not 0.0 < self.mask_threshold < 1.0:
+            raise ConfigError("shadow.mask_threshold must be in (0, 1)")
+        if self.mask_workers < 0:
+            raise ConfigError("shadow.mask_workers must be >= 0 (0 or 1 = serial)")
+        if self.mask_open < 0 or self.iterations < 0 or self.val_every < 0 or self.val_crops < 0:
+            raise ConfigError(
+                "shadow.mask_open, iterations, val_every and val_crops must not be negative"
+            )
+
+
+
+@dataclass
 class RunConfig:
     """A complete description of one run."""
 
@@ -188,6 +289,7 @@ class RunConfig:
     data: DataConfig = field(default_factory=DataConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
+    shadow: ShadowConfig = field(default_factory=ShadowConfig)
 
     # Forwarded verbatim to the model builder; recorded in the checkpoint so the
     # architecture can be rebuilt without the YAML file.
@@ -217,6 +319,7 @@ class RunConfig:
         self.data.validate()
         self.train.validate()
         self.eval.validate()
+        self.shadow.validate()
         return self
 
     # ------------------------------------------------------------------ defaults
@@ -227,6 +330,32 @@ class RunConfig:
         if self.out_dir:
             return Path(self.out_dir)
         return Path("runs") / self.task / self.model / str(self.resolution)
+
+    def anchored(self) -> "RunConfig":
+        """A copy whose caller-relative paths are absolute, resolved against *this* process's cwd.
+
+        Why: shadow removal and domain adaptation launch their subprocess with the upstream
+        checkout as cwd (upstream's imports and relative `./checkpoints` need it), and the
+        shadow worker re-reads this config from `config.yaml` there. A relative
+        `--out-dir runs/validation/x` therefore pointed into the upstream tree (or nowhere)
+        and both tasks died at the first path they opened (2026-10-17 validation queue,
+        which passed relative out roots). The paths a user types are relative to *their*
+        shell, so they are fixed once, here, before any subprocess exists - never inside a
+        launcher, where the cwd is already the wrong one. An empty `out_dir` is anchored
+        too: its canonical default (`runs/<task>/<model>/<res>`) is relative as well.
+        """
+        cfg = copy.deepcopy(self)
+        cfg.out_dir = str(self.resolved_out_dir.resolve())
+        for owner, name in (
+            (cfg.data, "root"),
+            (cfg.shadow, "init_weights"),
+            (cfg.shadow, "mask_cache"),
+            (cfg.train, "resume"),
+        ):
+            value = getattr(owner, name)
+            if value:
+                setattr(owner, name, str(Path(value).resolve()))
+        return cfg
 
     # --------------------------------------------------------------- conversion
 
@@ -252,6 +381,8 @@ class RunConfig:
                 kwargs["train"] = _build_section(TrainConfig, value, "train")
             elif key == "eval":
                 kwargs["eval"] = _build_section(EvalConfig, value, "eval")
+            elif key == "shadow":
+                kwargs["shadow"] = _build_section(ShadowConfig, value, "shadow")
             else:
                 kwargs[key] = value
         return cls(**kwargs)
@@ -334,7 +465,46 @@ def _set_dotted(obj: Any, dotted: str, value: Any) -> None:
         return
     if not hasattr(target, leaf):
         raise ConfigError(f"unknown config key {dotted!r}")
-    setattr(target, leaf, _coerce(getattr(target, leaf), value, dotted))
+    current = getattr(target, leaf)
+    optional = _optional_hint(target, leaf)
+    if optional is not _NOT_OPTIONAL and isinstance(value, str) and value.strip().lower() in {"none", "null"}:
+        # `None`/`null` unset an Optional field again, e.g. `--set data.max_depth=none`.
+        setattr(target, leaf, None)
+        return
+    if current is None:
+        # Nothing to read a type from: `data.max_depth` is `Optional[float] = None`, so
+        # `--set data.max_depth=1000` used to be stored as the string "1000" and only failed
+        # later, in `validate()`, as a `TypeError` comparing a str with 0. The dataclass
+        # annotation is the type.
+        if optional in (bool, int, float, str):
+            # Reuse the typed branches of `_coerce` by handing it a prototype of that type.
+            setattr(target, leaf, _coerce(optional(), value, dotted))
+        else:
+            setattr(target, leaf, _coerce_unknown(value))
+        return
+    setattr(target, leaf, _coerce(current, value, dotted))
+
+
+_NOT_OPTIONAL = object()
+
+
+def _optional_hint(target: Any, leaf: str) -> Any:
+    """The declared type inside `Optional[X]` for a dataclass field, or `_NOT_OPTIONAL`.
+
+    A field annotated as a plain type returns `_NOT_OPTIONAL`; `Optional[X]` returns `X`
+    (or `None` when it is not a single plain member). Annotations are strings here
+    (`from __future__ import annotations`), hence `get_type_hints`.
+    """
+    import typing
+
+    try:
+        hint = typing.get_type_hints(type(target)).get(leaf)
+    except Exception:  # noqa: BLE001 - an unresolvable annotation just means "not Optional"
+        return _NOT_OPTIONAL
+    if typing.get_origin(hint) is not typing.Union or type(None) not in typing.get_args(hint):
+        return _NOT_OPTIONAL
+    members = [arg for arg in typing.get_args(hint) if arg is not type(None)]
+    return members[0] if len(members) == 1 else None
 
 
 def _coerce_unknown(value: Any) -> Any:

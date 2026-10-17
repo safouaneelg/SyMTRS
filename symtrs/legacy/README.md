@@ -1,4 +1,4 @@
-# `symtrs/legacy/` — code that predates the package, moved inside it unchanged
+# `symtrs/legacy/` — code that predates the package, moved inside it (then edited, see below)
 
 Everything under this directory is this repository's own code (commits 08c9931, a2318d5,
 61c644a), not a third-party tree. It used to sit beside the package at the repository root,
@@ -7,9 +7,72 @@ where top-level `utils` and `dataloader` names made it unreachable from an insta
 imported. It lives inside the package now: **relocated, not ported**, so that the network
 behind a published checkpoint stays checkable against the code that trained it.
 
-The one file whose text changed is `superres/train.py`, and only its module header: a
+The one file whose text changed in the move is `superres/train.py`, and only its module header: a
 docstring, the import block, and the two `sys.path.append` lines its script form needed. No
-model, loss, metric, dataset or training-loop line changed anywhere.
+model, loss, metric, dataset or training-loop line changed in the move itself; the later,
+deliberate edits are listed under "Changes after the move".
+
+One later, deliberate exception (2026-10-16): `dataloader/utils.py`'s default stem function
+now strips the real capture prefix (`rgb_day_512_<key>` -> `<key>`), because the regenerated
+dataset names every file `<modality>_<light>_<resolution>_<key>` and exact-name matching
+paired nothing. Unprefixed names still match exactly as before; no model, loss or metric
+changed.
+
+## Changes after the move (2026-10-17)
+
+The statements above describe the move itself. Four deliberate edits were made afterwards, to
+make the trainer usable on the real 2048 px dataset on a 12 GB card; the byte-identity check
+below no longer holds for the files listed here (`models/srgan.py`, `train.py`), and the
+digests it compares against are the ones from before the move. Nothing else under `legacy/`
+changed.
+
+1. **Every model trains on random aligned crops** (`train.py`). `--patch_size` used to apply
+   to SwinIR only, and the crop happened after `prepare_batch`'s bicubic upsample, so SRCNN,
+   the autoencoder and SRGAN trained on whole 2048 px frames: the first SRCNN activation at
+   batch 16 asked for 31.75 GiB. The crop is now one call (`random_crop_pair`, the function
+   SwinIR already used) made on the CPU, before the upsample, for every model. The LR patch is
+   `--patch_size`, the HR patch `patch_size * scale`, at the matching location.
+2. **Validation and test score the whole image, by one path** (`train.py`). `eval_one_epoch`
+   used to centre-crop to `--val_patch_size`, or to the TRAINING patch when that was 0, for
+   SwinIR (one window per image), and ran batches of whole frames for the other three. It now
+   takes one image at a time through `super_resolve`: the whole image in one pass, or, with
+   `--eval_tile_size`, overlapping LR windows stitched by `symtrs.engine.tiling.predict_tiled`
+   (which gained a `scale` argument for this; windows are laid out in input pixels and come
+   back `scale` times larger). PSNR / SSIM / MSE are computed on the stitched full image and
+   averaged **per image**; they used to be computed from the batch's mean MSE. SRCNN's valid
+   convolutions are compensated by a 6 px reflect pad at evaluation only, so its window comes
+   back exactly `scale` times its input. `--val_patch_size > 0` remains a centre crop, for
+   speed. The sample panels show the centre 512 px of the whole-image result.
+3. **The validation set is the dataset's `val/`** (`train.py`). `--val_lr_root` /
+   `--val_hr_root` (new; passed by `symtrs.model.superres`) replace carving 80/20 out of
+   `train/`, which AGENTS.md ground rule 6 forbids. `symtrs` refuses to launch a training run
+   whose dataset has no `val/`; the old carving is only reachable by calling the script by hand.
+4. **SRGAN accepts scale 1** (`models/srgan.py`, one guard). The x1 control row has no
+   upsampling blocks, which the constructor already produced for a scale outside {2, 4, 8}
+   - it only refused it. `srgan_x1` had never been able to run; its smoke "OOM" was this
+   `ValueError`. No layer, loss or parameter changed.
+
+Smaller companion edits in `train.py`: SwinIR is built with `img_size` = the training crop
+(`swinir_img_size`) instead of the whole LR frame. Its shifted-window attention masks are
+precomputed for `img_size` and stored in the state dict; for a 2048 px frame that is ~10 GB
+(it is why `swinir_x1` ran out of memory while constructing the model) and every checkpoint
+carried it. Any other input size recomputes the mask, so the architecture, parameters and
+outputs are unchanged. Checkpoints written before this edit have differently shaped
+`attn_mask` buffers and do not load into a model built after it.
+
+Review fixes, same day (`train.py`):
+
+- Val / test metrics are computed on the output **clamped to [0, 1]**, i.e. on the image the
+  sample panels and a user would save; the loop used to score the unbounded network output.
+- `best.pt` survives a resume: checkpoints store `best_psnr`, and a resume restores it (older
+  checkpoints fall back to their `val_psnr`, the previous behaviour). Before, a resume from
+  `last.pt` reset the bar to that epoch's score, so a worse later epoch could replace `best.pt`.
+- `random_crop_pair` raises when the patch does not fit the frame instead of silently
+  training on the whole frame.
+- Known and kept: SRCNN is scored on the full frame including the 6 px border it only ever sees
+  through reflect padding (training matches the target to its valid output instead); about 1 %
+  of a 2048 px frame. The autoencoder's evaluation window is capped at 1024 target pixels
+  (`eval_hr_window` in `configs/generate_grid.py`), because it runs at the target size.
 
 ## Where every file came from
 

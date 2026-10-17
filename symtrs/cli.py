@@ -35,6 +35,7 @@ def reported_errors() -> tuple:
         from symtrs.data.io import ImageReadError
         from symtrs.data.splits import MissingDirectoryError
         from symtrs.model.domain import UpstreamError
+        from symtrs.model.superres import SuperResolutionError
         from symtrs.registry import RegistryError
 
         _REPORTED = (
@@ -42,6 +43,7 @@ def reported_errors() -> tuple:
             CheckpointError,
             RegistryError,
             UpstreamError,
+            SuperResolutionError,
             ImageReadError,
             DepthReadError,
             MissingDirectoryError,

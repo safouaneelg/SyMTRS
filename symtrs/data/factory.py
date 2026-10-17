@@ -27,6 +27,7 @@ from torch.utils.data import DataLoader, Dataset
 from symtrs.config import RunConfig
 from symtrs.data.depth_dataset import DepthTaskDataset, depth_coverage
 from symtrs.data.semantic_dataset import (
+    DEFAULT_LABEL_STEP,
     DEFAULT_NUM_CLASSES,
     SemanticDataset,
     check_num_classes,
@@ -57,7 +58,9 @@ def build_dataset(
     train: bool = True,
     patch_size: int = 0,
     augment: Optional[bool] = None,
-    depth_scale: float = 1.0,
+    depth_scale: float = 0.01,
+    max_depth: Optional[float] = None,
+    label_step: int = DEFAULT_LABEL_STEP,
     depth_channel: int = 0,
     depth_backend: str = "auto",
     num_classes: int = DEFAULT_NUM_CLASSES,
@@ -84,6 +87,7 @@ def build_dataset(
             split=split,
             resolution=resolution,
             depth_scale=depth_scale,
+            max_depth=max_depth,
             depth_channel=depth_channel,
             depth_backend=depth_backend,
             max_samples=max_samples,
@@ -97,6 +101,7 @@ def build_dataset(
         split=split,
         resolution=resolution,
         num_classes=num_classes,
+        label_step=label_step,
         ignore_index=ignore_index,
         max_samples=max_samples,
         patch_size=patch_size,
@@ -166,9 +171,15 @@ def from_config(cfg: RunConfig, split: Optional[str] = None, train: bool = True,
     if split is None:
         split = cfg.data.split if train else cfg.data.val_split
 
+    # Evaluation never inherits the training crop. `val_patch_size: 0` means the WHOLE image,
+    # which is what the configs say; falling back to `train.patch_size` when it was 0 scored
+    # every 2048px val/test pass (model selection included) on one random 512px window, so a
+    # 2048 number was neither reproducible nor comparable with the whole-image 1024/512/256
+    # rows. A positive `val_patch_size` is a deterministic centre crop (see the datasets);
+    # images too large for one forward pass are handled by `eval.tile_size`, not by cropping.
     patch_size = overrides.pop(
         "patch_size",
-        cfg.train.patch_size if train else (cfg.train.val_patch_size or cfg.train.patch_size),
+        cfg.train.patch_size if train else cfg.train.val_patch_size,
     )
     limit = overrides.pop(
         "limit_batches",
@@ -186,6 +197,8 @@ def from_config(cfg: RunConfig, split: Optional[str] = None, train: bool = True,
         train=train,
         patch_size=patch_size,
         depth_scale=cfg.data.depth_scale,
+        max_depth=cfg.data.max_depth,
+        label_step=cfg.data.label_step,
         depth_channel=cfg.data.depth_channel,
         depth_backend=cfg.data.depth_backend,
         num_classes=cfg.data.num_classes,

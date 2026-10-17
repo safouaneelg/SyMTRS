@@ -6,10 +6,18 @@
 # resolution: 2048 reads train/rgb_day and train/depth - the native folders. Nothing
 # is downsampled and nothing is upsampled: this is the data as it was generated.
 #
-# ZoeDepth-N is the relative-depth member of the ZoeDepth family: a MiDaS backbone
-# with a relative head, so it is scored with align: scale and trained with SILog.
+# ZoeDepth-N (ZoeD_M12_N) is a metric model - fine-tuned on NYU-Depth-v2, indoor,
+# 0-10 m - that this benchmark scores as relative depth: its indoor metres do not
+# transfer to a camera 70-270 m up, so it gets align: scale and the SILog loss.
 # Swapping this config's model to zoedepth_k changes both of those, which is the
-# whole reason the depth adapters carry a `protocol` attribute.
+# whole reason the depth adapters carry a `protocol` attribute. Its output is DEPTH
+# (not disparity), so the alignment is a scale in depth space.
+#
+# Float16 is not safe for this head: under fp16 autocast ~10% of the output pixels
+# were NaN on the RTX 5070 Ti (training loss non-finite from step 1, every evaluated
+# prediction non-positive); fp32 and bfloat16 agree to 3 digits and are finite. The
+# adapter therefore runs this model in bfloat16 (fp32 on a GPU without it) inside
+# any CUDA autocast, so amp: true stays as it is in every other file.
 #
 # ZoeDepth resizes its input to a 384px minimum side internally, so a 2048px crop
 # costs memory it does not spend on detail; 512 is the crop that reaches the network
@@ -30,9 +38,11 @@ data:
   split: train
   val_split: val
   test_split: test
-  # Metres are what the metric models predict. Check the raw encoding before trusting
-  # it: 0.01 for millimetres stored as uint16, 1.0 for metres.
-  depth_scale: 1.0
+  # Metres are what the metric models predict. The real EXRs store CENTIMETRES (hence
+  # 0.01); `symtrs doctor --data-root` prints the median in metres to check it.
+  depth_scale: 0.01
+  # Metres, after depth_scale: the sky is a huge value, not zero, so it is cut here.
+  max_depth: 1000
   depth_channel: 0
   depth_backend: auto
   num_workers: 8
@@ -51,6 +61,7 @@ train:
   # encoder can hold, and the crop still shows a representative slice of the scene
   # at this ground sampling distance.
   patch_size: 512
+  # 0 = the whole image at val and test, whatever patch_size is (see eval.tile_size).
   val_patch_size: 0
   amp: true
   gpus: 1
@@ -70,9 +81,14 @@ eval:
   metrics: [rmse, mae, abs_rel, sq_rel, d1, d2, d3, silog]
   batch_size: 1
   amp: true
-  # 0 runs the whole image in one forward pass, which is what the published numbers
-  # use. If you hit OOM, a sweep over 512/128 tiles scores the same metres.
-  tile_size: 0
+  # The whole 2048px image is scored (val and test alike), in 512px windows
+  # with 128px overlap: the size this row trained on, so the network sees the same
+  # field of view at evaluation. Never a crop - every pixel is covered and the result is
+  # deterministic.
+  # Relative depth is defined per forward pass only up to scale and shift, so each
+  # window is first fitted onto the ones already stitched; the alignment that scores
+  # the row is then computed once, on the full stitched image (engine/tiling.py).
+  tile_size: 512
   tile_overlap: 128
   align: scale
   num_visualizations: 4

@@ -14,28 +14,56 @@ root, and do not "fix" the code to make a dummy number look better.
 ## 1. What this is
 
 `symtrs` is the reproducibility package for the SyMTRS benchmark: a multi-task synthetic
-aerial dataset benchmark with four tasks.
+aerial dataset benchmark with five tasks.
 
 | Task | Registry models | Input → target |
 | --- | --- | --- |
 | `depth` | 11 (MiDaS ×5, ZoeDepth ×3, Depth Anything 3 ×2, Depth Pro) | `rgb_day{_lr}` → `depth{_lr}` |
 | `segmentation` | 6 (U-Net, DeepLabV3 ×2, SegFormer ×3) | `rgb_day{_lr}` → `semantic{_lr}` |
-| `domain_adapt` | 2 (CycleGAN, pix2pix) × 2 directions | `rgb_day` ⇄ `rgb_night`, native only |
+| `domain_adapt` | 2 (CycleGAN, pix2pix) × 4 directions | `rgb_day` ⇄ `rgb_night` (`day2night`, `night2day`) and `rgb_day` ⇄ `rgb_noshadow` (`shadow2noshadow`, `noshadow2shadow`), native only |
+| `shadow_removal` | 4 (ShadowFormer, Restormer, Uformer, ShadowMaskFormer), 2048 only | `rgb_day` → `rgb_noshadow` |
 | `superresolution` | 4 (SRCNN, autoencoder, SRGAN, SwinIR) × 4 scales | `rgb_day_lr/xN` → native `rgb_day` |
 
-Two of the four are not trained by this package at all and are driven as subprocesses:
+Two of the five are not trained by this package at all and are driven as subprocesses (shadow
+removal is a third case, below):
 
-- **domain adaptation** runs the vendored `pytorch-CycleGAN-and-pix2pix/` tree.
+- **domain adaptation** runs the vendored `pytorch-CycleGAN-and-pix2pix/` tree. The pair is
+  data (`DIRECTION_ROLES` in `symtrs/model/domain/upstream.py`): `rgb_day` is always A, B is
+  `rgb_night` or `rgb_noshadow`, and the direction only picks `AtoB`/`BtoA`. `shadow2noshadow`
+  is also scored like a shadow-removal result (the `shadow_removal` staging, mask and metrics,
+  after resampling upstream's 256 px output to the ground-truth size), so it sits beside
+  ShadowFormer / Restormer / Uformer / ShadowMaskFormer in `symtrs tables`.
 - **super-resolution** runs the trainer at `symtrs/legacy/superres/train.py` (launched as
   `python -m symtrs.legacy.superres.train`), which predates the package and was moved
-  inside it unchanged in 2026-10-15 — see `symtrs/legacy/README.md`.
+  inside it unchanged in 2026-10-15, then changed on purpose on 2026-10-17 (crops for every
+  model, whole-image tiled evaluation, `val/` as the validation set, SRGAN x1, SwinIR
+  `img_size`) — `symtrs/legacy/README.md`, "Changes after the move", lists every edit. A
+  failed trainer run exits non-zero and leaves `summary_failed.json`, never `summary.json`.
+
+**Shadow removal** takes only the network *class* from four upstream checkouts under
+`third_party/` (pinned in `third_party/PINS.md`, cloned by `python scripts/fetch_third_party.py`,
+gitignored). `symtrs/model/shadow/` stages `rgb_day`/`rgb_noshadow` pairs plus a *derived* shadow
+mask (the dataset has none; `shadow.mask_threshold`/`mask_open`; derived once per pair and settings into the shared,
+gitignored `shadow.mask_cache` (`.cache/shadow_masks`, valid while the sources' size/mtime match,
+filled by `shadow.mask_workers` processes, never inside the dataset) and only linked into each run,
+see `symtrs/model/shadow/mask_cache.py`; `python scripts/precompute_shadow_masks.py --data-root
+<root>` builds them upfront), runs one shared worker loop
+(`python -m symtrs.model.shadow.worker`, cwd = the upstream repo, so paths must be absolute),
+and scores the written PNGs with `symtrs/metrics/shadow.py` (PSNR/SSIM/LAB on all, shadow and
+non-shadow pixels). 2048 only; zero-shot is refused (the released weights are ISTD/SIDD, not
+SyMTRS); `shadow.init_weights` loads an upstream checkpoint. On a 12 GB card Restormer needs
+batch 1 (batch 2 spills). ShadowMaskFormer (the 2.28 M light model; ShadowFormer is 11.4 M) has
+**no released weights** and no licence file: it is always trained from scratch, so its rows are
+not like-for-like with ShadowFormer's (which starts from ISTD+). It is written for [-1, 1]
+inputs and the worker converts at the network boundary only (`Arch.input_range`, applied in
+`worker.forward`); do not convert anywhere else.
 
 For both, `symtrs` owns exactly three things: the folder mapping, the launch, and folding the
 result into the `summary.json` shape every task writes. Do not reimplement their models in
 `symtrs/` — a second copy is a second thing to keep in step with the checkpoints.
 
 The CLI, the YAML loader and the Python SDK all build the same `RunConfig` and reach the
-same entry points, so all four tasks are reachable from all three:
+same entry points, so all five tasks are reachable from all three:
 `autoloader("srcnn").train(...)` launches that trainer and
 `autoloader("cyclegan").train(...)` the vendored upstream, exactly as `symtrs train` does.
 
@@ -55,18 +83,51 @@ changing anything.
    `rgb_day`). `resolution: 2048` there means ×1 — LR and HR are the same folder, a refiner
    control row, explicitly *not* super-resolution. Never add a `scale:` key to a config.
 
-3. **Depth models have a protocol, and the loss and the alignment follow from it.**
-   `relative` → `loss: silog` + `eval.align: scale`; `metric` → `loss: berhu` +
-   `eval.align: none`. The registry is the source of truth (`spec.protocol`). A relative
-   model scored without alignment looks broken; a metric model scored with it looks
-   suspiciously good. Both mistakes have been made here; the tests in
-   `tests/test_vendored_and_grid.py` now assert the pairing holds at every resolution.
+3. **Depth models have a protocol and an output space, and the loss and the alignment follow
+   from both.** The single statement is `symtrs.registry.depth_pairing(protocol, output_space)`:
 
-4. **Six segmentation classes, `ignore_index: 255`.** Both are recorded in the checkpoint.
-   If the mask generator ever writes `0` for "no class", change `data.ignore_index` — never
-   make the metric guess which pixels to ignore.
+   | protocol | raw output | loss | `eval.align` | models |
+   | --- | --- | --- | --- | --- |
+   | `metric` | metres | `berhu` | `none` | ZoeD-K/NK, DA3 metric, Depth Pro |
+   | `relative` | depth up to a scale | `silog` | `scale` | ZoeD-N, DA3 relative |
+   | `relative` | **disparity** `s/z + t` | `ssi` | `scale_shift_disparity` | MiDaS x5 |
 
-5. **`rgb_night` is native-only.** There is no downsampled night imagery, which is why
+   `scale_shift_disparity` is the MiDaS protocol: scale **and shift** are fitted per image by
+   least squares in disparity space against `1 / ground truth`, the fitted disparity is clamped
+   to at least `1 / data.max_depth`, and only then inverted to metres. Inverting first and
+   aligning with a scale alone (the earlier setup) cannot remove the shift `t`, which dominates
+   on narrow-depth nadir views; the resulting MiDaS numbers were meaningless. `ssi` is the
+   matching scale-and-shift-invariant loss (the same closed-form fit as the metric, divided by
+   the target's spread so it is dimensionless). The registry is the source of truth
+   (`spec.protocol`, `spec.output_space`); adapters refuse a mismatched `align` at build time and
+   in `evaluate_depth` (`DepthAdapter.validate_alignment`), and the tests in
+   `tests/test_vendored_and_grid.py` and `tests/test_depth_conventions.py` assert the pairing at
+   every resolution. A relative model scored without alignment looks broken; a metric model
+   scored with one looks suspiciously good. Both mistakes have been made here.
+
+   Two more facts that decide whether a metric-model number means anything. *DA3 metric*
+   returns canonical depth, `metres = canonical * focal_px / 300`; `focal_px` is derived, not
+   typed: `build_from_config` sets it to `(resolution / 2) / tan(data.camera_hfov_deg / 2)`
+   (1773.6 px at 2048, halving per level; crops and tiles keep it because they keep the pixel
+   size). `data.camera_hfov_deg: 60` is **confirmed**: the dataset owner stated on 2026-10-17 that
+   the capture camera's horizontal FOV is always 60 deg for the SyMTRS capture (a car-size
+   estimate over 838 cars, 54-63 deg, agrees). The actor property (`FieldOfView = 60.f`) is
+   editable per instance and the dataset does not store it, so a future capture with another
+   FOV must set `data.camera_hfov_deg`. *ZoeD-K* has a bounded bin head: it cannot predict deeper than
+   `model_kwargs.max_depth` (80 m = what the released weights were trained with; the torch.hub
+   entry point wrongly builds 10). The generated fine-tuning configs use 300 to cover the data
+   (scenes reach ~280 m); a zero-shot run should keep the default. ZoeD-N/NK heads are
+   unbounded and refuse the key. ZoeD-N is kept out of float16 inside the adapter (it
+   produced NaN under fp16 autocast).
+
+4. **Five segmentation classes, `ignore_index: 255`.** Background, building, green, road,
+   car (`data.num_classes: 5`); the masks store `class_id * data.label_step` (63) as 8-bit
+   gray, and an off-grid gray value decodes to the ignore index. All three are recorded in the
+   checkpoint. If the mask generator ever writes `0` for "no class", change
+   `data.ignore_index` — never make the metric guess which pixels to ignore.
+
+5. **`rgb_night` and `rgb_noshadow` are native-only.** There is no downsampled night or
+   shadow-free imagery, which is why
    domain adaptation is a 2048-only task and `symtrs sweep` drops the other resolutions for
    it rather than approximating.
 
@@ -74,7 +135,7 @@ changing anything.
    and `data.split` must differ from the evaluation splits. Never carve a validation set out
    of `train/` in code — upstream's loaders will happily do that if you let them (see §7).
 
-7. **`configs/` is generated output.** 88 of the YAML files are written by
+7. **`configs/` is generated output.** 96 of the YAML files are written by
    `configs/generate_grid.py` from one table per task. Change the table and re-run it;
    `python3 configs/generate_grid.py --check` and the test suite both fail if a committed
    file has drifted. `configs/train_sr_x2.yaml` is the one hand-written file (the
@@ -87,13 +148,35 @@ changing anything.
    other drift; `--check` verifies the tree is complete.
 
 9. **Dependencies stay inside torch + torchvision + timm + numpy/PIL/matplotlib/tqdm/yaml.**
-   Depth Anything 3 (`transformers`) and Depth Pro are optional extras, imported lazily
+   SegFormer (`transformers`), Depth Anything 3 (the `depth_anything_3` package, installed
+   with `pip install --no-deps depth-anything-3==0.1.1` because its wheel pins numpy<2) and
+   Depth Pro are optional extras, imported lazily
    inside the adapter that needs them so `symtrs doctor` can report the model as unavailable
    instead of the whole package failing to import.
 
 10. **timm cannot serve everything from one environment.** ZoeDepth's released weights need
-    `timm==0.6.12`; SegFormer needs a timm with `mit_b0`, which 0.6.12 does not have. MiDaS
-    works on both. `symtrs doctor` reports which side you are on. Plan on two environments.
+    `timm==0.6.12`, and so does the MiDaS Swin-V2 checkpoint (`midas_dpt_swin2_tiny`: timm
+    >= 0.9 moved the Swin-V2 patch-merging between stages, so its state_dict loads with a
+    missing `downsample.reduction` key), and so does MiDaS DPT-BEiT-Large
+    (`midas_dpt_beit_large`: MiDaS patches timm's `Block.forward` with a copy that calls
+    `self.drop_path`, which timm >= 0.9 split into `drop_path1`/`drop_path2`, so it builds and
+    then fails at the first forward; the adapter refuses at build time and names `.venv-zoe`).
+    The other MiDaS models (small, DPT-Hybrid, DPT-Large) work on both: they patch only the
+    top-level ViT's forward, never a timm `Block`. SegFormer is no
+    longer part of the conflict: timm has never shipped MiT, so its encoder comes from
+    `transformers` (`nvidia/mit-b{0,1,2}`). `symtrs doctor` reports which side you are on.
+    Plan on two environments (`.venv` and `.venv-zoe`); `scripts/run_queue.py` takes the
+    environment per job.
+
+11. **Evaluation scores the whole image, with the same path for val and test.** `train.val_patch_size: 0`
+    means the full image, never `train.patch_size` (the crop is a memory device; inheriting it
+    scored the 2048 rows on one random 512px window). A row that trains on crops smaller than its
+    images is evaluated in sliding windows of that crop (`eval.tile_size`, set by
+    `eval_tiling` in the generator); relative-depth windows are fitted onto each other before
+    blending and the alignment is computed once per stitched image. A NaN/inf validation metric is
+    never "best", and non-finite metrics are written as `null`, never as a bare `NaN`. mIoU
+    averages the classes with a non-empty union (`miou_classes` says how many; class 0 is absent
+    from the current capture).
 
 ## 3. Setup
 
@@ -179,8 +262,8 @@ symtrs/
     semantic/          segmentation models
     domain/            the CycleGAN/pix2pix subprocess front-end + vendored-tree check
     superres/          the SR subprocess front-end
-configs/               88 generated YAMLs + generate_grid.py (see configs/README.md)
-symtrs/legacy/          the SR implementation and datasets: moved inside, byte-identical
+configs/               96 generated YAMLs + generate_grid.py (see configs/README.md)
+symtrs/legacy/          the SR implementation and datasets: moved inside, then edited (see its README)
 train_superresolution.py, dataloader/   shims that re-export from symtrs/legacy/
 pytorch-CycleGAN-and-pix2pix/                           vendored upstream, pinned
 tests/                 pytest; conftest.py holds the layout and data fixtures
@@ -226,6 +309,15 @@ subprocess. Add it to §1 of this file and to the table in `configs/README.md`.
   files and fails if it does not. Upstream writes its generated images **flat** in
   `results/<name>/<phase>_<epoch>/images/` as `<image>_fake_B.png` — not one folder per
   label, which is the other way it was read once and scored nothing.
+- **The generated image is `fake_B` in every direction, `BtoA` included.** Upstream's
+  `set_input` (`models/pix2pix_model.py`, `models/cycle_gan_model.py`) does
+  `real_A = input["A" if AtoB else "B"]` and `forward` does `fake_B = G(real_A)`, so
+  `--direction BtoA` swaps the *inputs*, not the output label; `fake_A` is CycleGAN's other
+  generator on the other input, i.e. the opposite translation. Reading `fake_A` for
+  `night2day`/`noshadow2shadow` made pix2pix score nothing (`test: {}`) and CycleGAN score
+  day-to-night against real day images. `DomainAdaptation.generated_paths` now selects
+  `GENERATED_LABEL` and raises when it finds nothing; `tests/test_domain_commands.py` parses
+  the two upstream files and fails if the premise changes.
 - **Upstream's `--save_epoch_freq` default is 5, and the score step loads `latest`.** A run
   shorter than five epochs trains and then fails at scoring with a `FileNotFoundError`. The
   front-end passes `--save_epoch_freq 1` for that reason; a caller can thin it out again,
@@ -233,6 +325,14 @@ subprocess. Add it to §1 of this file and to the table in `configs/README.md`.
 - **DeepLabV3 and batch size 1.** torchvision's atrous head has BatchNorm and cannot train
   with a batch of one; the trainer converts the resulting error into a `ConfigError` that
   says so. Keep `batch_size >= 2` for the DeepLabV3 configs.
+- **`train.freeze` used to be a no-op.** Adapters stored the policy and nothing applied it;
+  `symtrs.engine.trainer.apply_run_freeze` now does, before `.to()`/DDP/the optimiser. It
+  recognises the encoder by module-name prefix (`encoder`, `backbone`, `pretrained`), so a
+  model that keeps everything under one of those sets `freeze_encoder_prefixes` (MiDaS:
+  `backbone.pretrained`). Check the "freeze=... -> N M trainable" line. Depth Pro only fits a
+  12 GB card because of it (~7.9 GiB at batch 1; unfrozen it is out of memory above 11 GiB),
+  and its 1536 px internal size is fixed by the architecture, so neither crops nor a lower
+  `resolution` shrink a step.
 - **`data.depth_scale`.** Metric depth models predict metres. If the EXR stores millimetres
   as uint16, every metric is wrong by a constant factor and it looks like a broken model.
   `symtrs doctor --data-root` checks the first file it finds.
@@ -248,6 +348,18 @@ subprocess. Add it to §1 of this file and to the table in `configs/README.md`.
   numpy` refuses an EXR rather than returning whatever numpy guessed.
 - **A missing resolution folder is an error, never a fallback.** A silent fallback to a
   coarser level changes what the reported number means.
+- **A relative run directory and a subprocess with another cwd.** Shadow removal and domain
+  adaptation launch with the upstream checkout as cwd (and the shadow worker re-reads
+  `config.yaml` there), so a relative `--out-dir runs/validation/x` made the worker fail on
+  its own `config.yaml` and upstream's `train.py` miss `staging/trainA` (it then falls into its
+  auto-split branch; its relative `--checkpoints_dir`/`--results_dir` would also have been
+  written into the vendored tree). Found by the 2026-10-17 validation queue. The runners now
+  start with `cfg = cfg.anchored()` (`RunConfig.anchored`: `out_dir`, `data.root`,
+  `shadow.init_weights`, `train.resume` resolved against the *caller's* cwd, once, on a copy).
+  Never build a path for a subprocess from `cfg.resolved_out_dir` on an un-anchored config, and
+  never resolve a user-typed path inside a launcher. `tests/test_relative_run_dir.py` covers
+  the three subprocess tasks. Paths inside `upstream_args`/`model_kwargs.extra_args` are
+  passed through verbatim: give them absolute.
 
 ## 8. Testing
 

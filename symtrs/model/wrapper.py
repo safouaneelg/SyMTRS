@@ -254,6 +254,32 @@ class SymTRSModel:
         return f"SymTRSModel({self.net.describe()}{origin})"
 
 
+def _fill_camera_kwargs(cfg: RunConfig) -> None:
+    """Give a metric model that needs the focal length the one the data implies.
+
+    Depth Anything 3 metric returns *canonical* depth (the depth a camera of focal length 300
+    px would see) and `metres = canonical * focal_px / 300`. Left unset it was scoring that
+    canonical depth as metres, ~25x too small here (abs_rel 0.91-0.96, d1 = 0). The focal
+    length is a fact about the data level, `(resolution / 2) / tan(hfov / 2)`, so it is derived
+    from `cfg.resolution` and `data.camera_hfov_deg` and follows the resolution axis without a
+    per-file number that could be left behind (a 1024 run with the 2048 value would be 2x off).
+    Cropping and tiling do not change it: a crop keeps the pixel size.
+
+    The value is written back into `cfg.model_kwargs` so that it lands in the checkpoint
+    metadata and in `config.yaml`, which is what `autoloader` rebuilds the model from; an
+    explicit number in `model_kwargs` always wins.
+    """
+    from symtrs.config import focal_px_for_resolution
+    from symtrs.registry import get_spec
+
+    focal_kwarg = get_spec(cfg.model).focal_kwarg
+    if not focal_kwarg or cfg.model_kwargs.get(focal_kwarg) is not None:
+        return
+    cfg.model_kwargs[focal_kwarg] = focal_px_for_resolution(
+        cfg.resolution, cfg.data.camera_hfov_deg
+    )
+
+
 def build_from_config(cfg: RunConfig):
     """Build the model a run config asks for, with the config's loss, align and freeze.
 
@@ -264,6 +290,8 @@ def build_from_config(cfg: RunConfig):
     overrides: Dict[str, Any] = dict(cfg.model_kwargs)
 
     if cfg.task == "depth":
+        _fill_camera_kwargs(cfg)
+        overrides = dict(cfg.model_kwargs)
         overrides.setdefault("loss", cfg.train.loss)
         overrides.setdefault("align", cfg.eval.align)
         overrides.setdefault("freeze", cfg.train.freeze)

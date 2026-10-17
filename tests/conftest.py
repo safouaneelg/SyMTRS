@@ -62,6 +62,7 @@ def layout(tmp_path: Path) -> Path:
         split_root = root / split
         (split_root / "rgb_day").mkdir(parents=True)
         (split_root / "rgb_night").mkdir(parents=True)
+        (split_root / "rgb_noshadow").mkdir(parents=True)
         (split_root / "depth").mkdir(parents=True)
         (split_root / "semantic").mkdir(parents=True)
         for suffix in ("x2", "x4", "x8"):

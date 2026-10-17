@@ -67,7 +67,9 @@ def prepare_input(model, image: torch.Tensor) -> torch.Tensor:
     return prepared
 
 
-def forward_native(model, image: torch.Tensor, tile_size: int = 0, tile_overlap: int = 0) -> torch.Tensor:
+def forward_native(
+    model, image: torch.Tensor, tile_size: int = 0, tile_overlap: int = 0, stats=None
+) -> torch.Tensor:
     """Raw prediction for a whole batch, at the input's spatial size.
 
     Takes a raw `[0, 1]` image; preprocessing is applied here. Returns the model's *own*
@@ -85,19 +87,51 @@ def forward_native(model, image: torch.Tensor, tile_size: int = 0, tile_overlap:
     2048)". Both the training step and the evaluation pass reach the network through this
     function, so both were affected at every resolution.
     """
+    # Relative depth is only defined up to a scale and shift per forward pass, so tiles of
+    # one such image must be brought onto each other before they are blended (see
+    # `engine.tiling`). Metric depth and logits are absolute and are blended as they are.
+    # The kind of matching follows the model's OUTPUT SPACE, not just its protocol: disparity gets
+    # scale+shift, depth-up-to-scale gets scale only (a shift could not be undone by the `scale`
+    # alignment), metric depth and logits get none. `stats` collects the fit fallbacks.
     if tile_size and tile_size > 0 and max(image.shape[-2:]) > tile_size:
-        from symtrs.engine.tiling import predict_tiled
+        from symtrs.engine.tiling import match_mode, predict_tiled
 
         def forward_fn(tile: torch.Tensor) -> torch.Tensor:
-            return model.forward(prepare_input(model, tile))
+            return _restore_size(model, model.forward(prepare_input(model, tile)), tile)
 
-        stitched = predict_tiled(image, forward_fn, tile_size, tile_overlap)
+        stitched = predict_tiled(
+            image, forward_fn, tile_size, tile_overlap, match=match_mode(model), stats=stats
+        )
         return _resize(stitched, image.shape[-2:])
 
     prepared = prepare_input(model, image)
     method = getattr(model, "forward_at_size", None)
     prediction = method(prepared) if callable(method) else model.forward(prepared)
-    return _resize(prediction, image.shape[-2:])
+    return _restore_size(model, prediction, image, prepared)
+
+
+def _restore_size(model, prediction: torch.Tensor, raw: torch.Tensor, prepared=None) -> torch.Tensor:
+    """Bring a prediction back onto the raw image's pixel grid.
+
+    When the only thing `prepare_input` did to the size was pad bottom/right up to the
+    model's multiple, the prediction is the padded size and the padding is *cropped* off:
+    resizing it instead stretches the whole field by up to a few pixels (DA3 pads a 512px
+    tile to 518), which shifts every pixel against the ground truth. Any other size change
+    (a MiDaS transform resizing to 384, a head at 1/4 resolution) is a genuine resample and
+    gets the bilinear resize.
+    """
+    height, width = raw.shape[-2:]
+    multiple = int(getattr(model, "size_multiple", 1) or 1)
+    padded = (height + (-height) % multiple, width + (-width) % multiple)
+    if (
+        tuple(prediction.shape[-2:]) == padded
+        and padded != (height, width)
+        and (prepared is None or tuple(prepared.shape[-2:]) == padded)
+    ):
+        if prediction.dim() == 3:
+            prediction = prediction.unsqueeze(1)
+        return prediction[..., :height, :width]
+    return _resize(prediction, (height, width))
 
 
 # ------------------------------------------------------------------ training step
@@ -172,8 +206,19 @@ def train_one_epoch(
     device: torch.device,
     epoch: int = 0,
     max_steps: int = 0,
+    scheduler=None,
 ) -> Dict[str, float]:
-    """Train for one pass over `loader` and return the averaged metrics."""
+    """Train for one pass over `loader` and return the averaged metrics.
+
+    `scheduler`, when given, is stepped once per *optimiser* step, here and nowhere else.
+    `trainer.build_scheduler` sizes its warmup and decay in optimiser steps, and the trainer
+    used to step it once per epoch instead: the learning rate then crawled through the first
+    `epochs` points of a schedule meant for `epochs * steps_per_epoch`, so a 2-epoch run
+    trained at 4-8% of the configured rate and no run ever decayed. Stepping next to
+    `optimizer.step()` keeps the two counts equal by construction - including for the last,
+    partial accumulation group, and for a step the loss-scaler skipped, which still
+    advances the schedule so the epoch ends where `build_scheduler` expects.
+    """
     model.train()
     tracker = MetricTracker()
     accumulation = max(1, int(cfg.train.grad_accum))
@@ -218,6 +263,8 @@ def train_one_epoch(
             else:
                 optimizer.step()
             optimizer.zero_grad(set_to_none=True)
+            if scheduler is not None:
+                scheduler.step()
 
         if cfg.train.log_every and (step + 1) % cfg.train.log_every == 0:
             print(
@@ -258,9 +305,17 @@ def evaluate_depth(
 
     model.eval()
     align = align or cfg.eval.align or getattr(model, "align", "") or getattr(model, "default_align", "none")
+    # An override (`--align`, `eval.align`) can contradict the model's output space; refuse it
+    # here as well as at build time, because this function is also reached with a model built
+    # elsewhere. Adapters without the method (test doubles) are scored as before.
+    validate_alignment = getattr(model, "validate_alignment", None)
+    if callable(validate_alignment):
+        validate_alignment(align)
+    scoring_input = getattr(model, "scoring_input", None)
     tracker = MetricTracker()
     skipped = 0
     saved = 0
+    tile_stats: Dict[str, int] = {}
 
     for batch in loader:
         image = batch["image"].to(device, non_blocking=True)
@@ -268,20 +323,38 @@ def evaluate_depth(
         valid = batch["valid"].to(device, non_blocking=True)
 
         with autocast_context(device, cfg.eval.amp):
-            prediction = forward_native(model, image, cfg.eval.tile_size, cfg.eval.tile_overlap)
+            prediction = forward_native(
+                model, image, cfg.eval.tile_size, cfg.eval.tile_overlap, stats=tile_stats
+            )
             metres = model.to_metres(prediction)
 
         metres = metres.float()
+        # What the alignment fits: metres for most, the raw disparity for MiDaS (whose shift
+        # a depth-space fit cannot remove). `metres` stays the human-readable map for previews.
+        scored = scoring_input(prediction.float(), align) if callable(scoring_input) else metres
         ground_truth = ground_truth.float()
         valid = valid.bool() & torch.isfinite(ground_truth) & (ground_truth > 0)
 
         for index in range(image.shape[0]):
-            single_prediction = metres[index : index + 1]
+            single_prediction = scored[index : index + 1]
             single_target = ground_truth[index : index + 1]
             single_valid = valid[index : index + 1]
             try:
                 metrics = compute_depth_metrics(
-                    single_prediction, single_target, single_valid, align=align
+                    single_prediction, single_target, single_valid, align=align,
+                    max_depth=cfg.data.max_depth,
+                )
+                # The fitted scale and shift are logged alongside the metrics: a scale that
+                # drifts epoch to epoch is the first sign that an alignment is hiding a
+                # model that is not actually predicting the right thing. The fit sits inside
+                # the same `try` as the metrics: it raises `AllInvalidError` for an image
+                # with fewer than two valid pixels, which `compute_depth_metrics` tolerates
+                # (it leaves that image unaligned), so a single-valid-pixel image used to get
+                # through the metrics and then crash the whole evaluation here. Both results
+                # are only recorded once both exist, so a skipped image leaves no half-row.
+                _, fits = align_prediction(
+                    single_prediction, single_target, single_valid, mode=align,
+                    max_depth=cfg.data.max_depth,
                 )
             except AllInvalidError as exc:
                 # An all-sky tile has nothing to measure. Counting it as a failure
@@ -292,12 +365,6 @@ def evaluate_depth(
                 continue
 
             tracker.update_many(metrics, n=1)
-            # The fitted scale and shift are logged alongside the metrics: a scale that
-            # drifts epoch to epoch is the first sign that an alignment is hiding a
-            # model that is not actually predicting the right thing.
-            _, fits = align_prediction(
-                single_prediction, single_target, single_valid, mode=align
-            )
             tracker.update_many(summarise_alignment(fits), n=1)
 
             if vis_dir and saved < num_visualizations:
@@ -314,6 +381,13 @@ def evaluate_depth(
     results = tracker.averages()
     if skipped:
         results["skipped_images"] = float(skipped)
+    if tile_stats.get("windows"):
+        # Totals over the split, only when tiling ran: a window whose overlap was too flat or
+        # too uncorrelated for a full fit (`tile_match_fallbacks`) or could not be fitted at all
+        # (`tile_match_unmatched`) is a stitching seam risk the number should disclose.
+        results["tile_match_fallbacks"] = float(tile_stats["fallbacks"])
+        results["tile_match_unmatched"] = float(tile_stats["unmatched"])
+        results["tile_windows"] = float(tile_stats["windows"])
     return results
 
 

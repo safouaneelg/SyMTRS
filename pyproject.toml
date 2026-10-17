@@ -24,8 +24,11 @@ dependencies = [
 # .exr depth maps; .npy depth works with no extra dependency.
 exr = ["OpenEXR"]
 cv2 = ["opencv-python-headless"]
-# Needed only for the Depth Anything 3 adapters.
-da3 = ["transformers"]
+# Needed only for the Depth Anything 3 adapters. The `depth-anything-3` package itself is
+# deliberately NOT listed: its wheel pins numpy<2 and requires xformers/open3d/evo/e3nn/
+# pycolmap for 3D export that the adapter never imports. Install it with
+# `pip install --no-deps depth-anything-3==0.1.1` (see symtrs/model/depth/da3.py).
+da3 = ["omegaconf", "addict", "safetensors", "huggingface_hub"]
 # Needed only for the Depth Pro adapter.
 depthpro = ["depth-pro @ git+https://github.com/apple/ml-depth-pro.git"]
 # Needed only by the domain-adaptation task, and needed to *start* it: the vendored
@@ -38,8 +41,9 @@ adapt = ["dominate", "wandb"]
 # imports `backbones.beit`, which does `import timm` at module level. So it is required to
 # load those weights at all, not just to use our own encoders.
 timm = ["timm"]
-# Kept because the earlier install instructions named it; identical to the `timm` extra.
-segformer = ["timm"]
+# SegFormer's MiT encoder comes from `transformers` (timm has never shipped MiT). This extra
+# used to be an alias of `timm`; MiDaS/ZoeDepth still need the `timm` extra on its own.
+segformer = ["transformers"]
 dev = ["pytest"]
 
 [project.scripts]

@@ -84,7 +84,8 @@ def test_missing_directory_error_names_the_path_and_the_fix(tmp_path: Path):
     directories = resolve_split_dirs(str(root), "train", 1024)
     with pytest.raises(MissingDirectoryError) as info:
         directories.path_for("depth")
-    message = str(info.value)
+    # Normalise separators: on Windows the path in the message reads depth_lr\x2.
+    message = str(info.value).replace("\\", "/")
     assert "depth_lr/x2" in message
     # The hint has to name a command that runs. `symtrs inspect --root` was here, and
     # `inspect` takes a positional checkpoint, so the flag was rejected - on the message a
@@ -98,10 +99,11 @@ def test_missing_root_is_reported_not_created(tmp_path: Path):
         resolve_split_dirs(str(tmp_path / "nowhere"), "train", 2048)
 
 
-def test_unknown_split_name():
+def test_unknown_split_name(tmp_path: Path):
     with pytest.raises(ValueError, match="unknown split"):
         # Even with a root that exists, a bad split name must not silently resolve.
-        resolve_split_dirs("/tmp", "training", 2048)
+        # (tmp_path, not "/tmp": the latter does not exist on Windows.)
+        resolve_split_dirs(str(tmp_path), "training", 2048)
 
 
 def test_available_resolutions_reports_what_is_there(layout: Path, partial_layout: Path):

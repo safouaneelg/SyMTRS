@@ -16,6 +16,7 @@ from typing import Dict, Optional
 import torch
 import torch.nn.functional as F
 
+from symtrs.metrics.depth import DISPARITY_ALIGNMENTS
 from symtrs.model.base import DepthTarget, TaskModel, apply_freeze_policy
 from symtrs.model.depth.losses import build_depth_loss, default_loss_for_protocol, gradient_loss
 
@@ -28,6 +29,10 @@ ALIGNMENT_NOTES = {
     "median": "single scale from the ratio of medians",
     "scale": "least-squares scale in depth space; the Depth Anything / MiDaS comparison convention",
     "scale_shift": "least-squares scale and shift; most permissive",
+    "scale_shift_disparity": (
+        "least-squares scale and shift in disparity space against 1/GT, then inverted; "
+        "the MiDaS protocol, for models whose output is s/z + t"
+    ),
 }
 
 
@@ -41,6 +46,11 @@ class DepthAdapter(TaskModel):
 
     #: Alignment the metrics use by default for this model. Relative models override.
     default_align = "none"
+
+    #: What the raw output is: "depth" (metres, or depth up to a scale) or "disparity" (MiDaS's
+    #: `s / z + t`). With `protocol` it fixes the loss and the alignment
+    #: (`symtrs.registry.depth_pairing`); `validate_alignment` refuses a mismatch.
+    output_space = "depth"
 
     #: Preferred input size, 0 for "whatever you give it".
     native_input = 0
@@ -58,10 +68,45 @@ class DepthAdapter(TaskModel):
         super().__init__()
         loss_kwargs = dict(loss_kwargs or {})
         self.gradient_weight = float(loss_kwargs.pop("gradient_weight", 0.0))
-        self.loss_name = loss or default_loss_for_protocol(self.protocol)
+        self.loss_name = loss or default_loss_for_protocol(self.protocol, self.output_space)
         self.criterion = build_depth_loss(self.loss_name, **loss_kwargs)
         self.align = align or self.default_align
+        self.validate_alignment(self.align)
         self.freeze = freeze
+
+    def validate_alignment(self, align: str) -> None:
+        """Refuse an alignment that does not fit this model's output space.
+
+        A MiDaS model scored with a depth-space alignment (`scale`, `median`, `scale_shift`) is
+        scored on `1 / (s / z + t)`, which is not an affine function of depth, so the numbers
+        look like a bad model (the 2026-10-17 audit found silog 41-111 against ~27 for a constant
+        plane). The reverse - a disparity fit applied to something that already is depth - would
+        invert metres. Both fail here, at build time and again at the start of an evaluation,
+        rather than as a table that nobody can interpret.
+        """
+        disparity_alignment = align in DISPARITY_ALIGNMENTS
+        if self.output_space == "disparity" and not disparity_alignment:
+            raise ValueError(
+                f"{type(self).__name__} outputs disparity (s/z + t), which only a disparity-space "
+                f"fit can align; align={align!r} would score 1/(s/z + t) as if it were depth. "
+                f"Use align='scale_shift_disparity' (the registry default) - see AGENTS.md rule 3."
+            )
+        if self.output_space != "disparity" and disparity_alignment:
+            raise ValueError(
+                f"{type(self).__name__} outputs depth, not disparity; align={align!r} would invert "
+                f"it. Use 'none' (metric) or 'scale' (relative) - see AGENTS.md rule 3."
+            )
+
+    def scoring_input(self, prediction: torch.Tensor, align: str) -> torch.Tensor:
+        """What `compute_depth_metrics` should be given for this alignment.
+
+        Metres for every alignment except the disparity ones, which fit the raw disparity
+        themselves: converting to metres first would throw away the sign and the shift they need
+        (`to_metres` zeroes non-positive disparities).
+        """
+        if align in DISPARITY_ALIGNMENTS:
+            return prediction.float()
+        return self.to_metres(prediction)
 
     # ------------------------------------------------------------- preprocessing
 
@@ -119,6 +164,8 @@ class DepthAdapter(TaskModel):
 
         if self.protocol == "metric":
             return DepthTarget(values=depth_metres, mask=valid, unit="metres")
+        if self.output_space == "depth":
+            return DepthTarget(values=depth_metres, mask=valid, unit="relative_depth")
 
         disparity = torch.where(valid, 1.0 / depth_metres.clamp_min(EPS), torch.zeros_like(depth_metres))
         return DepthTarget(values=disparity, mask=valid, unit="normalized_disparity")
@@ -126,8 +173,13 @@ class DepthAdapter(TaskModel):
     def to_metres(self, prediction: torch.Tensor, stats: Optional[Dict] = None) -> torch.Tensor:
         """Raw model output to metres. Non-positive predictions become 0 and are
         filtered out by the metrics, since `1/x` of a negative disparity is a
-        meaningless negative distance rather than a wrong one."""
-        if self.protocol == "metric":
+        meaningless negative distance rather than a wrong one.
+
+        For a disparity model this is `1 / disparity` with the unknown scale and shift still in
+        it: it is NOT metres and is not what the evaluation scores (see `scoring_input`); it is
+        what `predict` returns for qualitative use.
+        """
+        if self.protocol == "metric" or self.output_space == "depth":
             return prediction.clamp_min(0.0)
 
         disparity = prediction.float()

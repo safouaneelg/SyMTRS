@@ -24,6 +24,12 @@
 # The real super-resolution cells of this row are srgan_x2.yaml,
 # srgan_x4.yaml and srgan_x8.yaml in this folder.
 #
+# Training is on random aligned crops: 256px of the LR input and the
+# matching 256px of the target. A whole 2048px frame does not fit a 12 GB card for any
+# model here. Validation and test score the WHOLE image (val_patch_size: 0), pushed
+# through the network in eval.tile_size windows where it does not fit in one pass;
+# PSNR / SSIM / MSE are computed per image on the stitched result and averaged.
+#
 # The training code for this task predates the `symtrs` package and now lives inside
 # it: `symtrs/legacy/superres/train.py` owns the model set, the data loading and the
 # metrics, launched as `python -m symtrs.legacy.superres.train`. `symtrs` translates
@@ -58,6 +64,11 @@ train:
   # A path here resumes a previous run; `symtrs eval` scores the run directory's
   # weights/best.pt without training at all.
   resume: ""
+  # LR pixels of the random training crop, every model: a fixed 256px target region, so the target
+  # crop is x1 that = 256px.
+  patch_size: 256
+  # 0 = the whole image at val and test, never the training crop.
+  val_patch_size: 0
 
 eval:
   # The super-resolution scorer always reports PSNR, SSIM and MSE; `metrics` is the
@@ -66,3 +77,9 @@ eval:
   batch_size: 1
   amp: true
   num_visualizations: 4
+  # The whole image is scored in windows of this many LR pixels, blended and stitched;
+  # metrics are computed on the stitched image. Larger than the training crop on purpose
+  # (see SR_EVAL_TILE in configs/generate_grid.py); a frame no larger than the window is
+  # scored in one pass.
+  tile_size: 512
+  tile_overlap: 64

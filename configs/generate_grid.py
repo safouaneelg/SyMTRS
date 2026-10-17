@@ -16,10 +16,14 @@ are regenerated when a model is added or a hyper-parameter changes across the bo
 
 What the tables encode, per model:
 
-  * the depth protocol (`relative` -> SILog loss + `align: scale`; `metric` -> BErHu loss
-    + `align: none`). Getting this wrong is the single most damaging mistake available in
-    this benchmark: a relative model scored without alignment looks broken, and a metric
-    model scored with it looks suspiciously good.
+  * the depth protocol and output space (`relative` + depth output -> SILog loss + `align:
+    scale`; `relative` + disparity output, i.e. MiDaS -> SSI loss + `align:
+    scale_shift_disparity`; `metric` -> BErHu loss + `align: none`). Getting this wrong is the
+    single most damaging mistake available in this benchmark: a relative model scored without
+    alignment looks broken, a MiDaS model aligned by a scale alone is meaningless, and a metric
+    model scored with any alignment looks suspiciously good. The pairing is
+    `symtrs.registry.depth_pairing`; this script cannot import the package, so it keeps a copy
+    that `tests/test_vendored_and_grid.py` compares against it.
   * the memory posture at native resolution, which is what the per-resolution batch sizes
     and `grad_accum` are. The *effective* batch is batch_size x grad_accum and is meant to
     stay roughly constant down the resolution axis, so a 256 run is a smaller-image run
@@ -114,10 +118,14 @@ class DepthModel:
         freeze: str = "",
         note: str = "",
         model_kwargs: Optional[Dict[str, object]] = None,
+        space: str = "depth",  # "depth" | "disparity": what the raw output means
+        needs_camera: bool = False,
     ) -> None:
         self.key = key
         self.title = title
         self.protocol = protocol
+        self.space = space
+        self.needs_camera = needs_camera
         self.batch = batch
         self.lr = lr
         self.grad_accum = grad_accum
@@ -128,11 +136,15 @@ class DepthModel:
 
     @property
     def align(self) -> str:
-        return "scale" if self.protocol == "relative" else "none"
+        if self.protocol != "relative":
+            return "none"
+        return "scale_shift_disparity" if self.space == "disparity" else "scale"
 
     @property
     def loss(self) -> str:
-        return "silog" if self.protocol == "relative" else "berhu"
+        if self.protocol != "relative":
+            return "berhu"
+        return "ssi" if self.space == "disparity" else "silog"
 
     @property
     def effective_batch(self) -> int:
@@ -150,6 +162,7 @@ DEPTH_MODELS: List[DepthModel] = [
         batch={2048: 8, 1024: 16, 512: 32, 256: 64},
         lr=2.0e-5,
         grad_accum=1,
+        space="disparity",
         patch={2048: 384, 1024: 0},
         note=(
             "The cheapest cell in the grid: EfficientNet-lite3 backbone, a DPT-lite head, and\n"
@@ -157,8 +170,11 @@ DEPTH_MODELS: List[DepthModel] = [
             "finishes in the time DPT-BEiT-Large takes for one cell, which makes it the model\n"
             "to use while the dataset is still being regenerated.\n"
             "\n"
-            "It is relative-depth, so it is scored with align: scale and trained with the\n"
-            "scale-invariant SILog loss MiDaS was trained with."
+            "It is relative-depth and emits DISPARITY (s / z + t, shift unknown), so it is scored\n"
+            "with align: scale_shift_disparity - scale and shift fitted against 1 / ground truth,\n"
+            "then inverted, the MiDaS protocol - and trained with the matching scale-and-shift-\n"
+            "invariant `ssi` loss. A depth-space `scale` alignment cannot remove the shift and\n"
+            "scored these models as if they were broken (2026-10-17 audit)."
         ),
     ),
     DepthModel(
@@ -168,12 +184,14 @@ DEPTH_MODELS: List[DepthModel] = [
         batch={2048: 4, 1024: 8, 512: 16, 256: 32},
         lr=1.0e-5,
         grad_accum=1,
+        space="disparity",
         patch={2048: 384, 1024: 0},
         note=(
             "The standard published baseline, and the model the MiDaS numbers in the paper's\n"
             "comparison table are quoted from. Relative-depth: it predicts disparity, and a\n"
-            "per-image affine fit is needed before any metric means anything, which is what\n"
-            "eval.align does. Training uses SILog, the loss MiDaS itself was trained with, so\n"
+            "per-image affine fit in disparity space (scale AND shift, then inverted) is needed\n"
+            "before any metric means anything, which is what eval.align does. Training uses the\n"
+            "scale-and-shift-invariant `ssi` loss, the family MiDaS itself was trained with, so\n"
             "the fine-tune starts from a matched objective instead of fighting a metric loss\n"
             "the pretrained head has never seen.\n"
             "\n"
@@ -189,6 +207,7 @@ DEPTH_MODELS: List[DepthModel] = [
         batch={2048: 2, 1024: 4, 512: 8, 256: 16},
         lr=1.0e-5,
         grad_accum=4,
+        space="disparity",
         patch={2048: 384, 1024: 512},
         freeze="encoder",
         note=(
@@ -207,12 +226,13 @@ DEPTH_MODELS: List[DepthModel] = [
         batch={2048: 4, 1024: 8, 512: 16, 256: 32},
         lr=2.0e-5,
         grad_accum=1,
+        space="disparity",
         patch={2048: 384, 1024: 0},
         note=(
             "SwinV2-Tiny with the DPT head. Window attention rather than global attention, so\n"
             "it is the MiDaS variant whose cost grows most gently with resolution - which is\n"
             "why it is worth running the 2048 cell of this one even if you skip the others.\n"
-            "Still relative-depth: align: scale, SILog loss."
+            "Still relative-depth, disparity output: align: scale_shift_disparity, ssi loss."
         ),
     ),
     DepthModel(
@@ -222,6 +242,7 @@ DEPTH_MODELS: List[DepthModel] = [
         batch={2048: 1, 1024: 2, 512: 4, 256: 8},
         lr=5.0e-6,
         grad_accum=8,
+        space="disparity",
         patch={2048: 384, 1024: 512},
         freeze="encoder",
         note=(
@@ -244,10 +265,18 @@ DEPTH_MODELS: List[DepthModel] = [
         patch={2048: 512, 1024: 0},
         freeze="encoder",
         note=(
-            "ZoeDepth-N is the relative-depth member of the ZoeDepth family: a MiDaS backbone\n"
-            "with a relative head, so it is scored with align: scale and trained with SILog.\n"
+            "ZoeDepth-N (ZoeD_M12_N) is a metric model - fine-tuned on NYU-Depth-v2, indoor,\n"
+            "0-10 m - that this benchmark scores as relative depth: its indoor metres do not\n"
+            "transfer to a camera 70-270 m up, so it gets align: scale and the SILog loss.\n"
             "Swapping this config's model to zoedepth_k changes both of those, which is the\n"
-            "whole reason the depth adapters carry a `protocol` attribute.\n"
+            "whole reason the depth adapters carry a `protocol` attribute. Its output is DEPTH\n"
+            "(not disparity), so the alignment is a scale in depth space.\n"
+            "\n"
+            "Float16 is not safe for this head: under fp16 autocast ~10% of the output pixels\n"
+            "were NaN on the RTX 5070 Ti (training loss non-finite from step 1, every evaluated\n"
+            "prediction non-positive); fp32 and bfloat16 agree to 3 digits and are finite. The\n"
+            "adapter therefore runs this model in bfloat16 (fp32 on a GPU without it) inside\n"
+            "any CUDA autocast, so amp: true stays as it is in every other file.\n"
             "\n"
             "ZoeDepth resizes its input to a 384px minimum side internally, so a 2048px crop\n"
             "costs memory it does not spend on detail; 512 is the crop that reaches the network\n"
@@ -269,12 +298,25 @@ DEPTH_MODELS: List[DepthModel] = [
             "eval.align is none and the BErHu loss is used. Compare it against a relative model\n"
             "only after checking that both were scored under their own protocol.\n"
             "\n"
-            "This is the cell most sensitive to data.depth_scale: if the dataset stores depth in\n"
-            "millimetres or as uint16 centimetres, a model predicting metres is wrong by a\n"
-            "constant factor and every metric is bad in a way that looks like a broken model.\n"
+            "Its output has a ceiling: ZoeD_K's bin centres are bounded to [min_depth, max_depth],\n"
+            "so it can never predict deeper than max_depth. The released weights were trained at\n"
+            "80 m (KITTI) - and the torch.hub entry point builds the head with 10 m unless told\n"
+            "otherwise, which the adapter corrects: its default is 80, the faithful zero-shot\n"
+            "setting. This dataset's scenes reach ~280 m (test median ~208 m), so every depth\n"
+            "pixel beyond 80 m is out of reach and a zero-shot abs_rel near 1 says nothing about\n"
+            "the model. model_kwargs.max_depth: 300 stretches the same pretrained bin layout\n"
+            "over 0-300 m (the parameters keep their shapes, so the weights load unchanged) as a\n"
+            "starting point for the fine-tune; it is a range choice, not a calibration, and a\n"
+            "zero-shot run should drop the key (or pass 80) to keep the released behaviour.\n"
+            "ZoeD-N and ZoeD-NK have softplus (unbounded) heads, so they have no such ceiling.\n"
+            "\n"
+            "This is the cell most sensitive to data.depth_scale: the real EXRs store CENTIMETRES\n"
+            "(hence 0.01), and a model predicting metres scored against unconverted values is\n"
+            "wrong by a constant factor, which looks like a broken model.\n"
             "Check `symtrs inspect` reports the same unit for the native and the _lr depth\n"
             "folders before reading a single number from this file."
         ),
+        model_kwargs={"max_depth": 300.0},
     ),
     DepthModel(
         "zoedepth_nk",
@@ -301,7 +343,7 @@ DEPTH_MODELS: List[DepthModel] = [
         batch={2048: 2, 1024: 4, 512: 8, 256: 16},
         lr=1.0e-5,
         grad_accum=2,
-        patch={2048: 512, 1024: 0},
+        patch={2048: 512, 1024: 512},
         note=(
             "Depth Anything 3's un-metriced checkpoint: relative depth, so align: scale and\n"
             "SILog. It loads through `transformers` rather than torch.hub:\n"
@@ -311,7 +353,13 @@ DEPTH_MODELS: List[DepthModel] = [
             "Which protocol is in force is decided by the checkpoint, not by a flag here:\n"
             "`da3_large` names the relative checkpoint and `da3_metric_large` the metric one,\n"
             "and the resolution is recorded in the checkpoint metadata either way, so a mixed-up\n"
-            "comparison is visible in the .pt rather than only in the results table."
+            "comparison is visible in the .pt rather than only in the results table.\n"
+            "\n"
+            "Training crops to 512px patches at 2048 and 1024 and uses the whole image at 512\n"
+            "and 256 (a 512 crop is the whole image there; the crop is in data pixels, nothing\n"
+            "is upsampled). Full fine-tuning of the 411M-parameter ViT-L keeps ~6.5GB of weights,\n"
+            "gradients and Adam state resident, and a 1024px image is 4x the tokens of a 512px\n"
+            "one: that did not fit a 12GB card even at batch 1, where the 512px crop does."
         ),
     ),
     DepthModel(
@@ -321,28 +369,56 @@ DEPTH_MODELS: List[DepthModel] = [
         batch={2048: 4, 1024: 8, 512: 16, 256: 32},
         lr=1.0e-5,
         grad_accum=2,
-        patch={2048: 512, 1024: 0},
+        patch={2048: 512, 1024: 512},
         note=(
             "The metric head: metres, no alignment, BErHu. Same loader caveats as da3_large.\n"
             "One extra: the DA3 Hugging Face repos do not all ship an image-processor config,\n"
             "so `AutoImageProcessor.from_pretrained` can refuse. That raises with the model id\n"
             "and the command to run - `symtrs doctor --model da3_metric_large --build` - rather\n"
-            "than silently substituting some other normalisation."
+            "than silently substituting some other normalisation.\n"
+            "\n"
+            "Metres need the camera: the metric head returns canonical depth (a 300 px camera)\n"
+            "and metres = canonical * focal_px / 300. Without focal_px it scored abs_rel 0.91-0.96\n"
+            "and d1 = 0 on the real data (predictions ~4% of the ground truth). The focal length\n"
+            "is derived, never typed: build_from_config sets model_kwargs.focal_px =\n"
+            "(resolution / 2) / tan(data.camera_hfov_deg / 2) - 1773.6 px at 2048, half that at\n"
+            "1024, and so on - so it follows the resolution axis, and a crop or a tile keeps it\n"
+            "because it keeps the pixel size. data.camera_hfov_deg is 60 degrees, confirmed by\n"
+            "the dataset owner (2026-10-17: the SyMTRS capture camera is always 60). The dataset\n"
+            "does not store it and the actor property is editable per instance, so a capture\n"
+            "with another FOV must set data.camera_hfov_deg."
         ),
+        needs_camera=True,
     ),
     DepthModel(
         "depth_pro",
         "Apple Depth Pro",
         "metric",
-        batch={2048: 1, 1024: 2, 512: 4, 256: 8},
+        # Batch 1 and no crop at EVERY resolution, because the network's cost depends on
+        # neither: `infer` resizes whatever it is given to 1536x1536 (the patch encoder's
+        # 384px position embedding x4 is fixed by the architecture and forward() asserts
+        # it), so a 512px crop costs the same as the whole frame, shows the model less of
+        # the scene, and is upsampled 3x where evaluation downsamples. The batch does scale
+        # the memory: measured on an RTX 5070 Ti Laptop (12GB), one step at batch 1 peaks
+        # at ~7.9GiB with the encoder frozen and amp on; batch 2 would not fit.
+        batch={2048: 1, 1024: 1, 512: 1, 256: 1},
         lr=5.0e-6,
         grad_accum=8,
-        patch={2048: 512, 1024: 512},
+        patch={},
         freeze="encoder",
         note=(
             "Metric depth from Apple: ~1.9GB of weights, a ViT-L encoder that wants a 1536px\n"
             "input, and the heaviest forward pass in the pack. The encoder is frozen for that\n"
             "reason - 300M+ parameters, and the head is what adapts to a new sensor.\n"
+            "\n"
+            "Memory, measured (RTX 5070 Ti Laptop, 12GB, amp on, one training step): ~7.9GiB\n"
+            "at batch 1 with the encoder frozen (3.6GiB of weights, the rest decoder\n"
+            "activations), against an out-of-memory above 11GiB without it. That is why this\n"
+            "model is batch 1 and uncropped at every resolution: `infer` resizes any input to\n"
+            "1536x1536 before the 35 overlapping 384px ViT-L passes, and that size is fixed by\n"
+            "the architecture (forward() asserts it), so neither a crop nor a smaller\n"
+            "resolution makes the step cheaper. Scoring the native 2048 frame in one pass\n"
+            "peaks at ~5.7GiB. Without `train.freeze: encoder` it does not fit on 12GB.\n"
             "\n"
             "The one thing about this model that is not plug-and-play for aerial imagery is the\n"
             "focal length, and it is worth getting right before a long run:\n"
@@ -490,7 +566,7 @@ SEG_MODELS: List[SegModel] = [
             "affordable and still contain several whole objects at this ground sampling\n"
             "distance.\n"
             "\n"
-            "ce_dice rather than plain cross-entropy: with six classes over aerial imagery the\n"
+            "ce_dice rather than plain cross-entropy: with five classes over aerial imagery the\n"
             "rare ones (vehicle, water) can be a fraction of a percent of the pixels, and\n"
             "cross-entropy alone is free to ignore them. The Dice term is what pulls them up.\n"
             "`loss_kwargs.class_weights` is the other way to do it, but Dice needs no per-class\n"
@@ -502,24 +578,39 @@ SEG_MODELS: List[SegModel] = [
 #: Every segmentation file repeats this, because the numbers it names are recorded in the
 #: checkpoint and a wrong one silently invalidates a score.
 SEG_CLASS_NOTE = (
-    "Six classes: the dataset's semantic/ masks are graylevel PNGs, one byte per pixel, and\n"
-    "255 is the ignore index for pixels that belong to no class. Both numbers are written\n"
+    "Five classes (background, building, green, road, car): the dataset's semantic/ masks are\n"
+    "graylevel PNGs holding class_id * 63 (label_step), decoded as round(value / 63); a grey\n"
+    "level not near a multiple of 63 becomes the ignore index, 255. These numbers are written\n"
     "into the checkpoint, so a model trained here cannot be silently scored against a\n"
     "differently-labelled mask set later. If the mask generator ever writes 0 for \"no class\"\n"
     "instead of 255, change data.ignore_index in the config and not the metric - a metric\n"
-    "that guesses which pixels to ignore is worse than one that does not."
+    "that guesses which pixels to ignore is worse than one that does not.\n"
+    "\n"
+    "Class 0 (background) has no pixel in any split of the current capture, so mIoU averages\n"
+    "the classes that have ground truth in the evaluated split (the same set for every model);\n"
+    "`miou_classes` says how many. A class absent from the ground truth but predicted keeps\n"
+    "IoU 0 and its false positives are in `fp_pixels_k`, but it is not averaged."
 )
 
 # ------------------------------------------------------------------ domain adapt
 
 
 class DomainModel:
-    def __init__(self, key: str, upstream_model: str, dataset_mode: str, title: str, note: str) -> None:
+    def __init__(
+        self,
+        key: str,
+        upstream_model: str,
+        dataset_mode: str,
+        title: str,
+        note: str,
+        shadow_note: str = "",
+    ) -> None:
         self.key = key
         self.upstream_model = upstream_model
         self.dataset_mode = dataset_mode
         self.title = title
         self.note = note
+        self.shadow_note = shadow_note  # what this model means on the shadow pair
 
 
 DOMAIN_MODELS: List[DomainModel] = [
@@ -534,6 +625,12 @@ DOMAIN_MODELS: List[DomainModel] = [
             "scenes re-rendered at a different time of day, but not pixel-aligned pairs by\n"
             "construction. That is also why the score is FID/KID rather than an accuracy: a\n"
             "translation is judged by how close its image distribution is to the real one."
+        ),
+        shadow_note=(
+            "CycleGAN is *unpaired*, and is deliberately used that way on a pair that IS paired:\n"
+            "it never sees which rgb_noshadow image belongs to which rgb_day image, so the row\n"
+            "measures what shadow removal costs without the pairing. Next to pix2pix on the same\n"
+            "images it isolates the value of paired supervision."
         ),
     ),
     DomainModel(
@@ -551,10 +648,27 @@ DOMAIN_MODELS: List[DomainModel] = [
             "contain and its FID should be read as a lower bound on what paired supervision could\n"
             "buy, not as a fair comparison."
         ),
+        shadow_note=(
+            "pix2pix is *paired* and conditional, and on this pair the pairing is exact: rgb_day\n"
+            "and rgb_noshadow are the same render with the shadows switched off, matched by\n"
+            "filename. That is the strongest supervision the dataset offers for shadow removal, so\n"
+            "this is the paired image-to-image baseline for the shadow_removal table."
+        ),
     ),
 ]
 
-DOMAIN_DIRECTIONS = ("day2night", "night2day")
+DOMAIN_DIRECTIONS = ("day2night", "night2day", "shadow2noshadow", "noshadow2shadow")
+
+#: The `rgb_<role>` folders staged as A and B for each direction. The authoritative table is
+#: `DIRECTION_ROLES` in symtrs/model/domain/upstream.py (this script cannot import the
+#: package); tests/test_domain_commands.py compares the two.
+DOMAIN_FOLDERS = {
+    "day2night": ("day", "night"),
+    "night2day": ("day", "night"),
+    "shadow2noshadow": ("day", "noshadow"),
+    "noshadow2shadow": ("day", "noshadow"),
+}
+SHADOW_DIRECTIONS = ("shadow2noshadow", "noshadow2shadow")
 
 # --------------------------------------------------------------- super-resolution
 
@@ -569,6 +683,9 @@ class SuperResModel:
         epochs: int,
         model_kwargs: Optional[Dict[str, object]] = None,
         note: str = "",
+        hr_patch: int = 0,
+        lr_patch: int = 0,
+        eval_hr_window: int = 0,
     ) -> None:
         self.key = key
         self.title = title
@@ -577,6 +694,46 @@ class SuperResModel:
         self.epochs = epochs
         self.model_kwargs = model_kwargs or {}
         self.note = note
+        # Training crop, one of the two. `hr_patch` fixes the region of the TARGET, so the
+        # LR patch is hr_patch / scale; `lr_patch` fixes the number of input pixels (and so
+        # the token count of an attention net) whatever the scale.
+        assert (hr_patch > 0) != (lr_patch > 0), "set exactly one of hr_patch / lr_patch"
+        self.hr_patch = hr_patch
+        self.lr_patch = lr_patch
+
+        # Cap on the evaluation window in TARGET pixels, for a network that runs at the
+        # target size (it refines a bicubic upsample): its memory follows the HR window, so
+        # the fixed LR window would mean a whole 2048 px frame in one pass at x4 / x8.
+        self.eval_hr_window = eval_hr_window
+
+    def eval_tile(self, scale: int) -> int:
+        """`eval.tile_size` for this model at `scale`, in LR pixels (see SR_EVAL_TILE)."""
+        if self.eval_hr_window:
+            return min(SR_EVAL_TILE, self.eval_hr_window // scale)
+        return SR_EVAL_TILE
+
+    def eval_overlap(self, scale: int) -> int:
+        """`eval.tile_overlap`: SR_EVAL_OVERLAP, but never more than a quarter of the window."""
+        return min(SR_EVAL_OVERLAP, self.eval_tile(scale) // 4)
+
+    def patch(self, scale: int) -> int:
+        """`train.patch_size` for this model at `scale`: always in LR pixels."""
+        if self.lr_patch:
+            return self.lr_patch
+        assert self.hr_patch % scale == 0, (self.key, scale)
+        return self.hr_patch // scale
+
+
+#: Evaluation window of every super-resolution row, in LR pixels (`eval.tile_size`). The whole
+#: image is scored (val and test alike) and the metrics are computed on the stitched result;
+#: windows only decide how it is pushed through the network. The training crop is NOT the
+#: window here, unlike depth and segmentation (`eval_tiling`): a 64 px SwinIR window at x1
+#: would be ~1800 windows per frame (minutes per validation pass), and these networks are
+#: convolutional or window-local, so a larger window does not change what they see. 512 LR
+#: pixels is the largest the 12 GB card takes for SwinIR at x1 - and at x4 / x8 the whole LR
+#: frame is <= 512, so those rows are scored in a single pass, tile-free.
+SR_EVAL_TILE = 512
+SR_EVAL_OVERLAP = 64
 
 
 SUPERRES_MODELS: List[SuperResModel] = [
@@ -586,6 +743,7 @@ SUPERRES_MODELS: List[SuperResModel] = [
         batch=16,
         lr=1.0e-4,
         epochs=40,
+        hr_patch=256,
         model_kwargs={"use_y_channel": True},
         note=(
             "Three convolutional layers on a bicubic-upsampled input: the cheapest baseline\n"
@@ -593,9 +751,10 @@ SUPERRES_MODELS: List[SuperResModel] = [
             "recovers before any of the deep models get credit for it.\n"
             "\n"
             "`use_y_channel: true` is SRCNN's own convention: the network sees the luma channel\n"
-            "only and the chroma is carried over from the bicubic upsample. That is how the\n"
-            "published SRCNN numbers are produced, and it also makes this run about a third the\n"
-            "cost of the colour version."
+            "only. The trainer then scores PSNR / SSIM / MSE on the luma channel too - it does not\n"
+            "put the bicubic chroma back, so a Y-channel row is not comparable with an RGB row.\n"
+            "That matches how the published SRCNN numbers are produced, and it also makes this\n"
+            "run about a third the cost of the colour version."
         ),
     ),
     SuperResModel(
@@ -604,6 +763,10 @@ SUPERRES_MODELS: List[SuperResModel] = [
         batch=8,
         lr=1.0e-4,
         epochs=40,
+        hr_patch=256,
+        # Measured on the 12 GB card: a 1024 px target window evaluates (x1, x2), a whole
+        # 2048 px frame runs out of memory (x4, x8 with the default 512 px LR window).
+        eval_hr_window=1024,
         note=(
             "An encoder-decoder that refines the bicubic upsample rather than predicting the\n"
             "high-resolution image from nothing. Same input convention as SRCNN, more capacity,\n"
@@ -617,6 +780,7 @@ SUPERRES_MODELS: List[SuperResModel] = [
         batch=4,
         lr=1.0e-4,
         epochs=60,
+        hr_patch=256,
         model_kwargs={"adv_weight": 1.0e-3},
         note=(
             "The only model in this task with a discriminator, and the only one whose loss is\n"
@@ -637,6 +801,7 @@ SUPERRES_MODELS: List[SuperResModel] = [
         batch=4,
         lr=2.0e-4,
         epochs=40,
+        lr_patch=64,
         model_kwargs={
             "swinir_embed_dim": 96,
             "swinir_depths": [6, 6, 6, 6],
@@ -647,10 +812,12 @@ SUPERRES_MODELS: List[SuperResModel] = [
             "swinir_checkpoint": False,
         },
         note=(
-            "Window-attention transformer: the heaviest SR baseline and, unlike the other\n"
-            "three, one whose cost grows with the *input* size rather than being fixed by the\n"
-            "network. That is what train.patch_size is for - the other three models train on the\n"
-            "whole image.\n"
+            "Window-attention transformer: the heaviest SR baseline, and the one whose cost grows\n"
+            "fastest with the *input* size (tokens, not pixels, set its memory). Every model in\n"
+            "this task trains on random aligned crops (train.patch_size, in LR pixels): the CNNs\n"
+            "on a fixed 256 px region of the target at every scale, SwinIR on a fixed 64 px LR\n"
+            "patch, i.e. a fixed token count - so its target region grows with the scale (64 px\n"
+            "at x1 up to 512 px at x8).\n"
             "\n"
             "The architecture keys in model_kwargs (embed_dim, depths, num_heads, window,\n"
             "mlp_ratio, upsampler) are fixed at build time and have to match the checkpoint, so\n"
@@ -658,7 +825,11 @@ SUPERRES_MODELS: List[SuperResModel] = [
             "defaults. Set `swinir_checkpoint: true` to trade ~30% of the speed for a much\n"
             "smaller activation footprint, which is the lever to reach for if x8 runs out of\n"
             "memory. train.amp is also passed for this model only; the script implements AMP for\n"
-            "SwinIR and for nothing else."
+            "SwinIR and for nothing else.\n"
+            "\n"
+            "The attention masks are precomputed for the training crop, not for a whole frame\n"
+            "(a 2048 px frame needs ~10 GB of them, and they end up in every checkpoint); any\n"
+            "other input size recomputes them on the fly."
         ),
     ),
 ]
@@ -697,6 +868,127 @@ SR_RESOLUTION_NOTE = {
 
 
 
+# ------------------------------------------------------------------ shadow removal
+
+
+class ShadowModel:
+    def __init__(
+        self,
+        key: str,
+        title: str,
+        repo: str,
+        patch: int,
+        batch: int,
+        lr: float,
+        weight_decay: float,
+        min_lr_ratio: float,
+        warmup_epochs: int,
+        tile_overlap: int,
+        note: str = "",
+    ) -> None:
+        self.key = key
+        self.title = title
+        self.repo = repo
+        self.patch = patch
+        self.batch = batch
+        self.lr = lr
+        self.weight_decay = weight_decay
+        self.min_lr_ratio = min_lr_ratio
+        self.warmup_epochs = warmup_epochs
+        self.tile_overlap = tile_overlap
+        self.note = note
+
+
+#: Optimiser settings are each paper's own shadow / restoration recipe (AdamW, Charbonnier
+#: loss, cosine decay). `patch` is the training crop and, because these networks are not
+#: trained above it, also the inference tile. The epoch budget is the same for all four so
+#: the comparison is not decided by who got longer; one epoch is one random crop from each
+#: of the 96 training images (24 iterations at batch 4).
+SHADOW_MODELS: List[ShadowModel] = [
+    ShadowModel(
+        "shadowformer",
+        "ShadowFormer",
+        "guolanqing/ShadowFormer",
+        patch=320,
+        batch=4,
+        lr=2.0e-4,
+        weight_decay=0.02,
+        min_lr_ratio=0.005,
+        warmup_epochs=3,
+        tile_overlap=64,
+        note=(
+            "ShadowFormer is one of the two shadow-aware models here (with ShadowMaskFormer): it\n"
+            "takes a shadow mask as a second input. The dataset has none, so the mask is derived\n"
+            "at staging from the rgb_day / rgb_noshadow pair (see `shadow:` below); the model is\n"
+            "therefore given a mask no real-world deployment would have unless a detector\n"
+            "supplied it, and Restormer and Uformer are not. Read the comparison with that in\n"
+            "mind. 320 px and a window of 10 are upstream's own settings."
+        ),
+    ),
+    ShadowModel(
+        "restormer",
+        "Restormer",
+        "swz30/Restormer",
+        patch=256,
+        batch=1,
+        lr=3.0e-4,
+        weight_decay=1.0e-4,
+        min_lr_ratio=0.0033,
+        warmup_epochs=0,
+        tile_overlap=64,
+        note=(
+            "Restormer is a general restoration network with no notion of shadow: it sees the\n"
+            "shadowed image only. Its published recipe uses progressive patch sizes; this run\n"
+            "uses one fixed 256 px crop, which is the first stage of that recipe.\n"
+            "Batch 1: on a 12 GB card batch 2 at 256 px peaks at 12.4 GB and spills (8.7 s/it vs\n"
+            "0.33 s/it); raise it on a larger GPU."
+        ),
+    ),
+    ShadowModel(
+        "uformer",
+        "Uformer",
+        "ZhendongWang6/Uformer",
+        patch=256,
+        batch=4,
+        lr=2.0e-4,
+        weight_decay=0.02,
+        min_lr_ratio=0.005,
+        warmup_epochs=3,
+        tile_overlap=64,
+        note=(
+            "Uformer-B, the configuration of Uformer's own shadow-removal experiments (windowed\n"
+            "attention with the multi-scale modulator), at its default 256 px crop. Like\n"
+            "Restormer it sees the shadowed image only."
+        ),
+    ),
+    ShadowModel(
+        "shadowmaskformer",
+        "ShadowMaskFormer",
+        "lizhh268/ShadowMaskFormer",
+        patch=256,
+        batch=4,
+        lr=2.0e-4,
+        weight_decay=0.02,
+        min_lr_ratio=0.005,
+        warmup_epochs=3,
+        tile_overlap=64,
+        note=(
+            "ShadowMaskFormer-b (IEEE TAI 2025, 2.28 M parameters, about a fifth of ShadowFormer's\n"
+            "size): the light, shadow-aware model. Like ShadowFormer it takes the derived shadow\n"
+            "mask as a second input, so the same caveat applies. It is written for [-1, 1] images\n"
+            "and masks; the shared worker converts at the network boundary. NO RELEASED WEIGHTS:\n"
+            "the authors publish none, so this model is always trained from scratch\n"
+            "(shadow.init_weights stays empty), while ShadowFormer starts from ISTD+ weights. Its\n"
+            "comparison with ShadowFormer is therefore not like-for-like: a gap mixes the\n"
+            "architecture with the initialisation. The recipe is upstream's (AdamW, lr 2e-4,\n"
+            "weight decay 0.02, cosine to 1e-6) with the shared Charbonnier loss; upstream uses\n"
+            "batch 1 and L1, this grid keeps the shared batch 4 and loss. The upstream repository\n"
+            "carries no licence, so it is fetched, never committed."
+        ),
+    ),
+]
+
+
 def _banner(parts: List[str]) -> str:
     """Comment a block: every line becomes `# ...`, blank lines become a bare `#`.
 
@@ -714,6 +1006,44 @@ def _banner(parts: List[str]) -> str:
 def _render(header: List[str], body: List[str]) -> str:
     """A config file: the prose header as comments, then the YAML it describes."""
     return _banner(header) + "\n\n" + "\n".join(body) + "\n"
+
+
+def eval_tiling(patch: int, resolution: int) -> tuple:
+    """`(tile_size, tile_overlap)` of the val AND test pass for a row trained on `patch` crops.
+
+    Evaluation covers the WHOLE image (`train.val_patch_size: 0`) - never the training crop,
+    which once silently scored the 2048px rows on one random 512px window. What changes with
+    the row is only how the whole image is pushed through the network: a row that trained on
+    crops smaller than its images is evaluated in sliding windows of exactly that crop, so
+    the network is scored on the field of view and ground sampling it was trained on, and
+    memory stays bounded by the training step's. Overlap is a quarter of the window (the
+    Hann blend in `engine/tiling.py` handles the seams). A row that trains on whole images
+    runs them whole: tile_size 0.
+    """
+    if patch and patch < resolution:
+        return patch, patch // 4
+    return 0, 128
+
+
+def _eval_tiling_comment(patch: int, resolution: int, relative: bool) -> List[str]:
+    tile, overlap = eval_tiling(patch, resolution)
+    if not tile:
+        return [
+            "  # Whole image in one forward pass: training did not crop at this resolution either.",
+        ]
+    lines = [
+        f"  # The whole {resolution}px image is scored (val and test alike), in {tile}px windows",
+        f"  # with {overlap}px overlap: the size this row trained on, so the network sees the same",
+        "  # field of view at evaluation. Never a crop - every pixel is covered and the result is",
+        "  # deterministic.",
+    ]
+    if relative:
+        lines += [
+            "  # Relative depth is defined per forward pass only up to scale and shift, so each",
+            "  # window is first fitted onto the ones already stitched; the alignment that scores",
+            "  # the row is then computed once, on the full stitched image (engine/tiling.py).",
+        ]
+    return lines
 
 
 def depth_yaml(model: DepthModel, resolution: int) -> str:
@@ -764,9 +1094,20 @@ def depth_yaml(model: DepthModel, resolution: int) -> str:
         "  split: train",
         "  val_split: val",
         "  test_split: test",
-        "  # Metres are what the metric models predict. Check the raw encoding before trusting",
-        "  # it: 0.01 for millimetres stored as uint16, 1.0 for metres.",
-        "  depth_scale: 1.0",
+        "  # Metres are what the metric models predict. The real EXRs store CENTIMETRES (hence",
+        "  # 0.01); `symtrs doctor --data-root` prints the median in metres to check it.",
+        "  depth_scale: 0.01",
+        "  # Metres, after depth_scale: the sky is a huge value, not zero, so it is cut here.",
+        "  max_depth: 1000",
+    ]
+    if model.needs_camera:
+        body += [
+            "  # Horizontal field of view of the capture camera. ASSUMPTION: 60 degrees is the capture",
+            "  # actor's default (FieldOfView = 60.f) and is editable per level - confirm it. It fixes",
+            "  # the focal length in pixels the metric model needs: (resolution / 2) / tan(fov / 2).",
+            "  camera_hfov_deg: 60.0",
+        ]
+    body += [
         "  depth_channel: 0",
         "  depth_backend: auto",
         "  num_workers: 8",
@@ -790,12 +1131,20 @@ def depth_yaml(model: DepthModel, resolution: int) -> str:
             "  # at this ground sampling distance.",
             f"  patch_size: {patch}",
         ]
+    elif resolution == 2048:
+        # Only reachable by a model whose cost does not depend on the crop (Depth Pro).
+        body += [
+            "  # No crop: this network resizes its input to a fixed size, so a crop would cost",
+            "  # the same and show it less. The memory posture is in the header above.",
+            "  patch_size: 0",
+        ]
     else:
         body += [
             "  # The whole image fits at this resolution, so no cropping is needed.",
             "  patch_size: 0",
         ]
     body += [
+        "  # 0 = the whole image at val and test, whatever patch_size is (see eval.tile_size).",
         "  val_patch_size: 0",
         "  amp: true",
         "  gpus: 1",
@@ -821,10 +1170,12 @@ def depth_yaml(model: DepthModel, resolution: int) -> str:
         "  metrics: [rmse, mae, abs_rel, sq_rel, d1, d2, d3, silog]",
         "  batch_size: 1",
         "  amp: true",
-        "  # 0 runs the whole image in one forward pass, which is what the published numbers",
-        "  # use. If you hit OOM, a sweep over 512/128 tiles scores the same metres.",
-        "  tile_size: 0",
-        "  tile_overlap: 128",
+    ]
+    tile, overlap = eval_tiling(patch, resolution)
+    body += _eval_tiling_comment(patch, resolution, model.protocol == "relative")
+    body += [
+        f"  tile_size: {tile}",
+        f"  tile_overlap: {overlap}",
         f"  align: {model.align}",
         "  num_visualizations: 4",
     ]
@@ -871,7 +1222,9 @@ def segmentation_yaml(model: SegModel, resolution: int) -> str:
         "  split: train",
         "  val_split: val",
         "  test_split: test",
-        "  num_classes: 6",
+        "  num_classes: 5",
+        "  # Masks hold class_id * 63 as 8-bit gray (background, building, green, road, car).",
+        "  label_step: 63",
         "  # Pixels labelled 255 are excluded from both the loss and the confusion matrix.",
         "  ignore_index: 255",
         "  num_workers: 8",
@@ -887,6 +1240,7 @@ def segmentation_yaml(model: SegModel, resolution: int) -> str:
         "  warmup_epochs: 2",
         "  min_lr_ratio: 0.01",
         f"  patch_size: {model.patch.get(resolution, 0)}",
+        "  # 0 = the whole image at val and test, whatever patch_size is (see eval.tile_size).",
         "  val_patch_size: 0",
         "  amp: true",
         "  gpus: 1",
@@ -908,8 +1262,12 @@ def segmentation_yaml(model: SegModel, resolution: int) -> str:
         "  metrics: [miou, pixel_acc, mean_acc, mean_dice, fwiou]",
         "  batch_size: 1",
         "  amp: true",
-        "  tile_size: 0",
-        "  tile_overlap: 128",
+    ]
+    tile, overlap = eval_tiling(model.patch.get(resolution, 0), resolution)
+    body += _eval_tiling_comment(model.patch.get(resolution, 0), resolution, False)
+    body += [
+        f"  tile_size: {tile}",
+        f"  tile_overlap: {overlap}",
         '  align: ""',
         "  num_visualizations: 4",
     ]
@@ -918,6 +1276,11 @@ def segmentation_yaml(model: SegModel, resolution: int) -> str:
 
 def domain_yaml(model: DomainModel, direction: str) -> str:
     source, target = direction.split("2")
+    reverse = f"{target}2{source}"
+    first, second = sorted((direction, reverse), key=DOMAIN_DIRECTIONS.index)
+    folder_a, folder_b = DOMAIN_FOLDERS[direction]
+    shadow = direction in SHADOW_DIRECTIONS
+    paired_scored = direction == "shadow2noshadow"
     where = f"configs/domain_adapt/{model.key}_{direction}.yaml"
     header = [
         f"{model.title} {source} -> {target}, at native resolution.",
@@ -925,14 +1288,14 @@ def domain_yaml(model: DomainModel, direction: str) -> str:
         f"    symtrs train {where} --data-root /data/SyMTRS",
         f"    symtrs eval  {where} --data-root /data/SyMTRS --eval-split test",
         "",
-        f"Both directions of this pair are in this folder: {model.key}_day2night.yaml and",
-        f"{model.key}_night2day.yaml. They are separate runs with separate checkpoints, and",
+        f"Both directions of this pair are in this folder: {model.key}_{first}.yaml and",
+        f"{model.key}_{second}.yaml. They are separate runs with separate checkpoints, and",
         "the direction changes the upstream experiment name too, so the two cannot overwrite",
         "each other. Report both or neither - a quality claim in one direction says nothing",
         "about the other, since the two domains are not equally hard.",
         "",
     ]
-    header += model.note.split("\n") + [""]
+    header += (model.shadow_note if shadow else model.note).split("\n") + [""]
     header += [
         "This is not a SyMTRS model and the run does not train one. The network is upstream",
         "junyanz/pytorch-CycleGAN-and-pix2pix, built, optimised and saved entirely inside that",
@@ -942,12 +1305,30 @@ def domain_yaml(model: DomainModel, direction: str) -> str:
         "",
         "What SyMTRS adds on top is the input staging and the scoring:",
         "",
-        "  * Before each phase, the split's day and night folders are symlinked into",
+        f"  * Before each phase, the split's {folder_a} and {folder_b} folders are symlinked into",
         "    <run_dir>/staging/<split>/{train,val,test}{A,B}. That is not decoration.",
         "    Upstream's UnalignedDataset re-splits the data by --train_ratio whenever phase",
         "    folders are absent, which would ignore the SyMTRS train/val/test split entirely.",
         "  * After training, test.py generates the translations and the result is scored with",
         "    FID and KID against the real target domain.",
+    ]
+    if paired_scored:
+        header += [
+            "  * The target here has a pixel-aligned ground truth, so the generated image is",
+            "    also scored like a shadow-removal result: PSNR, SSIM and LAB error over all",
+            "    pixels, the shadow region and outside it (symtrs/metrics/shadow.py, the same",
+            "    code, mask derivation and columns as configs/shadow_removal/). Upstream writes",
+            "    its images at its own working size (test.py: 256x256, the whole frame resized",
+            "    down), so each is resampled to the ground-truth size before scoring - the row",
+            "    is therefore a 256 px model judged at 2048, and the loss of fine detail counts",
+            "    against it. shadow.mask_threshold / shadow.mask_open set the mask as usual.",
+        ]
+    elif shadow:
+        header += [
+            "  * Only FID/KID are reported for this direction: the pixel-aligned ground truth",
+            "    is a shadowed image, and shadow-removal metrics do not describe painting one.",
+        ]
+    header += [
         "",
         "`symtrs setup-adapt --check` verifies the vendored tree in one call;",
         "`symtrs setup-adapt --fetch` diffs it against upstream at the pinned revision.",
@@ -1043,13 +1424,19 @@ def superresolution_yaml(model: SuperResModel, resolution: int) -> str:
         ]
         if model.key == "swinir":
             header += [
-                "This is the one model whose training cost grows with the input size, so",
+                "This is the model whose training cost grows fastest with the input size, so",
                 "train.patch_size matters more as the scale rises: the crop is in LR pixels,",
-                f"so a 64px crop is a {64 * scale}px region of the target. Raise it if memory",
+                f"so a {model.patch(scale)}px crop is a {model.patch(scale) * scale}px region of the target. Raise it if memory",
                 "allows, and set model_kwargs.swinir_checkpoint: true at x8 if it does not.",
                 "",
             ]
     header += [
+        f"Training is on random aligned crops: {model.patch(scale)}px of the LR input and the",
+        f"matching {model.patch(scale) * scale}px of the target. A whole 2048px frame does not fit a 12 GB card for any",
+        "model here. Validation and test score the WHOLE image (val_patch_size: 0), pushed",
+        "through the network in eval.tile_size windows where it does not fit in one pass;",
+        "PSNR / SSIM / MSE are computed per image on the stitched result and averaged.",
+        "",
         "The training code for this task predates the `symtrs` package and now lives inside",
         "it: `symtrs/legacy/superres/train.py` owns the model set, the data loading and the",
         "metrics, launched as `python -m symtrs.legacy.superres.train`. `symtrs` translates",
@@ -1095,13 +1482,16 @@ def superresolution_yaml(model: SuperResModel, resolution: int) -> str:
         "  # weights/best.pt without training at all.",
         '  resume: ""',
     ]
+    kept_fixed = "a fixed 256px target region" if model.hr_patch else "a fixed 64px LR patch (token count)"
+    body += [
+        f"  # LR pixels of the random training crop, every model: {kept_fixed}, so the target",
+        f"  # crop is x{scale} that = {model.patch(scale) * scale}px.",
+        f"  patch_size: {model.patch(scale)}",
+        "  # 0 = the whole image at val and test, never the training crop.",
+        "  val_patch_size: 0",
+    ]
     if model.key == "swinir":
-        body += [
-            "  # LR-space crops, SwinIR only: the other three models train on the whole image.",
-            "  patch_size: 64",
-            "  val_patch_size: 0",
-            "  amp: true",
-        ]
+        body += ["  amp: true"]
     body += [
         "",
         "eval:",
@@ -1111,6 +1501,83 @@ def superresolution_yaml(model: SuperResModel, resolution: int) -> str:
         "  batch_size: 1",
         "  amp: true",
         "  num_visualizations: 4",
+        "  # The whole image is scored in windows of this many LR pixels, blended and stitched;",
+        "  # metrics are computed on the stitched image. Larger than the training crop on purpose",
+        "  # (see SR_EVAL_TILE in configs/generate_grid.py); a frame no larger than the window is",
+        "  # scored in one pass.",
+        f"  tile_size: {model.eval_tile(scale)}",
+        f"  tile_overlap: {model.eval_overlap(scale)}",
+    ]
+    return _render(header, body)
+
+
+def shadow_yaml(model: ShadowModel) -> str:
+    where = f"configs/shadow_removal/{model.key}.yaml"
+    header = [
+        f"{model.title}: remove the shadows from rgb_day, scored against rgb_noshadow (2048).",
+        "",
+        f"    symtrs train {where} --data-root /data/SyMTRS",
+        f"    symtrs train {where} --data-root /data/SyMTRS --set shadow.iterations=500",
+        f"    symtrs eval  {where} --data-root /data/SyMTRS --eval-split test",
+        "",
+    ]
+    header += model.note.split("\n") + [""]
+    header += [
+        f"This is not a SyMTRS model. The network class is upstream {model.repo}, cloned at the",
+        "revision in third_party/PINS.md by `python scripts/fetch_third_party.py` (the clones are",
+        "not committed). SyMTRS stages the data, runs one shared training loop and one shared",
+        "tiled inference around the upstream class, and scores the PNGs it writes with",
+        "symtrs/metrics/shadow.py - the same numbers for all four models:",
+        "PSNR, SSIM and LAB error on all pixels, in the shadow region and outside it.",
+        "",
+        "Native resolution only: rgb_noshadow has no downsampled twin. The training budget is",
+        "train.epochs, or shadow.iterations when positive (`--set shadow.iterations=500` is a",
+        "validation-sized run). The weights are trained from scratch unless",
+        "shadow.init_weights points at an upstream checkpoint.",
+        "",
+    ]
+    body = [
+        "task: shadow_removal",
+        f"model: {model.key}",
+        "resolution: 2048",
+        "seed: 42",
+        "",
+        "data:",
+        "  root: /data/SyMTRS",
+        "  split: train",
+        "  val_split: val",
+        "  test_split: test",
+        "",
+        "train:",
+        "  epochs: 500",
+        f"  batch_size: {model.batch}",
+        f"  lr: {_float(model.lr)}",
+        f"  weight_decay: {_float(model.weight_decay)}",
+        "  optim: adamw",
+        "  sched: cosine",
+        f"  warmup_epochs: {model.warmup_epochs}",
+        f"  min_lr_ratio: {_float(model.min_lr_ratio)}",
+        f"  patch_size: {model.patch}",
+        "  amp: true",
+        "  log_every: 50",
+        "  device: cuda",
+        "",
+        "eval:",
+        "  # The inference tile is the training patch: none of these networks was trained",
+        "  # above it, and a whole 2048 px image does not fit in 12 GB.",
+        f"  tile_size: {model.patch}",
+        f"  tile_overlap: {model.tile_overlap}",
+        "  num_visualizations: 4",
+        "",
+        "shadow:",
+        "  # The dataset has no shadow masks; they are derived from the rgb_day / rgb_noshadow",
+        "  # pair (symtrs/metrics/shadow.py). Changing these changes the regional metrics.",
+        "  mask_threshold: 0.1",
+        "  mask_open: 3",
+        "  iterations: 0",
+        "  val_every: 500",
+        "  val_crops: 32",
+        '  init_weights: ""',
     ]
     return _render(header, body)
 
@@ -1132,7 +1599,9 @@ def _scalar(value: object) -> str:
     if isinstance(value, (list, tuple)):
         return "[" + ", ".join(_scalar(item) for item in value) + "]"
     if isinstance(value, float):
-        return _float(value)
+        # `_float` writes an exponent without a sign for values >= 1 ("3.0e2"), which PyYAML
+        # reads back as a string; plain decimal is the form that round-trips.
+        return repr(value) if abs(value) >= 1 else _float(value)
     return str(value)
 
 
@@ -1156,6 +1625,8 @@ def build_tree() -> Dict[Path, str]:
             scale = SCALE_FACTOR[resolution]
             path = HERE / "superresolution" / f"{model.key}_x{scale}.yaml"
             files[path] = superresolution_yaml(model, resolution)
+    for model in SHADOW_MODELS:
+        files[HERE / "shadow_removal" / f"{model.key}.yaml"] = shadow_yaml(model)
     return files
 
 
@@ -1196,11 +1667,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     seg = count("segmentation")
     domain = count("domain_adapt")
     sr = count("superresolution")
+    shadow = count("shadow_removal")
     print(f"wrote {len(files)} configs")
     print(f"  depth           {depth:3}  ({len(DEPTH_MODELS)} models x {len(RESOLUTIONS)} resolutions)")
     print(f"  segmentation    {seg:3}  ({len(SEG_MODELS)} models x {len(RESOLUTIONS)} resolutions)")
     print(f"  domain_adapt    {domain:3}  ({len(DOMAIN_MODELS)} models x {len(DOMAIN_DIRECTIONS)} directions)")
     print(f"  superresolution {sr:3}  ({len(SUPERRES_MODELS)} models x {len(RESOLUTIONS)} scales)")
+    print(f"  shadow_removal  {shadow:3}  ({len(SHADOW_MODELS)} models, native only)")
     return 0
 
 

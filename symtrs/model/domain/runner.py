@@ -1,10 +1,14 @@
-"""Day-to-night and night-to-day translation, driven through the upstream code.
+"""Day-to-night, night-to-day and shadow <-> shadow-free translation, driven through the
+upstream code.
 
     symtrs train --task domain_adapt --model cyclegan --data-root /data/SyMTRS \\
                  --set model_kwargs.direction=day2night --epochs 40
 
     symtrs train --task domain_adapt --model pix2pix --data-root /data/SyMTRS \\
                  --set model_kwargs.direction=night2day --epochs 40
+
+    symtrs train --task domain_adapt --model pix2pix --data-root /data/SyMTRS \\
+                 --set model_kwargs.direction=shadow2noshadow --epochs 40
 
 The training itself is upstream `train.py`, unmodified. This module prepares the inputs
 upstream needs (see `symtrs.model.domain.upstream` for the auto-split trap that makes the
@@ -20,18 +24,57 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
+from symtrs.metrics.shadow import SSIM_NOTE
 from symtrs.model.domain import upstream as upstream_module
+from symtrs.common.jsonio import dumps as json_dumps_safe
 
-#: direction -> "translate A into B" or the reverse. Stated once; everything else derives.
-DIRECTIONS = ("day2night", "night2day")
+#: Every direction there is. The table (which folders are A and B, and which way upstream
+#: translates) lives in `upstream.DIRECTION_ROLES`; this is only its keys.
+DIRECTIONS = tuple(upstream_module.DIRECTION_ROLES)
+
+#: Directions whose generated image has a pixel-aligned ground truth that is a *shadow
+#: removal* result, so the full-reference metrics of the `shadow_removal` task apply and the
+#: row can sit next to ShadowFormer / Restormer / Uformer. `noshadow2shadow` also has a
+#: ground truth (`rgb_day`), but "PSNR in the shadow region against the shadowed image"
+#: measures how well a shadow was painted, which is not what that table's columns mean.
+SHADOW_REMOVAL_DIRECTIONS = ("shadow2noshadow",)
+
+#: Written into summary.json beside the paired metrics, because without it the numbers look
+#: like they were measured at 2048 the way the shadow_removal rows are.
+PAIRED_SCORING_NOTE = (
+    "paired metrics are symtrs.metrics.shadow on the generated image resampled (bicubic) "
+    "to the rgb_noshadow ground-truth size; upstream generates at its own working size "
+    "(test.py: load_size = crop_size = 256 unless extra_args change it), so detail finer "
+    "than that is lost before scoring and is counted against the model"
+)
+
+#: Why `kid` is the number to quote (see symtrs.metrics.domain).
+PRIMARY_METRIC = "kid"
+FID_NOTE = (
+    "fid is kept for reference only: with fewer images than Inception's 2048 feature "
+    "dimensions its covariance is rank-deficient and FID is biased; kid is unbiased. Real "
+    "images are antialias-resized to the generated size before the shared 299 resize."
+)
 
 #: Which upstream model class and dataset mode each SyMTRS model key uses.
 UPSTREAM_MODELS = {
     "cyclegan": ("cycle_gan", "unaligned"),
     "pix2pix": ("pix2pix", "aligned"),
 }
+
+#: The visual upstream writes the *requested* translation under, in every direction.
+#: At the vendored revision both models' `set_input` do
+#: `real_A = input["A" if AtoB else "B"]` and their `forward` does `fake_B = G(real_A)`
+#: (`models/pix2pix_model.py`, `models/cycle_gan_model.py`), so `--direction BtoA` makes
+#: `real_A` the folder-B image (night / shadow-free) and `fake_B` its translation to the
+#: folder-A domain. `fake_A` is CycleGAN's *other* generator applied to the other input
+#: (`netG_B(real_B)`): the opposite translation, scored against the wrong real domain.
+#: Reading `fake_A` for `BtoA` once made pix2pix score nothing and CycleGAN score the
+#: reverse direction. `tests/test_domain_commands.py` parses those two upstream files and
+#: fails if this assumption stops holding, e.g. after a bump of the vendored tree.
+GENERATED_LABEL = "fake_B"
 
 
 class DomainAdaptation:
@@ -58,8 +101,7 @@ class DomainAdaptation:
         decay_epochs: Optional[int] = None,
         **kwargs: Any,
     ) -> None:
-        if direction not in DIRECTIONS:
-            raise ValueError(f"unknown direction {direction!r}; expected one of {DIRECTIONS}")
+        upstream_module.direction_spec(direction)  # unknown direction -> ValueError
         self.direction = direction
         self.upstream_root = upstream
         self.experiment = name
@@ -107,14 +149,17 @@ class DomainAdaptation:
         dry_run: bool = False,
     ) -> List[str]:
         root = self.resolve_upstream()
-        staging = upstream_module.build_staging_dir(dataroot, run_dir, split)
-        day, night = upstream_module.count_staged(staging, split)
-        print(f"[symtrs] staged {split}: {day} domain-A images, {night} domain-B images")
-        if day <= 0 or night <= 0:
+        staging = upstream_module.build_staging_dir(
+            dataroot, run_dir, split, direction=self.direction, aligned=self.dataset_mode == "aligned"
+        )
+        count_a, count_b = upstream_module.count_staged(staging, split)
+        print(f"[symtrs] staged {split}: {count_a} domain-A images, {count_b} domain-B images")
+        if count_a <= 0 or count_b <= 0:
+            a_role, b_role, _ = upstream_module.direction_spec(self.direction)
             raise RuntimeError(
-                f"the staging directory {staging} has {day} A and {night} B images, so "
+                f"the staging directory {staging} has {count_a} A and {count_b} B images, so "
                 "upstream would train on nothing. The dataset root is probably wrong, or "
-                "the 2048 rgb_day / rgb_night folders are empty."
+                f"the 2048 rgb_{a_role} / rgb_{b_role} folders are empty."
             )
 
         command = upstream_module.train_command(
@@ -146,7 +191,9 @@ class DomainAdaptation:
         dry_run: bool = False,
     ) -> List[str]:
         root = self.resolve_upstream()
-        staging = upstream_module.build_staging_dir(dataroot, run_dir, split)
+        staging = upstream_module.build_staging_dir(
+            dataroot, run_dir, split, direction=self.direction, aligned=self.dataset_mode == "aligned"
+        )
 
         command = upstream_module.test_command(
             upstream=root,
@@ -188,14 +235,30 @@ class DomainAdaptation:
         return Path(run_dir) / "results" / self.experiment_name() / f"{split}_{checkpoint}" / "images"
 
     def generated_paths(self, run_dir: str, split: str, checkpoint: str = "latest") -> List[Path]:
-        """The files holding *this direction's* generated images.
+        """The files holding *this direction's* generated images: always `*_fake_B.png`.
 
-        `AtoB` (day to night) writes `fake_B`; `BtoA` writes `fake_A`. Both are written
-        in every run, so taking the wrong one would score the translation the run was not
-        asked to learn.
+        Not `fake_A` for the `BtoA` directions. Upstream's `set_input` swaps the *inputs*
+        for `--direction BtoA` (`real_A = input["B"]`) and then generates `fake_B = G(real_A)`,
+        so the requested translation (night to day, shadow-free to shadow) is `fake_B` in
+        every direction; see `GENERATED_LABEL`. The image names come from the `B_paths` in
+        that case, i.e. the staged night/shadow-free files, which are named by the same
+        normalised key as the day ones (`upstream.staged_name`), so a stem still pairs with
+        the other domain's file.
+
+        An empty result is an error, never an empty list: a run that generated nothing must
+        not be able to finish with `test: {}`.
         """
-        side = "B" if self.direction == "day2night" else "A"
-        return sorted(self.generated_dir(run_dir, split, checkpoint).glob(f"*_fake_{side}.png"))
+        folder = self.generated_dir(run_dir, split, checkpoint)
+        found = sorted(folder.glob(f"*_{GENERATED_LABEL}.png")) if folder.is_dir() else []
+        if not found:
+            raise RuntimeError(
+                f"no `*_{GENERATED_LABEL}.png` generated images for {self.direction} in {folder} "
+                f"({'the folder does not exist' if not folder.is_dir() else 'the folder has no such file'}). "
+                "Upstream's test.py probably failed or wrote elsewhere (its own output is above), "
+                "its checkpoint `--epoch` was not found, or its output layout changed. Re-run the "
+                "scoring with `symtrs eval <config> --eval-split <split>` once `results/` is filled."
+            )
+        return found
 
 
 def device_env(device: str = "", gpu_ids: str = "", gpus: int = 1) -> Dict[str, str]:
@@ -271,11 +334,14 @@ def run_domain_adaptation(cfg, mode: str = "finetune") -> Dict[str, Any]:
 
     if cfg.resolution != 2048:
         raise ValueError(
-            f"domain adaptation is 2048-only: the rgb_night folders are not downsampled, "
-            f"so there is no night imagery at {cfg.resolution}px. Got resolution "
-            f"{cfg.resolution} from the config."
+            f"domain adaptation is 2048-only: the rgb_night and rgb_noshadow folders are not "
+            f"downsampled, so there is no such imagery at {cfg.resolution}px. Got "
+            f"resolution {cfg.resolution} from the config."
         )
 
+    # Upstream runs with its own checkout as cwd, and `staging/`, `--checkpoints_dir` and
+    # `--results_dir` are all derived from the run directory: they must be absolute.
+    cfg = cfg.anchored()
     run_dir = cfg.resolved_out_dir
     run_dir.mkdir(parents=True, exist_ok=True)
     cfg.to_yaml(str(run_dir / "config.yaml"))
@@ -324,7 +390,12 @@ def run_domain_adaptation(cfg, mode: str = "finetune") -> Dict[str, Any]:
         raise ValueError(f"unknown domain-adaptation mode {mode!r}; expected finetune or score")
 
     summary["test"] = evaluate_adaptation(cfg, task, run_dir)
-    (run_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    summary["primary_metric"] = PRIMARY_METRIC
+    summary["metric_notes"] = {"fid": FID_NOTE}
+    if task.direction in SHADOW_REMOVAL_DIRECTIONS:
+        summary["paired_scoring"] = PAIRED_SCORING_NOTE
+        summary["metric_notes"]["ssim_y"] = SSIM_NOTE
+    (run_dir / "summary.json").write_text(json_dumps_safe(summary, indent=2), encoding="utf-8")
     return summary
 
 
@@ -344,37 +415,134 @@ def evaluate_adaptation(cfg, task: "DomainAdaptation", run_dir: Path) -> Dict[st
         device=cfg.train.device,
     )
 
-    # Which side of the translation is "generated" depends on the direction: AtoB writes
-    # fake_B, BtoA writes fake_A, and the real target domain is the other one.
-    target_domain = "night" if task.direction == "day2night" else "day"
+    # The generated side is `fake_B` in every direction (see GENERATED_LABEL); the real
+    # target domain is the one the direction translates *into*. `generated_paths` raises when
+    # there is nothing to score, so an empty `{}` can never be written to summary.json.
+    target_domain = upstream_module.target_role(task.direction)
     generated = task.generated_paths(str(run_dir), cfg.data.test_split)
 
-    if not generated:
-        print(
-            f"[symtrs] no generated images in "
-            f"{task.generated_dir(str(run_dir), cfg.data.test_split)}; upstream may have "
-            f"failed to write them, or used a different output layout. Metrics will be "
-            f"empty."
-        )
-        return {}
-
     real_directory = Path(cfg.data.root) / cfg.data.test_split / f"rgb_{target_domain}"
-    if not real_directory.is_dir():
-        print(f"[symtrs] no real {target_domain} images at {real_directory}; cannot score")
-        return {}
+    if not real_directory.is_dir() or not _image_paths(real_directory):
+        raise RuntimeError(
+            f"no real {target_domain} images to score {task.direction} against in "
+            f"{real_directory} ({'missing folder' if not real_directory.is_dir() else 'no image files'}). "
+            "Check `--data-root`/`data.test_split` with `symtrs doctor --data-root <root>`."
+        )
+    # The real side is the whole folder, so a test pass that stopped early (a crash, a small
+    # `--num_test`) would compare a subset of translations against every real image and
+    # report a distance between two different scene sets.
+    real_count = len(_image_paths(real_directory))
+    if len(generated) != real_count:
+        raise RuntimeError(
+            f"{len(generated)} generated images for {task.direction} but {real_count} real "
+            f"{target_domain} images in {real_directory}: upstream's test.py did not translate the "
+            "whole split (see its output above, and `--num_test` in upstream.test_command). "
+            "Re-run the scoring with `symtrs eval <config> --eval-split <split>`."
+        )
 
     from symtrs.metrics.domain import distribution_metrics, extract_features
 
+    # Both sides must reach Inception through the same path (see symtrs.metrics.domain): the
+    # real frames are native 2048 px, the generated ones whatever upstream wrote, so the real
+    # side is first antialias-resized to the generated size, read from the files themselves.
+    generated_size = generated_image_size(generated)
     real_features = extract_features(
-        _folder_loader(_image_paths(real_directory), cfg.eval.batch_size, cfg.data.num_workers)
+        _folder_loader(_image_paths(real_directory), cfg.eval.batch_size, cfg.data.num_workers),
+        resize_to=generated_size,
     )
     fake_features = extract_features(
         _folder_loader(generated, cfg.eval.batch_size, cfg.data.num_workers)
     )
     metrics = distribution_metrics(real_features, fake_features)
-    print(f"[symtrs] fid={metrics['fid']:.2f} kid={metrics.get('kid', float('nan')):.5f} "
-          f"(real={metrics['n_real']:.0f}, generated={metrics['n_fake']:.0f})")
+    metrics["feature_resize_h"] = float(generated_size[0])
+    metrics["feature_resize_w"] = float(generated_size[1])
+    print(f"[symtrs] kid={metrics.get('kid', float('nan')):.5f} (primary) "
+          f"fid={metrics['fid']:.2f} (rank-deficient below 2049 images) "
+          f"(real={metrics['n_real']:.0f}, generated={metrics['n_fake']:.0f}, "
+          f"both at {generated_size[0]}x{generated_size[1]} before Inception)")
+
+    if task.direction in SHADOW_REMOVAL_DIRECTIONS:
+        metrics.update(score_shadow_removal(cfg, task, run_dir, generated))
     return metrics
+
+
+def score_shadow_removal(
+    cfg, task: "DomainAdaptation", run_dir: Path, generated: List[Path]
+) -> Dict[str, float]:
+    """PSNR / SSIM / LAB error of `shadow2noshadow` against `rgb_noshadow`, in the
+    `shadow_removal` task's own columns.
+
+    The metric code, the shadow-mask derivation and the per-image/preview/metrics.csv
+    outputs are the shadow-removal task's, called as they are: this function only turns
+    upstream's output into what that scorer reads, `<run_dir>/predictions/<split>/<key>.png`
+    at the ground truth's size. Upstream's `test.py` writes 256x256 images (it resizes the
+    whole 2048 frame down, `load_size = crop_size = 256`), so each is resampled (bicubic) up
+    to the ground truth first. The alternative, scoring at 256, would make the row
+    incomparable with every shadow_removal row, which are full 2048 frames.
+    The up-sampling cost is therefore part of this row, which is the honest reading of
+    "what a 256 px CycleGAN/pix2pix gives you".
+    """
+    from PIL import Image
+
+    from symtrs.model.shadow.runner import score_split
+    from symtrs.model.shadow.staging import stage_split, staged_keys
+
+    split = cfg.data.test_split
+    # Same staging as shadow removal: input/ target/ mask/ beside the testA/testB links.
+    staging = stage_split(
+        cfg.data.root, str(run_dir), split, cfg.shadow.mask_threshold, cfg.shadow.mask_open,
+        cache=cfg.shadow.mask_cache, workers=cfg.shadow.mask_workers,
+    )
+    keys = staged_keys(staging)
+
+    suffix = f"_{GENERATED_LABEL}"  # exactly the files `generated_paths` selects
+    by_key = {path.stem[: -len(suffix)]: path for path in generated if path.stem.endswith(suffix)}
+    missing = [key for key in keys if key not in by_key]
+    if missing:
+        raise RuntimeError(
+            f"{len(missing)} of {len(keys)} {split} images have no generated counterpart in "
+            f"{task.generated_dir(str(run_dir), split)} (first: {missing[0]}). Upstream's "
+            "test.py did not finish, or --num_test truncated it; re-score with "
+            f"`symtrs eval <config> --eval-split {split}` once it has."
+        )
+
+    predictions = Path(run_dir) / "predictions" / split
+    predictions.mkdir(parents=True, exist_ok=True)
+    sizes = set()
+    for key in keys:
+        with Image.open(staging / "target" / f"{key}.png") as target:
+            size = target.size
+        with Image.open(by_key[key]) as image:
+            sizes.add(image.size)
+            image.convert("RGB").resize(size, Image.BICUBIC).save(predictions / f"{key}.png")
+    print(
+        f"[symtrs] shadow-removal metrics: generated {sorted(sizes)} resampled to the "
+        f"ground-truth size (bicubic) before scoring"
+    )
+    return score_split(cfg, Path(run_dir), split)
+
+
+def generated_image_size(paths: List[Path]) -> Tuple[int, int]:
+    """`(height, width)` of the generated images, read from the first file.
+
+    Upstream's test output size depends on its options (256 by default), so it is read
+    rather than assumed. Differing sizes would mean the feature set mixes resolutions, which
+    is the asymmetry this exists to remove, so that raises instead of averaging over it.
+    """
+    from PIL import Image
+
+    sizes = set()
+    for path in paths:
+        with Image.open(path) as image:
+            sizes.add((image.height, image.width))
+        if len(sizes) > 1:
+            raise RuntimeError(
+                f"generated images do not share a size ({sorted(sizes)} seen so far, e.g. "
+                f"{path.name}); FID/KID need one resolution on the generated side"
+            )
+    if not sizes:
+        raise RuntimeError("no generated images to read a size from")
+    return next(iter(sizes))
 
 
 #: Suffixes the metric code will read. Kept next to the readers so a new format cannot
@@ -424,10 +592,15 @@ def _folder_loader(paths: List[Path], batch_size: int, num_workers: int = 0):
 
 __all__ = [
     "DIRECTIONS",
+    "GENERATED_LABEL",
     "DomainAdaptation",
     "IMAGE_SUFFIXES",
+    "PAIRED_SCORING_NOTE",
+    "SHADOW_REMOVAL_DIRECTIONS",
     "UPSTREAM_MODELS",
     "device_env",
     "evaluate_adaptation",
+    "generated_image_size",
     "run_domain_adaptation",
+    "score_shadow_removal",
 ]

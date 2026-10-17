@@ -1,0 +1,66 @@
+# Restormer: remove the shadows from rgb_day, scored against rgb_noshadow (2048).
+#
+#     symtrs train configs/shadow_removal/restormer.yaml --data-root /data/SyMTRS
+#     symtrs train configs/shadow_removal/restormer.yaml --data-root /data/SyMTRS --set shadow.iterations=500
+#     symtrs eval  configs/shadow_removal/restormer.yaml --data-root /data/SyMTRS --eval-split test
+#
+# Restormer is a general restoration network with no notion of shadow: it sees the
+# shadowed image only. Its published recipe uses progressive patch sizes; this run
+# uses one fixed 256 px crop, which is the first stage of that recipe.
+# Batch 1: on a 12 GB card batch 2 at 256 px peaks at 12.4 GB and spills (8.7 s/it vs
+# 0.33 s/it); raise it on a larger GPU.
+#
+# This is not a SyMTRS model. The network class is upstream swz30/Restormer, cloned at the
+# revision in third_party/PINS.md by `python scripts/fetch_third_party.py` (the clones are
+# not committed). SyMTRS stages the data, runs one shared training loop and one shared
+# tiled inference around the upstream class, and scores the PNGs it writes with
+# symtrs/metrics/shadow.py - the same numbers for all four models:
+# PSNR, SSIM and LAB error on all pixels, in the shadow region and outside it.
+#
+# Native resolution only: rgb_noshadow has no downsampled twin. The training budget is
+# train.epochs, or shadow.iterations when positive (`--set shadow.iterations=500` is a
+# validation-sized run). The weights are trained from scratch unless
+# shadow.init_weights points at an upstream checkpoint.
+#
+
+task: shadow_removal
+model: restormer
+resolution: 2048
+seed: 42
+
+data:
+  root: /data/SyMTRS
+  split: train
+  val_split: val
+  test_split: test
+
+train:
+  epochs: 500
+  batch_size: 1
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  optim: adamw
+  sched: cosine
+  warmup_epochs: 0
+  min_lr_ratio: 3.3e-3
+  patch_size: 256
+  amp: true
+  log_every: 50
+  device: cuda
+
+eval:
+  # The inference tile is the training patch: none of these networks was trained
+  # above it, and a whole 2048 px image does not fit in 12 GB.
+  tile_size: 256
+  tile_overlap: 64
+  num_visualizations: 4
+
+shadow:
+  # The dataset has no shadow masks; they are derived from the rgb_day / rgb_noshadow
+  # pair (symtrs/metrics/shadow.py). Changing these changes the regional metrics.
+  mask_threshold: 0.1
+  mask_open: 3
+  iterations: 0
+  val_every: 500
+  val_crops: 32
+  init_weights: ""
