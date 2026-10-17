@@ -10,6 +10,15 @@
 # input, and the heaviest forward pass in the pack. The encoder is frozen for that
 # reason - 300M+ parameters, and the head is what adapts to a new sensor.
 #
+# Memory, measured (RTX 5070 Ti Laptop, 12GB, amp on, one training step): ~7.9GiB
+# at batch 1 with the encoder frozen (3.6GiB of weights, the rest decoder
+# activations), against an out-of-memory above 11GiB without it. That is why this
+# model is batch 1 and uncropped at every resolution: `infer` resizes any input to
+# 1536x1536 before the 35 overlapping 384px ViT-L passes, and that size is fixed by
+# the architecture (forward() asserts it), so neither a crop nor a smaller
+# resolution makes the step cheaper. Scoring the native 2048 frame in one pass
+# peaks at ~5.7GiB. Without `train.freeze: encoder` it does not fit on 12GB.
+#
 # The one thing about this model that is not plug-and-play for aerial imagery is the
 # focal length, and it is worth getting right before a long run:
 #
@@ -60,10 +69,10 @@ train:
   sched: cosine
   warmup_epochs: 1
   min_lr_ratio: 0.01
-  # Random 512px crops: a full 2048px batch is more memory than this
-  # encoder can hold, and the crop still shows a representative slice of the scene
-  # at this ground sampling distance.
-  patch_size: 512
+  # No crop: this network resizes its input to a fixed size, so a crop would cost
+  # the same and show it less. The memory posture is in the header above.
+  patch_size: 0
+  # 0 = the whole image at val and test, whatever patch_size is (see eval.tile_size).
   val_patch_size: 0
   amp: true
   gpus: 1
@@ -83,8 +92,7 @@ eval:
   metrics: [rmse, mae, abs_rel, sq_rel, d1, d2, d3, silog]
   batch_size: 1
   amp: true
-  # 0 runs the whole image in one forward pass, which is what the published numbers
-  # use. If you hit OOM, a sweep over 512/128 tiles scores the same metres.
+  # Whole image in one forward pass: training did not crop at this resolution either.
   tile_size: 0
   tile_overlap: 128
   align: none

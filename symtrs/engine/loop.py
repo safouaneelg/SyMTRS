@@ -85,19 +85,48 @@ def forward_native(model, image: torch.Tensor, tile_size: int = 0, tile_overlap:
     2048)". Both the training step and the evaluation pass reach the network through this
     function, so both were affected at every resolution.
     """
+    # Relative depth is only defined up to a scale and shift per forward pass, so tiles of
+    # one such image must be brought onto each other before they are blended (see
+    # `engine.tiling`). Metric depth and logits are absolute and are blended as they are.
+    match_affine = getattr(model, "protocol", "") == "relative"
+
     if tile_size and tile_size > 0 and max(image.shape[-2:]) > tile_size:
         from symtrs.engine.tiling import predict_tiled
 
         def forward_fn(tile: torch.Tensor) -> torch.Tensor:
-            return model.forward(prepare_input(model, tile))
+            return _restore_size(model, model.forward(prepare_input(model, tile)), tile)
 
-        stitched = predict_tiled(image, forward_fn, tile_size, tile_overlap)
+        stitched = predict_tiled(image, forward_fn, tile_size, tile_overlap, match_affine=match_affine)
         return _resize(stitched, image.shape[-2:])
 
     prepared = prepare_input(model, image)
     method = getattr(model, "forward_at_size", None)
     prediction = method(prepared) if callable(method) else model.forward(prepared)
-    return _resize(prediction, image.shape[-2:])
+    return _restore_size(model, prediction, image, prepared)
+
+
+def _restore_size(model, prediction: torch.Tensor, raw: torch.Tensor, prepared=None) -> torch.Tensor:
+    """Bring a prediction back onto the raw image's pixel grid.
+
+    When the only thing `prepare_input` did to the size was pad bottom/right up to the
+    model's multiple, the prediction is the padded size and the padding is *cropped* off:
+    resizing it instead stretches the whole field by up to a few pixels (DA3 pads a 512px
+    tile to 518), which shifts every pixel against the ground truth. Any other size change
+    (a MiDaS transform resizing to 384, a head at 1/4 resolution) is a genuine resample and
+    gets the bilinear resize.
+    """
+    height, width = raw.shape[-2:]
+    multiple = int(getattr(model, "size_multiple", 1) or 1)
+    padded = (height + (-height) % multiple, width + (-width) % multiple)
+    if (
+        tuple(prediction.shape[-2:]) == padded
+        and padded != (height, width)
+        and (prepared is None or tuple(prepared.shape[-2:]) == padded)
+    ):
+        if prediction.dim() == 3:
+            prediction = prediction.unsqueeze(1)
+        return prediction[..., :height, :width]
+    return _resize(prediction, (height, width))
 
 
 # ------------------------------------------------------------------ training step
@@ -258,6 +287,13 @@ def evaluate_depth(
 
     model.eval()
     align = align or cfg.eval.align or getattr(model, "align", "") or getattr(model, "default_align", "none")
+    # An override (`--align`, `eval.align`) can contradict the model's output space; refuse it
+    # here as well as at build time, because this function is also reached with a model built
+    # elsewhere. Adapters without the method (test doubles) are scored as before.
+    validate_alignment = getattr(model, "validate_alignment", None)
+    if callable(validate_alignment):
+        validate_alignment(align)
+    scoring_input = getattr(model, "scoring_input", None)
     tracker = MetricTracker()
     skipped = 0
     saved = 0
@@ -272,16 +308,20 @@ def evaluate_depth(
             metres = model.to_metres(prediction)
 
         metres = metres.float()
+        # What the alignment fits: metres for most, the raw disparity for MiDaS (whose shift
+        # a depth-space fit cannot remove). `metres` stays the human-readable map for previews.
+        scored = scoring_input(prediction.float(), align) if callable(scoring_input) else metres
         ground_truth = ground_truth.float()
         valid = valid.bool() & torch.isfinite(ground_truth) & (ground_truth > 0)
 
         for index in range(image.shape[0]):
-            single_prediction = metres[index : index + 1]
+            single_prediction = scored[index : index + 1]
             single_target = ground_truth[index : index + 1]
             single_valid = valid[index : index + 1]
             try:
                 metrics = compute_depth_metrics(
-                    single_prediction, single_target, single_valid, align=align
+                    single_prediction, single_target, single_valid, align=align,
+                    max_depth=cfg.data.max_depth,
                 )
             except AllInvalidError as exc:
                 # An all-sky tile has nothing to measure. Counting it as a failure
@@ -296,7 +336,8 @@ def evaluate_depth(
             # drifts epoch to epoch is the first sign that an alignment is hiding a
             # model that is not actually predicting the right thing.
             _, fits = align_prediction(
-                single_prediction, single_target, single_valid, mode=align
+                single_prediction, single_target, single_valid, mode=align,
+                max_depth=cfg.data.max_depth,
             )
             tracker.update_many(summarise_alignment(fits), n=1)
 

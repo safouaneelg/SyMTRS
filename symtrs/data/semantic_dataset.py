@@ -19,7 +19,13 @@ from torch.utils.data import Dataset
 
 from symtrs.data.io import list_images, check_pairing, match_by_stem, read_image, read_label_map, coverage_report
 from symtrs.data.splits import SplitDirs, resolve_split_dirs
-from symtrs.data.transforms import apply_crop, flip_tensors, match_spatial, sample_crop_params
+from symtrs.data.transforms import (
+    apply_crop,
+    center_crop_params,
+    flip_tensors,
+    match_spatial,
+    sample_crop_params,
+)
 
 #: Default class count and grey-level step for the revised SyMTRS semantic labels. The
 #: defaults live in `symtrs/config.py`; these mirror them for direct dataset use.
@@ -130,7 +136,12 @@ class SemanticDataset(Dataset):
         image, mask = match_spatial([image, mask])
 
         height, width = image.shape[-2:]
-        box = sample_crop_params(height, width, self.patch_size, self.generator)
+        # Random crop only while augmenting. Anything else (validation, test) gets the
+        # centre crop, so a split is the same pixels on every pass.
+        if self.augment:
+            box = sample_crop_params(height, width, self.patch_size, self.generator)
+        else:
+            box = center_crop_params(height, width, self.patch_size)
         if self.augment:
             horizontal = self.horizontal_flip and torch.rand(1, generator=self.generator).item() < 0.5
             vertical = self.vertical_flip and torch.rand(1, generator=self.generator).item() < 0.5

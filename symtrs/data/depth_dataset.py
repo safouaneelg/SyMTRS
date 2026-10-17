@@ -16,7 +16,13 @@ from torch.utils.data import Dataset
 from symtrs.data.exr import read_depth_file, depth_to_tensor
 from symtrs.data.io import list_images, check_pairing, match_by_stem, read_image, coverage_report
 from symtrs.data.splits import SplitDirs, resolve_split_dirs
-from symtrs.data.transforms import apply_crop, flip_tensors, match_spatial, sample_crop_params
+from symtrs.data.transforms import (
+    apply_crop,
+    center_crop_params,
+    flip_tensors,
+    match_spatial,
+    sample_crop_params,
+)
 
 DEPTH_EXTENSIONS = (".exr", ".npy")
 
@@ -119,7 +125,12 @@ class DepthTaskDataset(Dataset):
         image, depth, valid_t = match_spatial([image, depth, valid_t])
 
         height, width = image.shape[-2:]
-        box = sample_crop_params(height, width, self.patch_size, self.generator)
+        # Random crop only while augmenting. Anything else (validation, test) gets the
+        # centre crop, so a split is the same pixels on every pass.
+        if self.augment:
+            box = sample_crop_params(height, width, self.patch_size, self.generator)
+        else:
+            box = center_crop_params(height, width, self.patch_size)
         if self.augment:
             horizontal = self.horizontal_flip and torch.rand(1, generator=self.generator).item() < 0.5
             vertical = self.vertical_flip and torch.rand(1, generator=self.generator).item() < 0.5

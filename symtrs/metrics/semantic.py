@@ -80,9 +80,16 @@ class ConfusionMatrix:
     def miou(self) -> float:
         """Mean IoU over classes present in the data.
 
-        Classes absent from both prediction and ground truth are excluded rather
-        than counted as zero, which would make the score depend on how many unused
-        classes the label space happens to declare.
+        Classes absent from both prediction and ground truth (union == 0) are excluded
+        rather than counted as zero, which would make the score depend on how many unused
+        classes the label space happens to declare. A class absent from the ground truth
+        that the model nevertheless *predicts* has union > 0, so its IoU is a real 0 and
+        does count: predicting something that is not there is an error.
+
+        On the SyMTRS capture class 0 (background) has no pixel in any split - the masks
+        only hold the grey levels of classes 1-4 - so in practice this is the mean over the
+        classes present, and `miou_classes` in `summary()` says how many that was. A table
+        of mIoUs from runs with different `miou_classes` is not a like-for-like table.
         """
         iou = self.per_class_iou()
         valid = ~torch.isnan(iou)
@@ -123,8 +130,18 @@ class ConfusionMatrix:
         iou = torch.nan_to_num(iou, nan=0.0)
         return float((weights * iou).sum())
 
+    def classes_averaged(self) -> int:
+        """How many classes `miou()` averaged over (those with a non-empty union)."""
+        return int((~torch.isnan(self.per_class_iou())).sum())
+
     def summary(self) -> Dict[str, float]:
-        """The canonical metric dict, keys in `SEGMENTATION_METRIC_NAMES` order."""
+        """The canonical metric dict, keys in `SEGMENTATION_METRIC_NAMES` order.
+
+        A class with an empty union has `iou_<k>` / `dice_<k>` of NaN, written as `null`
+        in `summary.json`: "not measurable" is not the same statement as "IoU 0", and a
+        0.0 here made a class that does not exist in the data look like a model failure.
+        `miou_classes` is the number of classes `miou` was averaged over.
+        """
         per_class_iou = self.per_class_iou()
         per_class_dice = self.per_class_dice()
         summary = {
@@ -133,12 +150,11 @@ class ConfusionMatrix:
             "mean_acc": self.mean_accuracy(),
             "mean_dice": self.mean_dice(),
             "fwiou": self.frequency_weighted_iou(),
+            "miou_classes": self.classes_averaged(),
         }
         for index in range(self.num_classes):
-            iou = per_class_iou[index]
-            dice = per_class_dice[index]
-            summary[f"iou_{index}"] = 0.0 if torch.isnan(iou) else float(iou)
-            summary[f"dice_{index}"] = 0.0 if torch.isnan(dice) else float(dice)
+            summary[f"iou_{index}"] = float(per_class_iou[index])
+            summary[f"dice_{index}"] = float(per_class_dice[index])
         return summary
 
     def class_names(self) -> List[str]:

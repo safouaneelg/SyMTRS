@@ -41,6 +41,19 @@ class ConfigError(ValueError):
     """Raised when a configuration is internally inconsistent or unknown."""
 
 
+def focal_px_for_resolution(resolution: int, hfov_deg: float) -> float:
+    """Focal length in pixels of a square image `resolution` pixels wide.
+
+    `f = (W / 2) / tan(hfov / 2)`. `resolution` names the pixel size of the data (ground rule
+    1 in AGENTS.md), so the focal length follows it by proportion: 1773.6 px at 2048 and 60
+    degrees, half of that at 1024, and so on. It is a property of the data level, not of the
+    network input, which is why a 512px training crop or a tile still uses the same value.
+    """
+    import math
+
+    return (resolution / 2.0) / math.tan(math.radians(hfov_deg) / 2.0)
+
+
 @dataclass
 class DataConfig:
     """Where a run reads its data from."""
@@ -59,6 +72,14 @@ class DataConfig:
     # it counted as geometry. None keeps every positive finite pixel.
     max_depth: Optional[float] = None
     depth_channel: int = 0
+    # Horizontal field of view of the capture camera, in degrees, for the metric models whose
+    # output needs the focal length in pixels (Depth Anything 3 metric: metres = canonical
+    # depth * focal_px / 300). ASSUMPTION, not a measurement: 60 is the default of the capture
+    # actor (`FieldOfView = 60.f`, SyMTRSDatasetCaptureActor.h) and it is editable per level, so
+    # confirm it against the level that rendered the dataset. The images are square, so the
+    # vertical FOV is the same. `focal_px_for_resolution` turns it into pixels at the data's
+    # resolution; cropping and tiling do not change it, because a crop keeps the pixel size.
+    camera_hfov_deg: float = 60.0
     # Which library reads the EXR files. "auto" tries them in order; "numpy" reads .npy
     # only and is rejected on an EXR rather than silently returning something else. The
     # list of names lives in the reader, not here, so the two cannot disagree about what
@@ -98,6 +119,10 @@ class DataConfig:
             raise ConfigError("data.depth_scale must be positive")
         if self.max_depth is not None and self.max_depth <= 0:
             raise ConfigError("data.max_depth must be positive (metres) or unset")
+        if not 0.0 < self.camera_hfov_deg < 180.0:
+            raise ConfigError(
+                f"data.camera_hfov_deg must be in (0, 180) degrees; got {self.camera_hfov_deg}"
+            )
         if self.num_classes < 2:
             raise ConfigError("data.num_classes must be at least 2")
         if self.label_step < 1:
@@ -122,6 +147,10 @@ class TrainConfig:
     # Random-crop patch training. 0 trains on the full image, which only fits at
     # the lower resolutions.
     patch_size: int = 0
+    # Evaluation geometry, val AND test alike. 0 = the whole image (never `patch_size`: the
+    # training crop is a memory device, not part of the protocol). A positive value is a
+    # deterministic CENTRE crop, only for speed; images that do not fit in one pass are
+    # scored with `eval.tile_size` instead, which still covers every pixel.
     val_patch_size: int = 0
 
     amp: bool = True

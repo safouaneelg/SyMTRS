@@ -171,9 +171,15 @@ def from_config(cfg: RunConfig, split: Optional[str] = None, train: bool = True,
     if split is None:
         split = cfg.data.split if train else cfg.data.val_split
 
+    # Evaluation never inherits the training crop. `val_patch_size: 0` means the WHOLE image,
+    # which is what the configs say; falling back to `train.patch_size` when it was 0 scored
+    # every 2048px val/test pass (model selection included) on one random 512px window, so a
+    # 2048 number was neither reproducible nor comparable with the whole-image 1024/512/256
+    # rows. A positive `val_patch_size` is a deterministic centre crop (see the datasets);
+    # images too large for one forward pass are handled by `eval.tile_size`, not by cropping.
     patch_size = overrides.pop(
         "patch_size",
-        cfg.train.patch_size if train else (cfg.train.val_patch_size or cfg.train.patch_size),
+        cfg.train.patch_size if train else cfg.train.val_patch_size,
     )
     limit = overrides.pop(
         "limit_batches",

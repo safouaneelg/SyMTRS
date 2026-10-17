@@ -13,8 +13,8 @@ Queue file format, one job per line (blank lines and `#` comments ignored):
 
     <venv>  <config.yaml>  [extra symtrs flags ...]
 
-`<venv>` is `.venv` or `.venv-zoe` (ZoeDepth and midas_dpt_swin2_tiny need timm 0.6.12, see
-AGENTS.md ground rule 10). This script does not decide budgets: `scripts/smoke_all.py` measures
+`<venv>` is `.venv` or `.venv-zoe` (ZoeDepth, midas_dpt_swin2_tiny and midas_dpt_beit_large need timm
+0.6.12, see AGENTS.md ground rule 10). This script does not decide budgets: `scripts/smoke_all.py` measures
 what fits on the card and writes them into the queue file. Launch it detached with
 `scripts/run_queue.ps1` so it outlives the shell that started it.
 """
@@ -52,6 +52,20 @@ def run_dir_for(out_root: Path, config: str) -> Path:
     # One folder per config file: the stem is unique across configs/ (e.g. midas_small_512,
     # srcnn_x4, cyclegan_day2night), and keeping the name lets `symtrs tables` read them all.
     return out_root / Path(config).stem
+
+
+def keep_awake() -> None:
+    """Stop Windows from idle-sleeping while this process runs (no setting is changed).
+
+    The first smoke pass started at 19:42 and the laptop went into standby at ~20:00 until
+    someone touched it at 03:39: 7.6 h lost, and the job in flight reported 460 min. This
+    only blocks *idle* sleep; closing the lid still follows the lid policy.
+    """
+    if os.name == "nt":
+        import ctypes
+
+        es_continuous, es_system_required = 0x80000000, 0x00000001
+        ctypes.windll.kernel32.SetThreadExecutionState(es_continuous | es_system_required)
 
 
 def run_env() -> dict:
@@ -125,6 +139,7 @@ def main() -> int:
         with qlog.open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
 
+    keep_awake()
     env = run_env()
     jobs = parse_queue(Path(args.queue))
     note(f"queue start: {len(jobs)} jobs from {args.queue}")

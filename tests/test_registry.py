@@ -144,13 +144,14 @@ def test_default_kwargs_are_parameters_of_the_class_they_are_passed_to():
 def test_depth_entries_declare_a_protocol_and_an_alignment(spec: ModelSpec):
     """A depth model with no protocol cannot be scored: metric and relative models need
     different losses and different post-processing, and guessing is how a table ends up
-    mixing two incomparable numbers."""
+    mixing two incomparable numbers. The alignment is not free either: it is the one
+    `depth_pairing` derives from the protocol AND the output space (MiDaS emits disparity,
+    so `scale` - which is right for depth - is wrong for it)."""
+    from symtrs.registry import OUTPUT_SPACES, depth_pairing
+
     assert spec.protocol in {"metric", "relative"}, spec.key
-    expected = "none" if spec.protocol == "metric" else {"median", "scale", "scale_shift"}
-    if spec.protocol == "metric":
-        assert spec.default_align == expected, spec.key
-    else:
-        assert spec.default_align in expected, spec.key
+    assert spec.output_space in OUTPUT_SPACES, spec.key
+    assert spec.default_align == depth_pairing(spec.protocol, spec.output_space)[1], spec.key
 
 
 def test_non_depth_entries_do_not_pretend_to_have_a_protocol():
@@ -158,6 +159,7 @@ def test_non_depth_entries_do_not_pretend_to_have_a_protocol():
         if spec.task != "depth":
             assert spec.protocol == "", f"{spec.key} is a {spec.task} model with a depth protocol"
             assert spec.default_align == ""
+            assert spec.output_space == "" and spec.focal_kwarg == ""
 
 
 def test_aliases_resolve_to_their_key_and_never_shadow_another():

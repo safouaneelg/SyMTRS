@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -24,7 +25,14 @@ IDENTITY = ("task", "model", "resolution", "mode", "best_epoch")
 COLUMN_ORDER = {
     "depth": ("rmse", "mae", "abs_rel", "sq_rel", "d1", "d2", "d3", "silog"),
     "segmentation": ("miou", "pixel_acc", "mean_acc", "mean_dice", "fwiou", "loss"),
-    "domain_adapt": ("fid", "kid", "kid_std"),
+    # The paired columns exist only on `shadow2noshadow` rows (see
+    # `symtrs.model.domain.runner.SHADOW_REMOVAL_DIRECTIONS`) and are the shadow_removal
+    # columns under the same names, so the two tasks line up in one table.
+    "domain_adapt": ("fid", "kid", "kid_std") + (
+        "psnr", "ssim", "mae_lab", "rmse_lab",
+        "psnr_shadow", "ssim_shadow", "mae_lab_shadow", "rmse_lab_shadow",
+        "psnr_nonshadow", "ssim_nonshadow", "mae_lab_nonshadow", "rmse_lab_nonshadow",
+    ),
     "shadow_removal": (
         "psnr", "ssim", "mae_lab", "rmse_lab",
         "psnr_shadow", "ssim_shadow", "mae_lab_shadow", "rmse_lab_shadow",
@@ -64,6 +72,9 @@ def collect(root: str) -> List[Dict[str, Any]]:
             "model": summary.get("model", ""),
             "resolution": summary.get("resolution", ""),
             "mode": summary.get("mode", ""),
+            # Domain adaptation has four directions per model and a run is meaningless
+            # without it; other tasks do not write one.
+            **({"direction": summary["direction"]} if "direction" in summary else {}),
             "best_epoch": summary.get("best_epoch", ""),
         }
         for key, value in (summary.get("test") or {}).items():
@@ -73,7 +84,10 @@ def collect(root: str) -> List[Dict[str, Any]]:
 
 
 def _columns(rows: List[Dict[str, Any]], metric: Optional[str]) -> List[str]:
-    identity = [name for name in ("run", "task", "model", "resolution", "mode") if any(name in r for r in rows)]
+    identity = [
+        name for name in ("run", "task", "model", "direction", "resolution", "mode")
+        if any(name in r for r in rows)
+    ]
     if metric:
         measured = [name for name in COLUMN_ORDER.get(metric, ()) if any(name in r for r in rows)]
     else:
@@ -89,6 +103,10 @@ def _columns(rows: List[Dict[str, Any]], metric: Optional[str]) -> List[str]:
 
 
 def _format(value: Any) -> str:
+    # `null` in summary.json (a metric that could not be computed: a NaN validation, a class
+    # absent from the split) is shown as n/a, never as 0 and never as the string "None".
+    if value is None or (isinstance(value, float) and not math.isfinite(value)):
+        return "n/a"
     if isinstance(value, float):
         return f"{value:.4f}" if abs(value) < 1e4 else f"{value:.3g}"
     return str(value)
@@ -96,7 +114,9 @@ def _format(value: Any) -> str:
 
 def render(rows: List[Dict[str, Any]], columns: List[str], style: str) -> str:
     if style == "json":
-        return json.dumps(rows, indent=2, default=str)
+        from symtrs.common.jsonio import dumps
+
+        return dumps(rows, indent=2)
 
     if style == "csv":
         lines = [",".join(columns)]
@@ -129,7 +149,13 @@ def _run(args: argparse.Namespace) -> int:
         return 1
 
     if args.sort_by:
-        rows.sort(key=lambda r: (r.get(args.sort_by) is None, r.get(args.sort_by)))
+        def _sort_key(row):
+            value = row.get(args.sort_by)
+            missing = value is None or (isinstance(value, float) and not math.isfinite(value))
+            # Missing values sort last, and are never compared with a number.
+            return (1, 0.0, "") if missing else (0, value if isinstance(value, (int, float)) else 0.0, str(value))
+
+        rows.sort(key=_sort_key)
 
     columns = _columns(rows, args.metric)
     text = render(rows, columns, args.format)

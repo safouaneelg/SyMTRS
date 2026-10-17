@@ -269,3 +269,249 @@ def test_doctor_and_pyproject_agree_on_where_the_upstream_imports_come_from() ->
     assert extra, "pyproject.toml no longer declares the `adapt` extra"
     for name in upstream.REQUIRED_IMPORTS:
         assert f'"{name}"' in extra.group(1)
+
+
+# ------------------------------------------------- the shadow <-> shadow-free pair
+
+SHADOW_DIRECTIONS = ("shadow2noshadow", "noshadow2shadow")
+
+
+def _shadow_root(tmp_path: Path, count: int = 2, size: int = 32) -> Path:
+    """A real-layout root: `rgb_day` with a dark square, `rgb_noshadow` without it."""
+    import numpy as np
+    from PIL import Image
+
+    root = tmp_path / "SyMTRS"
+    for role in ("rgb_day", "rgb_noshadow", "rgb_night"):
+        (root / "test" / role).mkdir(parents=True)
+    for index in range(count):
+        clean = np.full((size, size, 4), 200, np.uint8)
+        dark = clean.copy()
+        dark[size // 4 : 3 * size // 4, size // 4 : 3 * size // 4, :3] = 70
+        key = f"loc{index:03d}"
+        Image.fromarray(dark).save(root / "test" / "rgb_day" / f"rgb_day_2048_{key}.png")
+        Image.fromarray(clean).save(root / "test" / "rgb_noshadow" / f"rgb_noshadow_2048_{key}.png")
+        night = np.full((size, size, 4), 100, np.uint8)
+        Image.fromarray(night).save(root / "test" / "rgb_night" / f"rgb_night_2048_{key}.png")
+    return root
+
+
+def test_shadow_directions_stage_day_as_A_and_noshadow_as_B_paired_by_key(tmp_path: Path) -> None:
+    """pix2pix pairs by exact basename, so both folders must be staged under the key.
+
+    Both shadow directions stage the same way - A is `rgb_day` - and differ only in which
+    way upstream translates, exactly like the day/night pair.
+    """
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    root = _shadow_root(tmp_path)
+    for direction in SHADOW_DIRECTIONS:
+        staging = upstream.build_staging_dir(
+            str(root), str(tmp_path / direction), "test", direction=direction
+        )
+        a = sorted(p.name for p in (staging / "testA").iterdir())
+        b = sorted(p.name for p in (staging / "testB").iterdir())
+        assert a == b == ["loc000.png", "loc001.png"], direction
+        # A really is the shadowed image: its dark square is what rgb_noshadow lacks.
+        assert Image.open(staging / "testA" / "loc000.png").convert("RGB").getpixel((16, 16)) == (70, 70, 70)
+        assert Image.open(staging / "testB" / "loc000.png").convert("RGB").getpixel((16, 16)) == (200, 200, 200)
+
+
+def test_the_day_night_staging_is_unchanged_by_the_shadow_pair(tmp_path: Path) -> None:
+    """The default direction still stages rgb_night as B."""
+    pytest.importorskip("PIL")
+    root = _shadow_root(tmp_path)
+    staging = upstream.build_staging_dir(str(root), str(tmp_path / "run"), "test")
+    from PIL import Image
+
+    assert Image.open(staging / "testB" / "loc000.png").convert("RGB").getpixel((2, 2)) == (100, 100, 100)
+    assert Image.open(staging / "testA" / "loc000.png").convert("RGB").getpixel((2, 2)) == (200, 200, 200)
+
+
+def test_directions_map_to_the_upstream_side_and_the_real_target() -> None:
+    expected = {
+        "day2night": ("AtoB", "night"),
+        "night2day": ("BtoA", "day"),
+        "shadow2noshadow": ("AtoB", "noshadow"),
+        "noshadow2shadow": ("BtoA", "day"),
+    }
+    assert set(runner.DIRECTIONS) == set(expected)
+    for direction, (side, target) in expected.items():
+        assert upstream.upstream_direction(direction) == side
+        assert upstream.target_role(direction) == target
+    with pytest.raises(ValueError, match="unknown direction"):
+        runner.DomainAdaptation(direction="day2dusk")
+
+
+def test_shadow_directions_pass_only_flags_the_vendored_parser_accepts(tmp_path: Path) -> None:
+    """The pair is data; the argv is the same as for day/night, side flag aside."""
+    accepted = accepted_flags()
+    for direction in SHADOW_DIRECTIONS:
+        commands = [
+            train_command(tmp_path, direction=direction),
+            upstream.test_command(
+                upstream=VENDORED,
+                staging=staging(tmp_path),
+                experiment=f"symtrs_cyclegan_{direction}",
+                split="test",
+                dataset_mode="unaligned",
+                upstream_model="cycle_gan",
+                direction=direction,
+                checkpoints_dir=str(tmp_path / "checkpoints"),
+                results_dir=str(tmp_path / "results"),
+            ),
+        ]
+        for command in commands:
+            for token in command:
+                if token.startswith("--"):
+                    assert token[2:] in accepted, f"{direction}: upstream would reject {token!r}"
+    forward = train_command(tmp_path, direction="shadow2noshadow")
+    backward = train_command(tmp_path, direction="noshadow2shadow")
+    assert forward[forward.index("--direction") + 1] == "AtoB"
+    assert backward[backward.index("--direction") + 1] == "BtoA"
+
+
+def test_generated_images_of_each_shadow_direction_are_the_side_it_generated(tmp_path: Path) -> None:
+    images = tmp_path / "results" / "run" / "test_latest" / "images"
+    images.mkdir(parents=True)
+    for label in ("real_A", "real_B", "fake_A", "fake_B"):
+        (images / f"loc000_{label}.png").write_bytes(b"")
+    forward = runner.DomainAdaptation(direction="shadow2noshadow", name="run")
+    backward = runner.DomainAdaptation(direction="noshadow2shadow", name="run")
+    assert [p.name for p in forward.generated_paths(str(tmp_path), "test")] == ["loc000_fake_B.png"]
+    assert [p.name for p in backward.generated_paths(str(tmp_path), "test")] == ["loc000_fake_A.png"]
+
+
+@pytest.mark.parametrize("direction", SHADOW_DIRECTIONS)
+def test_shadow_directions_are_refused_below_native_resolution(direction: str, tmp_path: Path) -> None:
+    """`rgb_noshadow` has no `_lr` twin, so 1024 would mean approximating the target."""
+    from symtrs.config import RunConfig
+
+    cfg = RunConfig(task="domain_adapt", model="cyclegan", resolution=1024).with_overrides(
+        {"model_kwargs.direction": direction, "data.root": str(tmp_path), "out_dir": str(tmp_path / "run")}
+    )
+    with pytest.raises(ValueError, match="2048-only") as excinfo:
+        runner.run_domain_adaptation(cfg, mode="finetune")
+    assert "rgb_noshadow" in str(excinfo.value)
+
+
+def test_only_the_shadow_removal_direction_gets_the_paired_metrics() -> None:
+    """`noshadow2shadow` has a ground truth too, but a shadow-removal column describing it
+    would measure how well a shadow was painted under a name that says it was removed."""
+    assert runner.SHADOW_REMOVAL_DIRECTIONS == ("shadow2noshadow",)
+
+
+def test_the_paired_scoring_runs_the_shadow_removal_metrics_on_a_resampled_output(
+    tmp_path: Path, capsys
+) -> None:
+    """Upstream writes small images; the metrics are those of `symtrs.metrics.shadow` at
+    the ground-truth size, so a shadow-free output scores perfectly and an output that kept
+    the shadow scores badly in the shadow region only."""
+    np = pytest.importorskip("numpy")
+    Image = pytest.importorskip("PIL.Image")
+    from symtrs.config import RunConfig
+
+    root = _shadow_root(tmp_path, count=2, size=64)
+    run = tmp_path / "run"
+    cfg = RunConfig(task="domain_adapt", model="pix2pix", resolution=2048).with_overrides(
+        {"data.root": str(root), "out_dir": str(run), "eval.num_visualizations": 0}
+    )
+    task = runner.DomainAdaptation(direction="shadow2noshadow", name="run")
+    images = task.generated_dir(str(run), "test")
+    images.mkdir(parents=True)
+
+    def write(shaded: bool) -> None:
+        for key in ("loc000", "loc001"):
+            array = np.full((16, 16, 3), 200, np.uint8)  # upstream's size is not the GT's
+            if shaded:
+                array[4:12, 4:12] = 70
+            Image.fromarray(array).save(images / f"{key}_fake_B.png")
+
+    write(shaded=False)
+    perfect = runner.score_shadow_removal(cfg, task, run, task.generated_paths(str(run), "test"))
+    assert perfect["psnr"] > 40 and perfect["ssim"] > 0.99
+    assert perfect["images"] == 2 and perfect["images_with_shadow"] == 2
+    assert "resampled" in capsys.readouterr().out
+    # The scorer's own input contract: a full-size PNG per key.
+    assert Image.open(run / "predictions" / "test" / "loc000.png").size == (64, 64)
+
+    write(shaded=True)  # the shadow was not removed
+    unchanged = runner.score_shadow_removal(cfg, task, run, task.generated_paths(str(run), "test"))
+    assert unchanged["psnr_shadow"] < perfect["psnr_shadow"] - 10
+    assert unchanged["psnr_nonshadow"] > unchanged["psnr_shadow"]
+
+
+def test_the_paired_scoring_names_missing_generated_images(tmp_path: Path) -> None:
+    pytest.importorskip("PIL")
+    from symtrs.config import RunConfig
+
+    root = _shadow_root(tmp_path, count=2, size=64)
+    run = tmp_path / "run"
+    cfg = RunConfig(task="domain_adapt", model="pix2pix", resolution=2048).with_overrides(
+        {"data.root": str(root), "out_dir": str(run)}
+    )
+    task = runner.DomainAdaptation(direction="shadow2noshadow", name="run")
+    task.generated_dir(str(run), "test").mkdir(parents=True)
+    with pytest.raises(RuntimeError, match="no generated counterpart"):
+        runner.score_shadow_removal(cfg, task, run, [])
+
+
+def test_tables_tell_the_four_directions_apart_and_line_up_with_shadow_removal(tmp_path: Path) -> None:
+    """Two runs of one model differ only by direction; without the column they are one row."""
+    import json
+
+    from symtrs.commands import tables
+
+    for direction, extra in (("day2night", {}), ("shadow2noshadow", {"psnr": 20.0})):
+        run = tmp_path / direction
+        run.mkdir()
+        (run / "summary.json").write_text(json.dumps({
+            "task": "domain_adapt", "model": "pix2pix", "direction": direction,
+            "resolution": 2048, "mode": "finetune", "test": {"fid": 100.0, **extra},
+        }), encoding="utf-8")
+    rows = tables.collect(str(tmp_path))
+    columns = tables._columns(rows, "domain_adapt")
+    assert {r["direction"] for r in rows} == {"day2night", "shadow2noshadow"}
+    assert "direction" in columns and columns.index("fid") < columns.index("psnr")
+
+
+def test_pix2pix_staging_writes_the_AB_pairs_the_vendored_aligned_dataset_reads(tmp_path: Path) -> None:
+    """`AlignedDataset` reads `<dataroot>/<phase>/*.png` as `[A | B]` and ignores `<phase>A`.
+
+    With only the links it falls through to its raw-directory auto-split, looking for
+    `hr/` and `night/` under the staging directory - the failure every pix2pix run died of
+    before the pairs were written. The A half is the shadowed image, the B half the clean one.
+    """
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    root = _shadow_root(tmp_path, count=2, size=32)
+    staging = upstream.build_staging_dir(
+        str(root), str(tmp_path / "run"), "test", direction="shadow2noshadow", aligned=True
+    )
+    pairs = sorted(p.name for p in (staging / "test").iterdir())
+    assert pairs == ["loc000.png", "loc001.png"]
+    pair = Image.open(staging / "test" / "loc000.png").convert("RGB")
+    assert pair.size == (64, 32)
+    assert pair.getpixel((16, 16)) == (70, 70, 70)  # left half: rgb_day, the shadowed square
+    assert pair.getpixel((32 + 16, 16)) == (200, 200, 200)  # right half: rgb_noshadow
+    # The unpaired front-end is untouched: CycleGAN reads trainA/trainB and nothing else.
+    unaligned = upstream.build_staging_dir(str(root), str(tmp_path / "other"), "test")
+    assert not (unaligned / "test").exists()
+
+    # A pair whose scene left the split must not survive in the folder.
+    (root / "test" / "rgb_day" / "rgb_day_2048_loc001.png").unlink()
+    (root / "test" / "rgb_noshadow" / "rgb_noshadow_2048_loc001.png").unlink()
+    again = upstream.build_staging_dir(
+        str(root), str(tmp_path / "run"), "test", direction="shadow2noshadow", aligned=True
+    )
+    assert sorted(p.name for p in (again / "test").iterdir()) == ["loc000.png"]
+
+
+def test_pix2pix_selects_the_aligned_dataset_mode_and_cyclegan_the_unaligned_one() -> None:
+    cyclegan = runner.DomainAdaptation(direction="shadow2noshadow")
+    cyclegan.key = "cyclegan"
+    pix2pix = runner.DomainAdaptation(direction="shadow2noshadow")
+    pix2pix.key = "pix2pix"
+    assert cyclegan.dataset_mode == "unaligned" and pix2pix.dataset_mode == "aligned"

@@ -117,3 +117,53 @@ def test_swin2_tiny_is_listed_with_the_timm_pinned_models():
     assert "midas_dpt_swin2_tiny" in TIMM_PINNED_KEYS
     for key in TIMM_PINNED_KEYS:
         get_spec(key)  # every listed key exists in the registry
+
+
+def test_beit_large_is_listed_with_the_timm_pinned_models_and_the_smoke_runner_agrees():
+    # MiDaS's backbones/beit.py patches timm's Block.forward with a copy that calls
+    # `self.drop_path`; timm >= 0.9 removed it, so the model builds and then dies at the
+    # first forward. The doctor warning and the venv that scripts/smoke_all.py picks must
+    # name the same models, or a queue sends it to the environment where it cannot run.
+    from symtrs.commands.doctor import TIMM_PINNED_KEYS
+
+    sys.path.insert(0, str(ROOT / "scripts"))
+    try:
+        import smoke_all
+    finally:
+        sys.path.remove(str(ROOT / "scripts"))
+
+    assert "midas_dpt_beit_large" in TIMM_PINNED_KEYS
+    assert set(smoke_all.ZOE_VENV_MODELS) == set(TIMM_PINNED_KEYS)
+
+
+@requires_torch
+def test_midas_beit_384_uses_the_384_transform():
+    from symtrs.model.depth.midas import _TRANSFORM_NAMES, MIDAS_MODELS
+
+    assert get_spec("midas_dpt_beit_large").default_kwargs["hub_model"] == "DPT_BEiT_L_384"
+    assert MIDAS_MODELS["DPT_BEiT_L_384"] == 384
+    assert _TRANSFORM_NAMES["DPT_BEiT_L_384"] == "dpt_transform"  # Resize(384, 384)
+
+
+@requires_torch
+def test_midas_beit_on_a_too_new_timm_is_refused_at_build_time_naming_the_venv():
+    # A block without `drop_path` is what timm >= 0.9 builds; the error has to surface at
+    # construction (before the GPU is reserved) and say where the model does run.
+    import types
+
+    from symtrs.model.depth.midas import MiDaSAdapter
+
+    new_timm_block = types.SimpleNamespace()  # no drop_path attribute
+    backbone = types.SimpleNamespace(
+        pretrained=types.SimpleNamespace(model=types.SimpleNamespace(blocks=[new_timm_block]))
+    )
+    with pytest.raises(RuntimeError, match=r"\.venv-zoe.*timm==0\.6\.12"):
+        MiDaSAdapter._require_beit_compatible_timm("DPT_BEiT_L_384", backbone)
+
+    # the old-timm layout, and every non-BEiT model, pass through untouched
+    old_timm_block = types.SimpleNamespace(drop_path=object())
+    old = types.SimpleNamespace(
+        pretrained=types.SimpleNamespace(model=types.SimpleNamespace(blocks=[old_timm_block]))
+    )
+    MiDaSAdapter._require_beit_compatible_timm("DPT_BEiT_L_384", old)
+    MiDaSAdapter._require_beit_compatible_timm("DPT_Hybrid", backbone)

@@ -9,7 +9,7 @@
 # SwinV2-Tiny with the DPT head. Window attention rather than global attention, so
 # it is the MiDaS variant whose cost grows most gently with resolution - which is
 # why it is worth running the 2048 cell of this one even if you skip the others.
-# Still relative-depth: align: scale, SILog loss.
+# Still relative-depth, disparity output: align: scale_shift_disparity, ssi loss.
 #
 # The other three cells of this row are the same file at 1024, 512 and 256, in the
 # sibling folders. `symtrs sweep --task depth --models midas_dpt_swin2_tiny` walks them.
@@ -48,12 +48,13 @@ train:
   # encoder can hold, and the crop still shows a representative slice of the scene
   # at this ground sampling distance.
   patch_size: 384
+  # 0 = the whole image at val and test, whatever patch_size is (see eval.tile_size).
   val_patch_size: 0
   amp: true
   gpus: 1
   grad_clip: 1.0
   grad_accum: 1
-  loss: silog
+  loss: ssi
   freeze: ""
   log_every: 50
   save_samples_every: 1
@@ -65,9 +66,14 @@ eval:
   metrics: [rmse, mae, abs_rel, sq_rel, d1, d2, d3, silog]
   batch_size: 1
   amp: true
-  # 0 runs the whole image in one forward pass, which is what the published numbers
-  # use. If you hit OOM, a sweep over 512/128 tiles scores the same metres.
-  tile_size: 0
-  tile_overlap: 128
-  align: scale
+  # The whole 2048px image is scored (val and test alike), in 384px windows
+  # with 96px overlap: the size this row trained on, so the network sees the same
+  # field of view at evaluation. Never a crop - every pixel is covered and the result is
+  # deterministic.
+  # Relative depth is defined per forward pass only up to scale and shift, so each
+  # window is first fitted onto the ones already stitched; the alignment that scores
+  # the row is then computed once, on the full stitched image (engine/tiling.py).
+  tile_size: 384
+  tile_overlap: 96
+  align: scale_shift_disparity
   num_visualizations: 4

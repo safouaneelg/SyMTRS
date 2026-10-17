@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from symtrs.config import RunConfig
+from symtrs.common.jsonio import dumps as json_dumps_safe
 from symtrs.data.splits import RESOLUTION_TO_SCALE, resolve_split_dirs, subdir_for
 
 #: The model set of the legacy trainer (`symtrs/legacy/superres/train.py`), mirrored here
@@ -376,7 +377,7 @@ def run_super_resolution(cfg: RunConfig, mode: str = "finetune", dry_run: bool =
     completed = subprocess.run(command)
     summary = summary_from_run(cfg, run_dir, completed.returncode, command, mode=mode)
     (run_dir / "summary.json").write_text(
-        json.dumps(summary, indent=2) + "\n", encoding="utf-8"
+        json_dumps_safe(summary, indent=2) + "\n", encoding="utf-8"
     )
 
     if completed.returncode != 0:

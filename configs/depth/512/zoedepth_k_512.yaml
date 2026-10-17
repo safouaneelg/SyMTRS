@@ -22,6 +22,9 @@ model: zoedepth_k
 resolution: 512
 seed: 42
 
+model_kwargs:
+  max_depth: 300.0
+
 data:
   root: /data/SyMTRS
   split: train
@@ -48,6 +51,7 @@ train:
   min_lr_ratio: 0.01
   # The whole image fits at this resolution, so no cropping is needed.
   patch_size: 0
+  # 0 = the whole image at val and test, whatever patch_size is (see eval.tile_size).
   val_patch_size: 0
   amp: true
   gpus: 1
@@ -67,8 +71,7 @@ eval:
   metrics: [rmse, mae, abs_rel, sq_rel, d1, d2, d3, silog]
   batch_size: 1
   amp: true
-  # 0 runs the whole image in one forward pass, which is what the published numbers
-  # use. If you hit OOM, a sweep over 512/128 tiles scores the same metres.
+  # Whole image in one forward pass: training did not crop at this resolution either.
   tile_size: 0
   tile_overlap: 128
   align: none

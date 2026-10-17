@@ -25,11 +25,17 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from run_queue import REPO, now, run_env, run_job, train_cmd  # noqa: E402
+from run_queue import REPO, keep_awake, now, run_env, run_job, train_cmd  # noqa: E402
 
 TASK_ORDER = ["segmentation", "depth", "superresolution", "shadow_removal", "domain_adapt"]
 # Models whose upstream code pins timm 0.6.12 (AGENTS.md ground rule 10).
-ZOE_VENV_MODELS = ("zoedepth_n", "zoedepth_k", "zoedepth_nk", "midas_dpt_swin2_tiny")
+ZOE_VENV_MODELS = (
+    "zoedepth_n",
+    "zoedepth_k",
+    "zoedepth_nk",
+    "midas_dpt_swin2_tiny",
+    "midas_dpt_beit_large",
+)
 OOM = re.compile(r"OutOfMemoryError|CUDA out of memory|CUBLAS_STATUS_ALLOC_FAILED")
 
 # Smoke budget: enough to cross every code path (train step, val, checkpoint, test scoring),
@@ -106,6 +112,7 @@ def main() -> int:
     (REPO / "logs").mkdir(exist_ok=True)
     tsv = smoke_root / "smoke.tsv"
     done = load_done(tsv)
+    keep_awake()
     env = run_env()
     only = {s for s in args.only.split(",") if s}
     stop = REPO / "runs" / "STOP"

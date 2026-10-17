@@ -32,6 +32,10 @@ data:
   depth_scale: 0.01
   # Metres, after depth_scale: the sky is a huge value, not zero, so it is cut here.
   max_depth: 1000
+  # Horizontal field of view of the capture camera. ASSUMPTION: 60 degrees is the capture
+  # actor's default (FieldOfView = 60.f) and is editable per level - confirm it. It fixes
+  # the focal length in pixels the metric model needs: (resolution / 2) / tan(fov / 2).
+  camera_hfov_deg: 60.0
   depth_channel: 0
   depth_backend: auto
   num_workers: 8
@@ -48,6 +52,7 @@ train:
   min_lr_ratio: 0.01
   # The whole image fits at this resolution, so no cropping is needed.
   patch_size: 0
+  # 0 = the whole image at val and test, whatever patch_size is (see eval.tile_size).
   val_patch_size: 0
   amp: true
   gpus: 1
@@ -67,8 +72,7 @@ eval:
   metrics: [rmse, mae, abs_rel, sq_rel, d1, d2, d3, silog]
   batch_size: 1
   amp: true
-  # 0 runs the whole image in one forward pass, which is what the published numbers
-  # use. If you hit OOM, a sweep over 512/128 tiles scores the same metres.
+  # Whole image in one forward pass: training did not crop at this resolution either.
   tile_size: 0
   tile_overlap: 128
   align: none

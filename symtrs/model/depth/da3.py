@@ -49,7 +49,12 @@ metric depth", and the package does `depth * focal / 300` (`apply_metric_scaling
 dataset's camera intrinsics are not part of the depth interface, so `focal_px` is an
 explicit argument: when given, the metric output is scaled by `focal_px / 300`; when
 `None`, the output is the canonical depth, unscaled, and the metric numbers of this model
-are only meaningful up to that factor. It is not guessed.
+are only meaningful up to that factor. It is not guessed here - but it is not left unset in
+a run either: `symtrs.model.wrapper.build_from_config` derives it from the data (registry
+`focal_kwarg`; `focal_px_for_resolution(resolution, data.camera_hfov_deg)`), because the
+capture camera's field of view is a property of the dataset and the focal length in pixels
+follows the resolution axis. With it unset the real-data smoke runs scored abs_rel 0.91-0.96
+and d1 = 0 (predictions ~4% of the ground truth).
 
 Depth, not disparity
 --------------------
@@ -203,6 +208,12 @@ class DepthAnything3Adapter(DepthAdapter):
         self.model_id = model_id
         self.metric = _infer_metric(model_id) if metric is None else bool(metric)
         self.focal_px = None if focal_px is None else float(focal_px)
+        if self.metric and self.focal_px is None:
+            print(
+                f"[symtrs] warning: {model_id} is metric but focal_px is unset, so it returns "
+                "canonical depth (a 300 px camera), not metres. A run built from a config gets "
+                "it from data.camera_hfov_deg; for SDK use pass focal_px=..."
+            )
 
         # DepthAdapter.__init__ reads both of these, so they must be set first.
         self.protocol = "metric" if self.metric else "relative"

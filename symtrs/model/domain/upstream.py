@@ -76,6 +76,36 @@ MODIFIED_FILES = tuple(
     name for name in DEVIATIONS if name.endswith(".py")
 )
 
+#: Every translation SyMTRS runs, as data: `direction -> (domain A role, domain B role,
+#: upstream --direction)`. The roles are `symtrs.data.splits` roles, i.e. the `rgb_<role>`
+#: folder staged into `<split>A` / `<split>B`. A pair is always staged the same way whichever
+#: way it is translated - A is `rgb_day` - and the direction only says which of the two
+#: upstream treats as input, so the day/night pair and the shadow/shadow-free pair share one
+#: staging, one launch and one scorer instead of a copy each.
+DIRECTION_ROLES: Dict[str, Tuple[str, str, str]] = {
+    "day2night": ("day", "night", "AtoB"),
+    "night2day": ("day", "night", "BtoA"),
+    "shadow2noshadow": ("day", "noshadow", "AtoB"),
+    "noshadow2shadow": ("day", "noshadow", "BtoA"),
+}
+
+
+def direction_spec(direction: str) -> Tuple[str, str, str]:
+    """`(A role, B role, upstream direction)` of a SyMTRS direction, or a clear error."""
+    try:
+        return DIRECTION_ROLES[direction]
+    except KeyError:
+        raise ValueError(
+            f"unknown direction {direction!r}; expected one of {tuple(DIRECTION_ROLES)}"
+        ) from None
+
+
+def target_role(direction: str) -> str:
+    """The `rgb_<role>` folder holding the real images this direction should generate."""
+    a_role, b_role, upstream_side = direction_spec(direction)
+    return b_role if upstream_side == "AtoB" else a_role
+
+
 #: What upstream imports before it parses anything. `train.py` and `test.py` both reach
 #: `util.visualizer`, which imports these two at module level, so a domain-adaptation run
 #: cannot start without them installed - they are not optional extras of upstream's HTML
@@ -365,8 +395,16 @@ def build_staging_dir(
     run_dir: str,
     split: str = "train",
     require_all: bool = False,
+    direction: str = "day2night",
+    aligned: bool = False,
 ) -> Path:
     """Stage `trainA/trainB/valA/valB/testA/testB` as folders of per-file links.
+
+    Which folders become A and B comes from `DIRECTION_ROLES`: `rgb_day` / `rgb_night` for
+    the day-night directions, `rgb_day` / `rgb_noshadow` for the shadow ones.
+
+    `aligned=True` (pix2pix) also writes `<staging>/<split>/<split>/<key>.png`, each A image
+    next to its B image: see `write_aligned_pairs` for why the links alone are not enough.
 
     `dataroot` is then the staging directory and upstream's `--phase` selects the split
     as it always did. Links mean (normally) no image is copied, and because the
@@ -376,6 +414,7 @@ def build_staging_dir(
     from symtrs.data.io import list_images
     from symtrs.data.splits import resolve_split_dirs
 
+    a_role, b_role, _ = direction_spec(direction)
     staging = Path(run_dir) / "staging" / split
     staging.mkdir(parents=True, exist_ok=True)
 
@@ -389,7 +428,9 @@ def build_staging_dir(
             continue
 
         keys = {}
-        for domain, folder in (("A", directories.day), ("B", directories.night)):
+        for domain, folder in (
+            ("A", getattr(directories, a_role)), ("B", getattr(directories, b_role))
+        ):
             link = staging / f"{name}{domain}"
             if folder is None:
                 print(f"[symtrs] {name}: no folder for domain {domain}; skipping")
@@ -428,8 +469,8 @@ def build_staging_dir(
             shared = keys["A"] & keys["B"]
             if not shared:
                 raise UpstreamError(
-                    f"the {name} split has no day/night pair with a matching name "
-                    f"({len(keys['A'])} day, {len(keys['B'])} night files); run "
+                    f"the {name} split has no {a_role}/{b_role} pair with a matching name "
+                    f"({len(keys['A'])} {a_role}, {len(keys['B'])} {b_role} files); run "
                     "`symtrs doctor --data-root <dataset root>` for a coverage report"
                 )
             if len(shared) < len(keys["A"]) or len(shared) < len(keys["B"]):
@@ -437,8 +478,55 @@ def build_staging_dir(
                     f"[symtrs] WARNING: {name}: only {len(shared)} names appear in both "
                     "domains; pix2pix (aligned) will fail on the others"
                 )
+            if aligned:
+                write_aligned_pairs(staging, name, sorted(shared))
 
     return staging
+
+
+def write_aligned_pairs(staging: Path, name: str, keys: List[str]) -> int:
+    """Write `<staging>/<name>/<key>.png` as `[A | B]` side by side, for pix2pix.
+
+    The vendored `AlignedDataset` never looks at `<phase>A` / `<phase>B`. It reads
+    `<dataroot>/<phase>/*.png` as upstream's own pix2pix format - one image holding A on its
+    left half and B on its right, what upstream's `combine_A_and_B.py` produces - and, only
+    when that folder is empty, falls back to auto-splitting `raw_A_dir` / `raw_B_dir` by
+    `--train_ratio`, which cannot take everything (the ratios must sum to less than 1) and so
+    silently drops part of the SyMTRS split. The concatenated folder is the supported path
+    that keeps the split intact, and unlike the links it costs disk: one lossless PNG per
+    scene. A file is reused when it is newer than both of its sources, so a second phase or a
+    re-score does not pay for it again.
+    """
+    from PIL import Image
+
+    folder = staging / name
+    folder.mkdir(parents=True, exist_ok=True)
+    wanted = {Path(key).stem + ".png" for key in keys}
+    for stale in folder.iterdir():  # a pair whose source left the split must not be trained on
+        if stale.is_file() and stale.name not in wanted:
+            stale.unlink()
+    written = 0
+    for key in keys:
+        source_a = (staging / f"{name}A" / key).resolve()
+        source_b = (staging / f"{name}B" / key).resolve()
+        target = folder / (Path(key).stem + ".png")
+        newest = max(source_a.stat().st_mtime, source_b.stat().st_mtime)
+        if target.is_file() and target.stat().st_mtime >= newest:
+            continue
+        with Image.open(source_a) as left, Image.open(source_b) as right:
+            left, right = left.convert("RGB"), right.convert("RGB")
+            if left.size != right.size:
+                raise UpstreamError(
+                    f"{key}: the A image is {left.size[0]}x{left.size[1]} but the B image is "
+                    f"{right.size[0]}x{right.size[1]}; pix2pix needs aligned pairs of one size"
+                )
+            pair = Image.new("RGB", (left.width * 2, left.height))
+            pair.paste(left, (0, 0))
+            pair.paste(right, (left.width, 0))
+        pair.save(target, format="PNG")
+        written += 1
+    print(f"[symtrs] staged {folder.name}/: {len(keys)} A|B pairs for pix2pix ({written} written)")
+    return written
 
 
 def count_staged(staging: Path, split: str) -> Tuple[int, int]:
@@ -500,15 +588,15 @@ def missing_imports() -> List[str]:
 
 
 def upstream_direction(direction: str) -> str:
-    """`day2night` -> `AtoB`, `night2day` -> `BtoA`.
+    """`day2night` -> `AtoB`, `night2day` -> `BtoA`, and likewise for the shadow pair.
 
-    Stated once, because it is used by both the training command and the generation
-    command: a translation trained one way and scored the other way produces a run that
-    completes happily and generates the wrong domain. Upstream reads this flag to decide
-    which network is the generator (`TestModel` builds `netG` from `input_nc`, which the
-    option setter derives from the direction).
+    Stated once (in `DIRECTION_ROLES`), because it is used by both the training command
+    and the generation command: a translation trained one way and scored the other way
+    produces a run that completes happily and generates the wrong domain. Upstream reads
+    this flag to decide which network is the generator (`TestModel` builds `netG` from
+    `input_nc`, which the option setter derives from the direction).
     """
-    return "AtoB" if direction == "day2night" else "BtoA"
+    return direction_spec(direction)[2]
 
 
 def launcher(gpus: int = 1) -> List[str]:
@@ -634,6 +722,7 @@ def test_command(
 
 __all__ = [
     "DEVIATIONS",
+    "DIRECTION_ROLES",
     "MODIFIED_FILES",
     "REQUIRED_FILES",
     "REQUIRED_IMPORTS",
@@ -647,14 +736,17 @@ __all__ = [
     "compare_with_upstream",
     "count_staged",
     "default_upstream",
+    "direction_spec",
     "epoch_split",
     "is_complete",
     "launcher",
     "missing_files",
     "missing_imports",
     "setup",
+    "target_role",
     "test_command",
     "train_command",
     "upstream_direction",
     "verify",
+    "write_aligned_pairs",
 ]

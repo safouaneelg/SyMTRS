@@ -105,13 +105,24 @@ class TaskModel(nn.Module):
         )
 
 
-def apply_freeze_policy(model: nn.Module, freeze: str, encoder_prefixes=("encoder", "backbone", "pretrained")) -> None:
+#: What `freeze="encoder"` matches when the model does not say otherwise.
+DEFAULT_ENCODER_PREFIXES = ("encoder", "backbone", "pretrained")
+
+
+def apply_freeze_policy(model: nn.Module, freeze: str, encoder_prefixes=None) -> None:
     """Set `requires_grad` according to a freeze policy.
 
     Recognising the encoder by name is a heuristic; `freeze="head"` is the safe option
     on an unfamiliar architecture, and the parameter counts printed by `symtrs doctor`
     tell you immediately whether the heuristic did what you meant.
+
+    A model whose own layout defeats the heuristic names its encoder with a
+    `freeze_encoder_prefixes` class attribute rather than being special-cased here: MiDaS
+    keeps its *entire* network under `backbone.`, so the default prefix froze the decoder
+    along with the ViT and left nothing to train.
     """
+    if encoder_prefixes is None:
+        encoder_prefixes = getattr(model, "freeze_encoder_prefixes", None) or DEFAULT_ENCODER_PREFIXES
     if not freeze:
         return
 

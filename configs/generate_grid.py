@@ -16,10 +16,14 @@ are regenerated when a model is added or a hyper-parameter changes across the bo
 
 What the tables encode, per model:
 
-  * the depth protocol (`relative` -> SILog loss + `align: scale`; `metric` -> BErHu loss
-    + `align: none`). Getting this wrong is the single most damaging mistake available in
-    this benchmark: a relative model scored without alignment looks broken, and a metric
-    model scored with it looks suspiciously good.
+  * the depth protocol and output space (`relative` + depth output -> SILog loss + `align:
+    scale`; `relative` + disparity output, i.e. MiDaS -> SSI loss + `align:
+    scale_shift_disparity`; `metric` -> BErHu loss + `align: none`). Getting this wrong is the
+    single most damaging mistake available in this benchmark: a relative model scored without
+    alignment looks broken, a MiDaS model aligned by a scale alone is meaningless, and a metric
+    model scored with any alignment looks suspiciously good. The pairing is
+    `symtrs.registry.depth_pairing`; this script cannot import the package, so it keeps a copy
+    that `tests/test_vendored_and_grid.py` compares against it.
   * the memory posture at native resolution, which is what the per-resolution batch sizes
     and `grad_accum` are. The *effective* batch is batch_size x grad_accum and is meant to
     stay roughly constant down the resolution axis, so a 256 run is a smaller-image run
@@ -114,10 +118,14 @@ class DepthModel:
         freeze: str = "",
         note: str = "",
         model_kwargs: Optional[Dict[str, object]] = None,
+        space: str = "depth",  # "depth" | "disparity": what the raw output means
+        needs_camera: bool = False,
     ) -> None:
         self.key = key
         self.title = title
         self.protocol = protocol
+        self.space = space
+        self.needs_camera = needs_camera
         self.batch = batch
         self.lr = lr
         self.grad_accum = grad_accum
@@ -128,11 +136,15 @@ class DepthModel:
 
     @property
     def align(self) -> str:
-        return "scale" if self.protocol == "relative" else "none"
+        if self.protocol != "relative":
+            return "none"
+        return "scale_shift_disparity" if self.space == "disparity" else "scale"
 
     @property
     def loss(self) -> str:
-        return "silog" if self.protocol == "relative" else "berhu"
+        if self.protocol != "relative":
+            return "berhu"
+        return "ssi" if self.space == "disparity" else "silog"
 
     @property
     def effective_batch(self) -> int:
@@ -150,6 +162,7 @@ DEPTH_MODELS: List[DepthModel] = [
         batch={2048: 8, 1024: 16, 512: 32, 256: 64},
         lr=2.0e-5,
         grad_accum=1,
+        space="disparity",
         patch={2048: 384, 1024: 0},
         note=(
             "The cheapest cell in the grid: EfficientNet-lite3 backbone, a DPT-lite head, and\n"
@@ -157,8 +170,11 @@ DEPTH_MODELS: List[DepthModel] = [
             "finishes in the time DPT-BEiT-Large takes for one cell, which makes it the model\n"
             "to use while the dataset is still being regenerated.\n"
             "\n"
-            "It is relative-depth, so it is scored with align: scale and trained with the\n"
-            "scale-invariant SILog loss MiDaS was trained with."
+            "It is relative-depth and emits DISPARITY (s / z + t, shift unknown), so it is scored\n"
+            "with align: scale_shift_disparity - scale and shift fitted against 1 / ground truth,\n"
+            "then inverted, the MiDaS protocol - and trained with the matching scale-and-shift-\n"
+            "invariant `ssi` loss. A depth-space `scale` alignment cannot remove the shift and\n"
+            "scored these models as if they were broken (2026-10-17 audit)."
         ),
     ),
     DepthModel(
@@ -168,12 +184,14 @@ DEPTH_MODELS: List[DepthModel] = [
         batch={2048: 4, 1024: 8, 512: 16, 256: 32},
         lr=1.0e-5,
         grad_accum=1,
+        space="disparity",
         patch={2048: 384, 1024: 0},
         note=(
             "The standard published baseline, and the model the MiDaS numbers in the paper's\n"
             "comparison table are quoted from. Relative-depth: it predicts disparity, and a\n"
-            "per-image affine fit is needed before any metric means anything, which is what\n"
-            "eval.align does. Training uses SILog, the loss MiDaS itself was trained with, so\n"
+            "per-image affine fit in disparity space (scale AND shift, then inverted) is needed\n"
+            "before any metric means anything, which is what eval.align does. Training uses the\n"
+            "scale-and-shift-invariant `ssi` loss, the family MiDaS itself was trained with, so\n"
             "the fine-tune starts from a matched objective instead of fighting a metric loss\n"
             "the pretrained head has never seen.\n"
             "\n"
@@ -189,6 +207,7 @@ DEPTH_MODELS: List[DepthModel] = [
         batch={2048: 2, 1024: 4, 512: 8, 256: 16},
         lr=1.0e-5,
         grad_accum=4,
+        space="disparity",
         patch={2048: 384, 1024: 512},
         freeze="encoder",
         note=(
@@ -207,12 +226,13 @@ DEPTH_MODELS: List[DepthModel] = [
         batch={2048: 4, 1024: 8, 512: 16, 256: 32},
         lr=2.0e-5,
         grad_accum=1,
+        space="disparity",
         patch={2048: 384, 1024: 0},
         note=(
             "SwinV2-Tiny with the DPT head. Window attention rather than global attention, so\n"
             "it is the MiDaS variant whose cost grows most gently with resolution - which is\n"
             "why it is worth running the 2048 cell of this one even if you skip the others.\n"
-            "Still relative-depth: align: scale, SILog loss."
+            "Still relative-depth, disparity output: align: scale_shift_disparity, ssi loss."
         ),
     ),
     DepthModel(
@@ -222,6 +242,7 @@ DEPTH_MODELS: List[DepthModel] = [
         batch={2048: 1, 1024: 2, 512: 4, 256: 8},
         lr=5.0e-6,
         grad_accum=8,
+        space="disparity",
         patch={2048: 384, 1024: 512},
         freeze="encoder",
         note=(
@@ -244,10 +265,18 @@ DEPTH_MODELS: List[DepthModel] = [
         patch={2048: 512, 1024: 0},
         freeze="encoder",
         note=(
-            "ZoeDepth-N is the relative-depth member of the ZoeDepth family: a MiDaS backbone\n"
-            "with a relative head, so it is scored with align: scale and trained with SILog.\n"
+            "ZoeDepth-N (ZoeD_M12_N) is a metric model - fine-tuned on NYU-Depth-v2, indoor,\n"
+            "0-10 m - that this benchmark scores as relative depth: its indoor metres do not\n"
+            "transfer to a camera 70-270 m up, so it gets align: scale and the SILog loss.\n"
             "Swapping this config's model to zoedepth_k changes both of those, which is the\n"
-            "whole reason the depth adapters carry a `protocol` attribute.\n"
+            "whole reason the depth adapters carry a `protocol` attribute. Its output is DEPTH\n"
+            "(not disparity), so the alignment is a scale in depth space.\n"
+            "\n"
+            "Float16 is not safe for this head: under fp16 autocast ~10% of the output pixels\n"
+            "were NaN on the RTX 5070 Ti (training loss non-finite from step 1, every evaluated\n"
+            "prediction non-positive); fp32 and bfloat16 agree to 3 digits and are finite. The\n"
+            "adapter therefore runs this model in bfloat16 (fp32 on a GPU without it) inside\n"
+            "any CUDA autocast, so amp: true stays as it is in every other file.\n"
             "\n"
             "ZoeDepth resizes its input to a 384px minimum side internally, so a 2048px crop\n"
             "costs memory it does not spend on detail; 512 is the crop that reaches the network\n"
@@ -269,12 +298,25 @@ DEPTH_MODELS: List[DepthModel] = [
             "eval.align is none and the BErHu loss is used. Compare it against a relative model\n"
             "only after checking that both were scored under their own protocol.\n"
             "\n"
+            "Its output has a ceiling: ZoeD_K's bin centres are bounded to [min_depth, max_depth],\n"
+            "so it can never predict deeper than max_depth. The released weights were trained at\n"
+            "80 m (KITTI) - and the torch.hub entry point builds the head with 10 m unless told\n"
+            "otherwise, which the adapter corrects: its default is 80, the faithful zero-shot\n"
+            "setting. This dataset's scenes reach ~280 m (test median ~208 m), so every depth\n"
+            "pixel beyond 80 m is out of reach and a zero-shot abs_rel near 1 says nothing about\n"
+            "the model. model_kwargs.max_depth: 300 stretches the same pretrained bin layout\n"
+            "over 0-300 m (the parameters keep their shapes, so the weights load unchanged) as a\n"
+            "starting point for the fine-tune; it is a range choice, not a calibration, and a\n"
+            "zero-shot run should drop the key (or pass 80) to keep the released behaviour.\n"
+            "ZoeD-N and ZoeD-NK have softplus (unbounded) heads, so they have no such ceiling.\n"
+            "\n"
             "This is the cell most sensitive to data.depth_scale: the real EXRs store CENTIMETRES\n"
             "(hence 0.01), and a model predicting metres scored against unconverted values is\n"
             "wrong by a constant factor, which looks like a broken model.\n"
             "Check `symtrs inspect` reports the same unit for the native and the _lr depth\n"
             "folders before reading a single number from this file."
         ),
+        model_kwargs={"max_depth": 300.0},
     ),
     DepthModel(
         "zoedepth_nk",
@@ -301,7 +343,7 @@ DEPTH_MODELS: List[DepthModel] = [
         batch={2048: 2, 1024: 4, 512: 8, 256: 16},
         lr=1.0e-5,
         grad_accum=2,
-        patch={2048: 512, 1024: 0},
+        patch={2048: 512, 1024: 512},
         note=(
             "Depth Anything 3's un-metriced checkpoint: relative depth, so align: scale and\n"
             "SILog. It loads through `transformers` rather than torch.hub:\n"
@@ -311,7 +353,13 @@ DEPTH_MODELS: List[DepthModel] = [
             "Which protocol is in force is decided by the checkpoint, not by a flag here:\n"
             "`da3_large` names the relative checkpoint and `da3_metric_large` the metric one,\n"
             "and the resolution is recorded in the checkpoint metadata either way, so a mixed-up\n"
-            "comparison is visible in the .pt rather than only in the results table."
+            "comparison is visible in the .pt rather than only in the results table.\n"
+            "\n"
+            "Training crops to 512px patches at 2048 and 1024 and uses the whole image at 512\n"
+            "and 256 (a 512 crop is the whole image there; the crop is in data pixels, nothing\n"
+            "is upsampled). Full fine-tuning of the 411M-parameter ViT-L keeps ~6.5GB of weights,\n"
+            "gradients and Adam state resident, and a 1024px image is 4x the tokens of a 512px\n"
+            "one: that did not fit a 12GB card even at batch 1, where the 512px crop does."
         ),
     ),
     DepthModel(
@@ -321,28 +369,55 @@ DEPTH_MODELS: List[DepthModel] = [
         batch={2048: 4, 1024: 8, 512: 16, 256: 32},
         lr=1.0e-5,
         grad_accum=2,
-        patch={2048: 512, 1024: 0},
+        patch={2048: 512, 1024: 512},
         note=(
             "The metric head: metres, no alignment, BErHu. Same loader caveats as da3_large.\n"
             "One extra: the DA3 Hugging Face repos do not all ship an image-processor config,\n"
             "so `AutoImageProcessor.from_pretrained` can refuse. That raises with the model id\n"
             "and the command to run - `symtrs doctor --model da3_metric_large --build` - rather\n"
-            "than silently substituting some other normalisation."
+            "than silently substituting some other normalisation.\n"
+            "\n"
+            "Metres need the camera: the metric head returns canonical depth (a 300 px camera)\n"
+            "and metres = canonical * focal_px / 300. Without focal_px it scored abs_rel 0.91-0.96\n"
+            "and d1 = 0 on the real data (predictions ~4% of the ground truth). The focal length\n"
+            "is derived, never typed: build_from_config sets model_kwargs.focal_px =\n"
+            "(resolution / 2) / tan(data.camera_hfov_deg / 2) - 1773.6 px at 2048, half that at\n"
+            "1024, and so on - so it follows the resolution axis, and a crop or a tile keeps it\n"
+            "because it keeps the pixel size. data.camera_hfov_deg is an ASSUMPTION: 60 degrees,\n"
+            "the capture actor's default (FieldOfView = 60.f), editable per level. Confirm it\n"
+            "against the level that rendered the dataset before reading a DA3-metric number."
         ),
+        needs_camera=True,
     ),
     DepthModel(
         "depth_pro",
         "Apple Depth Pro",
         "metric",
-        batch={2048: 1, 1024: 2, 512: 4, 256: 8},
+        # Batch 1 and no crop at EVERY resolution, because the network's cost depends on
+        # neither: `infer` resizes whatever it is given to 1536x1536 (the patch encoder's
+        # 384px position embedding x4 is fixed by the architecture and forward() asserts
+        # it), so a 512px crop costs the same as the whole frame, shows the model less of
+        # the scene, and is upsampled 3x where evaluation downsamples. The batch does scale
+        # the memory: measured on an RTX 5070 Ti Laptop (12GB), one step at batch 1 peaks
+        # at ~7.9GiB with the encoder frozen and amp on; batch 2 would not fit.
+        batch={2048: 1, 1024: 1, 512: 1, 256: 1},
         lr=5.0e-6,
         grad_accum=8,
-        patch={2048: 512, 1024: 512},
+        patch={},
         freeze="encoder",
         note=(
             "Metric depth from Apple: ~1.9GB of weights, a ViT-L encoder that wants a 1536px\n"
             "input, and the heaviest forward pass in the pack. The encoder is frozen for that\n"
             "reason - 300M+ parameters, and the head is what adapts to a new sensor.\n"
+            "\n"
+            "Memory, measured (RTX 5070 Ti Laptop, 12GB, amp on, one training step): ~7.9GiB\n"
+            "at batch 1 with the encoder frozen (3.6GiB of weights, the rest decoder\n"
+            "activations), against an out-of-memory above 11GiB without it. That is why this\n"
+            "model is batch 1 and uncropped at every resolution: `infer` resizes any input to\n"
+            "1536x1536 before the 35 overlapping 384px ViT-L passes, and that size is fixed by\n"
+            "the architecture (forward() asserts it), so neither a crop nor a smaller\n"
+            "resolution makes the step cheaper. Scoring the native 2048 frame in one pass\n"
+            "peaks at ~5.7GiB. Without `train.freeze: encoder` it does not fit on 12GB.\n"
             "\n"
             "The one thing about this model that is not plug-and-play for aerial imagery is the\n"
             "focal length, and it is worth getting right before a long run:\n"
@@ -508,19 +583,32 @@ SEG_CLASS_NOTE = (
     "into the checkpoint, so a model trained here cannot be silently scored against a\n"
     "differently-labelled mask set later. If the mask generator ever writes 0 for \"no class\"\n"
     "instead of 255, change data.ignore_index in the config and not the metric - a metric\n"
-    "that guesses which pixels to ignore is worse than one that does not."
+    "that guesses which pixels to ignore is worse than one that does not.\n"
+    "\n"
+    "Class 0 (background) has no pixel in any split of the current capture, so its IoU is\n"
+    "null and mIoU averages the classes that exist; the result's `miou_classes` says how\n"
+    "many. A class absent from the ground truth but predicted still counts, as IoU 0."
 )
 
 # ------------------------------------------------------------------ domain adapt
 
 
 class DomainModel:
-    def __init__(self, key: str, upstream_model: str, dataset_mode: str, title: str, note: str) -> None:
+    def __init__(
+        self,
+        key: str,
+        upstream_model: str,
+        dataset_mode: str,
+        title: str,
+        note: str,
+        shadow_note: str = "",
+    ) -> None:
         self.key = key
         self.upstream_model = upstream_model
         self.dataset_mode = dataset_mode
         self.title = title
         self.note = note
+        self.shadow_note = shadow_note  # what this model means on the shadow pair
 
 
 DOMAIN_MODELS: List[DomainModel] = [
@@ -535,6 +623,12 @@ DOMAIN_MODELS: List[DomainModel] = [
             "scenes re-rendered at a different time of day, but not pixel-aligned pairs by\n"
             "construction. That is also why the score is FID/KID rather than an accuracy: a\n"
             "translation is judged by how close its image distribution is to the real one."
+        ),
+        shadow_note=(
+            "CycleGAN is *unpaired*, and is deliberately used that way on a pair that IS paired:\n"
+            "it never sees which rgb_noshadow image belongs to which rgb_day image, so the row\n"
+            "measures what shadow removal costs without the pairing. Next to pix2pix on the same\n"
+            "images it isolates the value of paired supervision."
         ),
     ),
     DomainModel(
@@ -552,10 +646,27 @@ DOMAIN_MODELS: List[DomainModel] = [
             "contain and its FID should be read as a lower bound on what paired supervision could\n"
             "buy, not as a fair comparison."
         ),
+        shadow_note=(
+            "pix2pix is *paired* and conditional, and on this pair the pairing is exact: rgb_day\n"
+            "and rgb_noshadow are the same render with the shadows switched off, matched by\n"
+            "filename. That is the strongest supervision the dataset offers for shadow removal, so\n"
+            "this is the paired image-to-image baseline for the shadow_removal table."
+        ),
     ),
 ]
 
-DOMAIN_DIRECTIONS = ("day2night", "night2day")
+DOMAIN_DIRECTIONS = ("day2night", "night2day", "shadow2noshadow", "noshadow2shadow")
+
+#: The `rgb_<role>` folders staged as A and B for each direction. The authoritative table is
+#: `DIRECTION_ROLES` in symtrs/model/domain/upstream.py (this script cannot import the
+#: package); tests/test_domain_commands.py compares the two.
+DOMAIN_FOLDERS = {
+    "day2night": ("day", "night"),
+    "night2day": ("day", "night"),
+    "shadow2noshadow": ("day", "noshadow"),
+    "noshadow2shadow": ("day", "noshadow"),
+}
+SHADOW_DIRECTIONS = ("shadow2noshadow", "noshadow2shadow")
 
 # --------------------------------------------------------------- super-resolution
 
@@ -813,6 +924,44 @@ def _render(header: List[str], body: List[str]) -> str:
     return _banner(header) + "\n\n" + "\n".join(body) + "\n"
 
 
+def eval_tiling(patch: int, resolution: int) -> tuple:
+    """`(tile_size, tile_overlap)` of the val AND test pass for a row trained on `patch` crops.
+
+    Evaluation covers the WHOLE image (`train.val_patch_size: 0`) - never the training crop,
+    which once silently scored the 2048px rows on one random 512px window. What changes with
+    the row is only how the whole image is pushed through the network: a row that trained on
+    crops smaller than its images is evaluated in sliding windows of exactly that crop, so
+    the network is scored on the field of view and ground sampling it was trained on, and
+    memory stays bounded by the training step's. Overlap is a quarter of the window (the
+    Hann blend in `engine/tiling.py` handles the seams). A row that trains on whole images
+    runs them whole: tile_size 0.
+    """
+    if patch and patch < resolution:
+        return patch, patch // 4
+    return 0, 128
+
+
+def _eval_tiling_comment(patch: int, resolution: int, relative: bool) -> List[str]:
+    tile, overlap = eval_tiling(patch, resolution)
+    if not tile:
+        return [
+            "  # Whole image in one forward pass: training did not crop at this resolution either.",
+        ]
+    lines = [
+        f"  # The whole {resolution}px image is scored (val and test alike), in {tile}px windows",
+        f"  # with {overlap}px overlap: the size this row trained on, so the network sees the same",
+        "  # field of view at evaluation. Never a crop - every pixel is covered and the result is",
+        "  # deterministic.",
+    ]
+    if relative:
+        lines += [
+            "  # Relative depth is defined per forward pass only up to scale and shift, so each",
+            "  # window is first fitted onto the ones already stitched; the alignment that scores",
+            "  # the row is then computed once, on the full stitched image (engine/tiling.py).",
+        ]
+    return lines
+
+
 def depth_yaml(model: DepthModel, resolution: int) -> str:
     where = f"configs/depth/{resolution}/{model.key}_{resolution}.yaml"
     header = [
@@ -866,6 +1015,15 @@ def depth_yaml(model: DepthModel, resolution: int) -> str:
         "  depth_scale: 0.01",
         "  # Metres, after depth_scale: the sky is a huge value, not zero, so it is cut here.",
         "  max_depth: 1000",
+    ]
+    if model.needs_camera:
+        body += [
+            "  # Horizontal field of view of the capture camera. ASSUMPTION: 60 degrees is the capture",
+            "  # actor's default (FieldOfView = 60.f) and is editable per level - confirm it. It fixes",
+            "  # the focal length in pixels the metric model needs: (resolution / 2) / tan(fov / 2).",
+            "  camera_hfov_deg: 60.0",
+        ]
+    body += [
         "  depth_channel: 0",
         "  depth_backend: auto",
         "  num_workers: 8",
@@ -889,12 +1047,20 @@ def depth_yaml(model: DepthModel, resolution: int) -> str:
             "  # at this ground sampling distance.",
             f"  patch_size: {patch}",
         ]
+    elif resolution == 2048:
+        # Only reachable by a model whose cost does not depend on the crop (Depth Pro).
+        body += [
+            "  # No crop: this network resizes its input to a fixed size, so a crop would cost",
+            "  # the same and show it less. The memory posture is in the header above.",
+            "  patch_size: 0",
+        ]
     else:
         body += [
             "  # The whole image fits at this resolution, so no cropping is needed.",
             "  patch_size: 0",
         ]
     body += [
+        "  # 0 = the whole image at val and test, whatever patch_size is (see eval.tile_size).",
         "  val_patch_size: 0",
         "  amp: true",
         "  gpus: 1",
@@ -920,10 +1086,12 @@ def depth_yaml(model: DepthModel, resolution: int) -> str:
         "  metrics: [rmse, mae, abs_rel, sq_rel, d1, d2, d3, silog]",
         "  batch_size: 1",
         "  amp: true",
-        "  # 0 runs the whole image in one forward pass, which is what the published numbers",
-        "  # use. If you hit OOM, a sweep over 512/128 tiles scores the same metres.",
-        "  tile_size: 0",
-        "  tile_overlap: 128",
+    ]
+    tile, overlap = eval_tiling(patch, resolution)
+    body += _eval_tiling_comment(patch, resolution, model.protocol == "relative")
+    body += [
+        f"  tile_size: {tile}",
+        f"  tile_overlap: {overlap}",
         f"  align: {model.align}",
         "  num_visualizations: 4",
     ]
@@ -988,6 +1156,7 @@ def segmentation_yaml(model: SegModel, resolution: int) -> str:
         "  warmup_epochs: 2",
         "  min_lr_ratio: 0.01",
         f"  patch_size: {model.patch.get(resolution, 0)}",
+        "  # 0 = the whole image at val and test, whatever patch_size is (see eval.tile_size).",
         "  val_patch_size: 0",
         "  amp: true",
         "  gpus: 1",
@@ -1009,8 +1178,12 @@ def segmentation_yaml(model: SegModel, resolution: int) -> str:
         "  metrics: [miou, pixel_acc, mean_acc, mean_dice, fwiou]",
         "  batch_size: 1",
         "  amp: true",
-        "  tile_size: 0",
-        "  tile_overlap: 128",
+    ]
+    tile, overlap = eval_tiling(model.patch.get(resolution, 0), resolution)
+    body += _eval_tiling_comment(model.patch.get(resolution, 0), resolution, False)
+    body += [
+        f"  tile_size: {tile}",
+        f"  tile_overlap: {overlap}",
         '  align: ""',
         "  num_visualizations: 4",
     ]
@@ -1019,6 +1192,11 @@ def segmentation_yaml(model: SegModel, resolution: int) -> str:
 
 def domain_yaml(model: DomainModel, direction: str) -> str:
     source, target = direction.split("2")
+    reverse = f"{target}2{source}"
+    first, second = sorted((direction, reverse), key=DOMAIN_DIRECTIONS.index)
+    folder_a, folder_b = DOMAIN_FOLDERS[direction]
+    shadow = direction in SHADOW_DIRECTIONS
+    paired_scored = direction == "shadow2noshadow"
     where = f"configs/domain_adapt/{model.key}_{direction}.yaml"
     header = [
         f"{model.title} {source} -> {target}, at native resolution.",
@@ -1026,14 +1204,14 @@ def domain_yaml(model: DomainModel, direction: str) -> str:
         f"    symtrs train {where} --data-root /data/SyMTRS",
         f"    symtrs eval  {where} --data-root /data/SyMTRS --eval-split test",
         "",
-        f"Both directions of this pair are in this folder: {model.key}_day2night.yaml and",
-        f"{model.key}_night2day.yaml. They are separate runs with separate checkpoints, and",
+        f"Both directions of this pair are in this folder: {model.key}_{first}.yaml and",
+        f"{model.key}_{second}.yaml. They are separate runs with separate checkpoints, and",
         "the direction changes the upstream experiment name too, so the two cannot overwrite",
         "each other. Report both or neither - a quality claim in one direction says nothing",
         "about the other, since the two domains are not equally hard.",
         "",
     ]
-    header += model.note.split("\n") + [""]
+    header += (model.shadow_note if shadow else model.note).split("\n") + [""]
     header += [
         "This is not a SyMTRS model and the run does not train one. The network is upstream",
         "junyanz/pytorch-CycleGAN-and-pix2pix, built, optimised and saved entirely inside that",
@@ -1043,12 +1221,30 @@ def domain_yaml(model: DomainModel, direction: str) -> str:
         "",
         "What SyMTRS adds on top is the input staging and the scoring:",
         "",
-        "  * Before each phase, the split's day and night folders are symlinked into",
+        f"  * Before each phase, the split's {folder_a} and {folder_b} folders are symlinked into",
         "    <run_dir>/staging/<split>/{train,val,test}{A,B}. That is not decoration.",
         "    Upstream's UnalignedDataset re-splits the data by --train_ratio whenever phase",
         "    folders are absent, which would ignore the SyMTRS train/val/test split entirely.",
         "  * After training, test.py generates the translations and the result is scored with",
         "    FID and KID against the real target domain.",
+    ]
+    if paired_scored:
+        header += [
+            "  * The target here has a pixel-aligned ground truth, so the generated image is",
+            "    also scored like a shadow-removal result: PSNR, SSIM and LAB error over all",
+            "    pixels, the shadow region and outside it (symtrs/metrics/shadow.py, the same",
+            "    code, mask derivation and columns as configs/shadow_removal/). Upstream writes",
+            "    its images at its own working size (test.py: 256x256, the whole frame resized",
+            "    down), so each is resampled to the ground-truth size before scoring - the row",
+            "    is therefore a 256 px model judged at 2048, and the loss of fine detail counts",
+            "    against it. shadow.mask_threshold / shadow.mask_open set the mask as usual.",
+        ]
+    elif shadow:
+        header += [
+            "  * Only FID/KID are reported for this direction: the pixel-aligned ground truth",
+            "    is a shadowed image, and shadow-removal metrics do not describe painting one.",
+        ]
+    header += [
         "",
         "`symtrs setup-adapt --check` verifies the vendored tree in one call;",
         "`symtrs setup-adapt --fetch` diffs it against upstream at the pinned revision.",
@@ -1304,7 +1500,9 @@ def _scalar(value: object) -> str:
     if isinstance(value, (list, tuple)):
         return "[" + ", ".join(_scalar(item) for item in value) + "]"
     if isinstance(value, float):
-        return _float(value)
+        # `_float` writes an exponent without a sign for values >= 1 ("3.0e2"), which PyYAML
+        # reads back as a string; plain decimal is the form that round-trips.
+        return repr(value) if abs(value) >= 1 else _float(value)
     return str(value)
 
 

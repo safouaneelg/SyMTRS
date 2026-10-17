@@ -44,7 +44,7 @@ model_kwargs:
   swinir_depths: [6, 6, 6, 6]
   swinir_num_heads: [6, 6, 6, 6]
   swinir_window: 7
-  swinir_mlp_ratio: 4.0e0
+  swinir_mlp_ratio: 4.0
   swinir_upsampler: pixelshuffle
   swinir_checkpoint: false
 

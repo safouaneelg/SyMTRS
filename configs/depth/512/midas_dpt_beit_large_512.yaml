@@ -13,7 +13,7 @@
 # the numbers on the resolution axis.
 #
 # This model is relative-depth at every resolution, so the loss stays
-# silog and eval.align stays scale. A row that switches protocol
+# ssi and eval.align stays scale_shift_disparity. A row that switches protocol
 # between resolutions is not comparable to itself.
 #
 
@@ -48,6 +48,7 @@ train:
   min_lr_ratio: 0.01
   # The whole image fits at this resolution, so no cropping is needed.
   patch_size: 0
+  # 0 = the whole image at val and test, whatever patch_size is (see eval.tile_size).
   val_patch_size: 0
   amp: true
   gpus: 1
@@ -55,7 +56,7 @@ train:
   grad_accum: 8
   # Effective batch = 4 x 8 = 32,
   # which is what the learning rate was chosen against.
-  loss: silog
+  loss: ssi
   freeze: encoder
   log_every: 50
   save_samples_every: 1
@@ -67,9 +68,8 @@ eval:
   metrics: [rmse, mae, abs_rel, sq_rel, d1, d2, d3, silog]
   batch_size: 1
   amp: true
-  # 0 runs the whole image in one forward pass, which is what the published numbers
-  # use. If you hit OOM, a sweep over 512/128 tiles scores the same metres.
+  # Whole image in one forward pass: training did not crop at this resolution either.
   tile_size: 0
   tile_overlap: 128
-  align: scale
+  align: scale_shift_disparity
   num_visualizations: 4

@@ -34,7 +34,7 @@ PROTOCOL = {
                     "Monitor: val mIoU.",
     "depth": "`rgb_day{_lr/xN}` -> `depth{_lr/xN}` (float32 EXR, centimetres along the camera "
              "axis) x `depth_scale` -> metres; pixels beyond `max_depth` m (sky) invalid. "
-             "Relative models: SILog loss + per-image scale alignment at eval; metric models: "
+             "Relative models: SILog + per-image scale alignment (MiDaS: SSI + scale-and-shift fit in disparity); metric models: "
              "BerHu loss, no alignment (registry `protocol`). Monitor: val RMSE.",
     "superresolution": "`rgb_day_lr/xN` (LR input, `resolution` = its size) -> native "
                        "`rgb_day` (2048); scale = 2048 / resolution, x1 = refiner control. "

@@ -17,6 +17,7 @@ Two design points worth stating because they are easy to get wrong:
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from pathlib import Path
@@ -26,6 +27,7 @@ import torch
 import torch.nn as nn
 
 from symtrs.common.checkpoint import load_checkpoint, save_checkpoint
+from symtrs.common.jsonio import write_json
 from symtrs.common.ddp import (
     barrier,
     cleanup_ddp,
@@ -113,11 +115,48 @@ def resolve_monitor(cfg: RunConfig) -> tuple:
 
 
 def is_improvement(value: float, best: Optional[float], direction: str) -> bool:
+    """Whether `value` should replace `best` as the checkpoint to keep.
+
+    A non-finite value never does, **including the first epoch**. The early return for
+    `best is None` used to come first, so a run whose very first validation was NaN saved
+    `best.pt` with rmse=NaN - and then nothing could beat it (every comparison with NaN is
+    False), leaving the "best" checkpoint to be the one from the diverged epoch.
+    """
+    if not math.isfinite(value):
+        return False
     if best is None:
         return True
-    if value != value:  # NaN never wins, whichever direction we are going.
-        return False
     return value < best if direction == "min" else value > best
+
+
+def apply_run_freeze(model, cfg: RunConfig) -> None:
+    """Turn `train.freeze` into `requires_grad`, once, before anything reads it.
+
+    Every adapter stores the policy it was built with, but only `trainable_parameters()`
+    / `apply_freeze()` ever applied it and nothing on the training path called either:
+    `build_optimizer` walks `named_parameters()` directly. So `freeze: encoder` was
+    accepted, printed as "freeze='encoder' -> 952.0M trainable" (all of them) and did
+    nothing - which is how Depth Pro, whose frozen encoder is what makes it fit in 12 GB
+    at all, kept an autograd graph through 35 ViT-L passes and ran out of memory.
+
+    It runs before the model is moved or wrapped in DDP (DDP builds its reducer from the
+    parameters that require grad at wrap time) and before the optimiser is built, and it
+    is the one place the policy is applied; the adapters' own helpers are left for
+    `symtrs doctor`, which has no trainer.
+    """
+    if not cfg.train.freeze:
+        return
+    from symtrs.model.base import apply_freeze_policy
+
+    inner = getattr(model, "module", model)
+    apply_freeze_policy(inner, cfg.train.freeze)
+    if not any(parameter.requires_grad for parameter in inner.parameters()):
+        raise RuntimeError(
+            f"train.freeze={cfg.train.freeze!r} left no trainable parameter in "
+            f"{getattr(inner, 'key', type(inner).__name__)!r}: the policy recognises the "
+            f"encoder by module-name prefix. Run `symtrs doctor --model "
+            f"{getattr(inner, 'key', '<key>')} --freeze {cfg.train.freeze}` to see the counts."
+        )
 
 
 def build_optimizer(model, cfg: RunConfig):
@@ -210,6 +249,8 @@ def checkpoint_metadata(model, cfg: RunConfig, extra: Optional[Dict[str, Any]] =
     if protocol:
         metadata["protocol"] = protocol
         metadata["default_align"] = getattr(model, "default_align", "")
+        # The weights live in this space; a reloaded checkpoint must not be read in another.
+        metadata["output_space"] = getattr(model, "output_space", "depth")
     if cfg.task == "segmentation":
         metadata["num_classes"] = cfg.data.num_classes
         metadata["ignore_index"] = cfg.data.ignore_index
@@ -363,6 +404,7 @@ def _run(
         from symtrs.model.wrapper import build_from_config
 
         model = build_from_config(cfg)
+    apply_run_freeze(model, cfg)
     model.to(resolved)
     if distributed:
         model = nn.parallel.DistributedDataParallel(model, device_ids=[rank])
@@ -380,6 +422,10 @@ def _run(
     monitor, direction = resolve_monitor(cfg)
     best: Optional[float] = None
     best_epoch = -1
+    # Epochs whose monitored value was NaN/inf. They are kept out of "best" and reported, so
+    # a diverged run is visible in summary.json instead of looking like a run that merely
+    # saved a checkpoint with rmse=nan.
+    non_finite_epochs: List[int] = []
 
     if mode == "finetune":
         train_loader = from_config(cfg, train=True)
@@ -428,6 +474,12 @@ def _run(
                 save_run(model, cfg, run_dir, state, "last", val_metrics)
 
                 value = float(val_metrics.get(monitor, float("nan")))
+                if not math.isfinite(value):
+                    non_finite_epochs.append(epoch)
+                    print(
+                        f"[symtrs]   warning: val {monitor}={value} is not finite; epoch {epoch} "
+                        "cannot be the best checkpoint (weights/last.pt is still written)"
+                    )
                 if is_improvement(value, best, direction):
                     best = value
                     best_epoch = epoch
@@ -463,11 +515,21 @@ def _run(
         "test": test_metrics,
         "history": history,
     }
+    if non_finite_epochs:
+        summary["non_finite_monitor_epochs"] = non_finite_epochs
     if is_main_process():
         print(f"[symtrs] test {format_metrics(test_metrics)}")
-        (run_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        # Non-finite floats are written as null: a bare NaN is not JSON, and one diverged
+        # run must not make the whole results directory unreadable by `jq` or a browser.
+        write_json(run_dir / "summary.json", summary)
         if mode == "finetune" and best is not None:
             print(f"[symtrs] best {monitor}={best:.4f} at epoch {best_epoch}")
+        elif mode == "finetune":
+            print(
+                f"[symtrs] no epoch produced a finite val {monitor}: no weights/best.pt was "
+                "written and \"best\" is null in summary.json. The test numbers above come "
+                "from the last-epoch weights; treat them as a failed run."
+            )
     return summary
 
 
@@ -647,6 +709,7 @@ def run(cfg: RunConfig, mode: str = "finetune", **kwargs) -> Dict[str, Any]:
 __all__ = [
     "MONITORS",
     "MONITOR_DIRECTIONS",
+    "apply_run_freeze",
     "build_optimizer",
     "build_scheduler",
     "checkpoint_metadata",

@@ -93,6 +93,9 @@ Second, and more awkward: **ZoeDepth and MiDaS Swin-V2 need their own environmen
   `AttributeError: 'Block' object has no attribute 'drop_path'`.
 - `midas_dpt_swin2_tiny` is the same story: on timm 1.0.30 its state_dict reports
   `pretrained.model.layers.3.downsample.reduction.weight` missing; on 0.6.12 it loads.
+- `midas_dpt_beit_large` is the same story as ZoeDepth: MiDaS patches timm's BEiT
+  `Block.forward` with a copy that calls `self.drop_path`, which timm >= 0.9 split into
+  `drop_path1` / `drop_path2`. The adapter refuses at build time and names `.venv-zoe`.
 - SegFormer is *not* part of this: timm has never shipped MiT, so the encoder comes from
   `transformers` (`pip install -e '.[segformer]'`) and works on any timm.
 
@@ -188,21 +191,23 @@ same code paths the real dataset will.
 Each model declares a **protocol**, which decides the loss and what "alignment" means:
 
 - `metric` — the network predicts metres. Scored with `berhu`, alignment `none`.
-- `relative` — the network predicts disparity (or, for ZoeDepth-N, scale-invariant depth).
-  Scored with `silog`; the prediction is aligned per image before measuring.
+- `relative` — the network predicts something known only up to an affine map. MiDaS emits
+  disparity `s/z + t`: scored with a per-image scale-and-shift fit in disparity space against
+  `1/ground truth` (`scale_shift_disparity`), trained with `ssi`. ZoeDepth-N and Depth Anything 3
+  emit depth up to a scale: `scale` alignment, `silog`. See AGENTS.md rule 3.
 
 | Key | Protocol | Align | Notes |
 | --- | --- | --- | --- |
-| `midas_small` | relative | scale | 256px, the cheapest baseline |
-| `midas_dpt_hybrid` | relative | scale | 384px, the standard published baseline |
-| `midas_dpt_large` | relative | scale | 384px |
-| `midas_dpt_swin2_tiny` | relative | scale | 256px |
-| `midas_dpt_beit_large` | relative | scale | 384px, largest MiDaS variant |
-| `zoedepth_n` | relative | scale | MiDaS backbone, relative head |
-| `zoedepth_k` | metric | none | KITTI metric supervision |
+| `midas_small` | relative | scale_shift_disparity | 256px, the cheapest baseline |
+| `midas_dpt_hybrid` | relative | scale_shift_disparity | 384px, the standard published baseline |
+| `midas_dpt_large` | relative | scale_shift_disparity | 384px |
+| `midas_dpt_swin2_tiny` | relative | scale_shift_disparity | 256px |
+| `midas_dpt_beit_large` | relative | scale_shift_disparity | 384px, largest MiDaS variant |
+| `zoedepth_n` | relative | scale | NYU-metric head scored as relative depth; run in bf16 (NaN in fp16) |
+| `zoedepth_k` | metric | none | KITTI metric; bounded bins, `model_kwargs.max_depth` (80 = released weights) |
 | `zoedepth_nk` | metric | none | NYU + KITTI heads, learned domain router |
 | `da3_large` | relative | scale | Depth Anything 3 Large |
-| `da3_metric_large` | metric | none | Depth Anything 3, metric head |
+| `da3_metric_large` | metric | none | Depth Anything 3, metric head; needs `data.camera_hfov_deg` (assumed 60) |
 | `depth_pro` | metric | none | Apple Depth Pro, 1536px, ~1.9GB of weights |
 
 Depth metrics: `rmse`, `mae`, `abs_rel`, `sq_rel`, `d1`, `d2`, `d3`, `silog`.
@@ -278,7 +283,7 @@ to score one, use `eval --checkpoint`. Passing a `.pt` to `--model` is refused w
 message naming both, rather than being silently misinterpreted.
 
 Useful flags: `--patch-size` (random-crop training for large images), `--align`
-(`none|median|scale|scale_shift`), `--freeze` (`encoder`, `head`, `last_n:<k>`),
+(`none|median|scale|scale_shift|scale_shift_disparity`), `--freeze` (`encoder`, `head`, `last_n:<k>`),
 `--tile-size` / `--tile-overlap` (sliding-window inference), `--limit-train-batches` and
 `--max-samples` (smoke runs), `--set KEY=VALUE` (any config key by dotted path),
 `--print-config`, `--dry-run`.
@@ -340,7 +345,7 @@ configs/
   train_sr_x2.yaml            quick-start: the whole path, in one file
   depth/<2048|1024|512|256>/  <model>_<resolution>.yaml
   segmentation/<...>/         <model>_<resolution>.yaml
-  domain_adapt/               <model>_<direction>.yaml      (day2night and night2day)
+  domain_adapt/               <model>_<direction>.yaml      (day2night, night2day, shadow2noshadow, noshadow2shadow)
   superresolution/            <model>_x<scale>.yaml
   generate_grid.py            the tables all 88 files are expanded from
 ```
@@ -533,7 +538,13 @@ symtrs setup-adapt --fetch                 # diff it against upstream at the pin
 symtrs train configs/domain_adapt/cyclegan_day2night.yaml --data-root /data/SyMTRS
 symtrs train configs/domain_adapt/cyclegan_night2day.yaml --data-root /data/SyMTRS
 symtrs train configs/domain_adapt/pix2pix_night2day.yaml --data-root /data/SyMTRS
+symtrs train configs/domain_adapt/pix2pix_shadow2noshadow.yaml --data-root /data/SyMTRS   # rgb_day -> rgb_noshadow
 ```
+
+The same front-end also translates `rgb_day` <-> `rgb_noshadow` (`shadow2noshadow`, `noshadow2shadow`).
+`shadow2noshadow` is additionally scored with the shadow-removal metrics (PSNR/SSIM/LAB over all,
+shadow and non-shadow pixels) after resampling upstream's 256 px output to the ground-truth size, so
+it is comparable with the `shadow_removal` rows.
 
 Both directions of both models are in `configs/domain_adapt/`. They are separate runs with
 separate checkpoints, and the direction changes the upstream experiment name as well, so
@@ -656,8 +667,8 @@ from symtrs.legacy.dataloader import SuperResDataset, DomainAdaptDataset, DepthD
 - Depth in the `.exr` files is metric. If a file is found to store millimetres rather than
   metres, median depth above 3000 is a symptom and `--depth-scale 0.01` is the fix;
   `symtrs doctor --data-root` prints this check for the first file it finds.
-- ZoeDepth-N is `relative`, but its head predicts depth rather than disparity, so it is
-  aligned in depth space. The checkpoint records the unit it was trained in.
+- ZoeDepth-N is scored as `relative` (it is an NYU-metric model, but indoor metres do not
+  transfer), and its head predicts depth rather than disparity, so it is aligned in depth space. The checkpoint records the unit it was trained in.
 - CUDA is used when present. Everything also runs on CPU, slowly; `--device cpu` forces it.
 - `symtrs train_sr_x2.yaml` and `symtrs train configs/train_sr_x2.yaml` are the same run.
 - `pytorch-CycleGAN-and-pix2pix/` is vendored in full at a pinned revision

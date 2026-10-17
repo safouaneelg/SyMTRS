@@ -16,6 +16,12 @@
 # and the resolution is recorded in the checkpoint metadata either way, so a mixed-up
 # comparison is visible in the .pt rather than only in the results table.
 #
+# Training crops to 512px patches at 2048 and 1024 and uses the whole image at 512
+# and 256 (a 512 crop is the whole image there; the crop is in data pixels, nothing
+# is upsampled). Full fine-tuning of the 411M-parameter ViT-L keeps ~6.5GB of weights,
+# gradients and Adam state resident, and a 1024px image is 4x the tokens of a 512px
+# one: that did not fit a 12GB card even at batch 1, where the 512px crop does.
+#
 # The other three cells of this row are the same file at 1024, 512 and 256, in the
 # sibling folders. `symtrs sweep --task depth --models da3_large` walks them.
 #
@@ -53,6 +59,7 @@ train:
   # encoder can hold, and the crop still shows a representative slice of the scene
   # at this ground sampling distance.
   patch_size: 512
+  # 0 = the whole image at val and test, whatever patch_size is (see eval.tile_size).
   val_patch_size: 0
   amp: true
   gpus: 1
@@ -72,9 +79,14 @@ eval:
   metrics: [rmse, mae, abs_rel, sq_rel, d1, d2, d3, silog]
   batch_size: 1
   amp: true
-  # 0 runs the whole image in one forward pass, which is what the published numbers
-  # use. If you hit OOM, a sweep over 512/128 tiles scores the same metres.
-  tile_size: 0
+  # The whole 2048px image is scored (val and test alike), in 512px windows
+  # with 128px overlap: the size this row trained on, so the network sees the same
+  # field of view at evaluation. Never a crop - every pixel is covered and the result is
+  # deterministic.
+  # Relative depth is defined per forward pass only up to scale and shift, so each
+  # window is first fitted onto the ones already stitched; the alignment that scores
+  # the row is then computed once, on the full stitched image (engine/tiling.py).
+  tile_size: 512
   tile_overlap: 128
   align: scale
   num_visualizations: 4

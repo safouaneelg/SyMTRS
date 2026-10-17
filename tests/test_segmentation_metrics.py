@@ -12,6 +12,8 @@ run. Torch is needed, so this module skips on a machine without it.
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 torch = pytest.importorskip("torch", reason="torch is not installed")
@@ -134,10 +136,12 @@ def test_a_class_absent_from_both_prediction_and_target_is_excluded_not_zeroed()
     assert matrix.per_class_iou()[2].isnan() and matrix.per_class_iou()[3].isnan()
     # (0.5 + 2/3) / 2, not divided by 4.
     assert matrix.miou() == pytest.approx((0.5 + 2 / 3) / 2, abs=1e-9)
-    # The per-class report still shows a row for them, as 0.0 rather than NaN, so a
-    # column in a CSV cannot come out empty.
-    assert matrix.summary()["iou_2"] == 0.0
-    assert matrix.summary()["dice_3"] == 0.0
+    # The per-class entries are NaN (null in summary.json), not 0.0: "not measurable" read
+    # as "IoU 0" made a class that is nowhere in the data look like a model failure. The
+    # number of classes the mean covers is reported next to it.
+    assert math.isnan(matrix.summary()["iou_2"])
+    assert math.isnan(matrix.summary()["dice_3"])
+    assert matrix.summary()["miou_classes"] == 2
 
 
 def test_a_prediction_outside_the_label_range_counts_as_an_error():

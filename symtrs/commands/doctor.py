@@ -130,12 +130,21 @@ def _installed(module: str) -> bool:
 #: attribute 'drop_path'`. The MiDaS v3.1 Swin-V2 checkpoint is from the same era: under
 #: timm 1.0.30 it fails with `Missing key(s) ... pretrained.model.layers.3.downsample.
 #: reduction.weight` because timm moved the Swin-V2 patch-merging between stages; under 0.6.12
-#: it loads. (SegFormer used to be the other half of this conflict; its encoder now comes
+#: it loads. MiDaS DPT-BEiT-Large fails the way ZoeDepth does: its `backbones/beit.py` patches
+#: timm's `Block.forward` with a copy that calls `self.drop_path`, which timm >= 0.9 split into
+#: `drop_path1` / `drop_path2`, so it builds and then raises the `AttributeError` above at the
+#: first forward. (SegFormer used to be the other half of this conflict; its encoder now comes
 #: from transformers, so only these models pin timm.)
 _ZOEDEPTH_TIM_PIN = "0.6.12"
 
 #: Registry keys that must run in the timm==0.6.12 environment (`.venv-zoe`).
-TIMM_PINNED_KEYS = ("zoedepth_n", "zoedepth_k", "zoedepth_nk", "midas_dpt_swin2_tiny")
+TIMM_PINNED_KEYS = (
+    "zoedepth_n",
+    "zoedepth_k",
+    "zoedepth_nk",
+    "midas_dpt_swin2_tiny",
+    "midas_dpt_beit_large",
+)
 
 
 def _timm_notes() -> List[str]:
@@ -155,7 +164,7 @@ def _timm_notes() -> List[str]:
         notes.append(
             f"timm {version} is installed, but {', '.join(TIMM_PINNED_KEYS)} need "
             f"timm=={_ZOEDEPTH_TIM_PIN} (ZoeDepth's own environment.yml pin; MiDaS "
-            "Swin-V2's checkpoint layout). They are verified working there and verified "
+            "Swin-V2's checkpoint layout; MiDaS BEiT's patched Block.forward). They are verified working there and verified "
             "failing on 0.9.16 and 1.0.30; run them from the second environment."
         )
     return notes

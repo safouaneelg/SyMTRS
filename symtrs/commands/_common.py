@@ -102,7 +102,8 @@ def add_common_args(parser: argparse.ArgumentParser, training: bool = True) -> N
                             help="sliding-window inference; 0 runs the whole image at once")
     evaluation.add_argument("--tile-overlap", dest="tile_overlap", type=int, default=None)
     evaluation.add_argument("--align", default=None,
-                            help="depth alignment: none | median | scale | scale_shift")
+                            help="depth alignment: none | median | scale | scale_shift | scale_shift_disparity "
+                                 "(the last only for MiDaS-style disparity output)")
     evaluation.add_argument("--num-visualizations", dest="num_visualizations", type=int, default=None)
 
     if training:

@@ -15,6 +15,10 @@
 # instead of 255, change data.ignore_index in the config and not the metric - a metric
 # that guesses which pixels to ignore is worse than one that does not.
 #
+# Class 0 (background) has no pixel in any split of the current capture, so its IoU is
+# null and mIoU averages the classes that exist; the result's `miou_classes` says how
+# many. A class absent from the ground truth but predicted still counts, as IoU 0.
+#
 # Small from-scratch U-Net is described in full at
 # configs/segmentation/2048/unet_small_2048.yaml - read that one for why it uses
 # this loss and this learning rate. What changes here is only the resolution axis.
@@ -48,6 +52,7 @@ train:
   warmup_epochs: 2
   min_lr_ratio: 0.01
   patch_size: 0
+  # 0 = the whole image at val and test, whatever patch_size is (see eval.tile_size).
   val_patch_size: 0
   amp: true
   gpus: 1
@@ -63,6 +68,7 @@ eval:
   metrics: [miou, pixel_acc, mean_acc, mean_dice, fwiou]
   batch_size: 1
   amp: true
+  # Whole image in one forward pass: training did not crop at this resolution either.
   tile_size: 0
   tile_overlap: 128
   align: ""

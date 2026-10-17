@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import math
 import os
 from typing import Mapping
 
@@ -12,7 +13,15 @@ def append_csv_row(path: str, row: Mapping) -> None:
 
     The header is derived from the first row's keys. Callers must keep their key
     set stable across epochs; `MetricTracker` guarantees that by construction.
+
+    A NaN/inf cell is written empty, the CSV spelling of the `null` that `summary.json`
+    uses: "could not be computed" must not read back as a number (`row_as_floats` leaves an
+    empty cell as a string, so nothing downstream averages it as zero).
     """
+    row = {
+        key: ("" if isinstance(value, float) and not math.isfinite(value) else value)
+        for key, value in row.items()
+    }
     directory = os.path.dirname(str(path))
     if directory:
         os.makedirs(directory, exist_ok=True)

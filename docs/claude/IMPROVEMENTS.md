@@ -50,3 +50,281 @@ Changements faits dans le repo, et pourquoi.
 - `scripts/smoke_all.py` : smoke test de chaque config sur le vrai dataset, recherche du batch
   qui tient (halving sur OOM), reprenable (`runs/smoke/smoke.tsv`), écrit `runs/queue.txt`
   avec le budget de validation (2 époques ; shadow 500 itérations) et le batch mesuré.
+- Correctifs issus du smoke test (2026-10-17) :
+  - DA3 (`da3_large`, `da3_metric_large`) à 1024 : `patch_size` 0 → 512 (table `DEPTH_MODELS`
+    de `configs/generate_grid.py`, configs régénérées). Fine-tuning complet d'un ViT-L de 411 M
+    de paramètres : ~6,5 Go de poids + gradients + états Adam résidents, et une image 1024 vaut 4×
+    les tokens d'une 512 → OOM sur 12 Go même à batch 1 ; le crop 512 (déjà utilisé à 2048,
+    passe) tient. À 512 et 256 la valeur reste 0 : le crop 512 y est l'image entière (un crop ne
+    dépasse jamais l'image, rien n'est sur-échantillonné — règle 1). Test :
+    `test_da3_crops_to_512_wherever_the_image_is_larger_than_that`. Note : les batchs de la grille
+    (4/8/16 à 512 pour DA3) restent calibrés pour une carte plus grosse ; `smoke_all.py` mesure
+    le batch qui tient.
+  - `midas_dpt_beit_large` routé vers `.venv-zoe` (timm 0.6.12) comme swin2 : `backbones/beit.py`
+    de MiDaS remplace `Block.forward` par une copie qui appelle `self.drop_path`, que timm >= 0.9
+    a scindé en `drop_path1/2` → `AttributeError` au premier forward. Ajouté à `TIMM_PINNED_KEYS`
+    (doctor), `ZOE_VENV_MODELS` (smoke_all), docstring `run_queue.py`, règle 10 d'AGENTS.md,
+    README. L'adaptateur MiDaS lève désormais à la construction (`_require_beit_compatible_timm`,
+    test de l'attribut `drop_path` plutôt que de la version) une `RuntimeError` nommant `.venv-zoe`.
+    Code du hub MiDaS non touché. Vérifié sur CPU : `.venv-zoe`, `DPT_BEiT_L_384` se construit et
+    un forward 1×3×384×384 donne 1×1×384×384 ; transform `dpt_transform` = 384, cohérent.
+    Les autres MiDaS (small, DPT-Hybrid, DPT-Large) ne patchent que le forward du ViT de tête
+    (`forward_flex`), jamais un `Block` timm : OK sous timm 1.0 (smoke ok à 1024/2048).
+    Tests : 3 ajoutés dans `tests/test_offline_build_fixes.py`. Suite : 524 passed.
+
+## 2026-10-17 — Depth Pro tient sur 12 Go : `train.freeze` n'était jamais appliqué
+
+- **Cause racine** : `train.freeze` était lu par `build_from_config` et stocké par chaque
+  adaptateur (`self.freeze`), mais seules `trainable_parameters()` / `apply_freeze()` appliquaient
+  la politique, et rien sur le chemin d'entraînement ne les appelait (`build_optimizer` parcourt
+  `named_parameters()` directement). Le log disait pourtant `freeze='encoder' -> 952.0M trainable`
+  (= tout). Résultat pour Depth Pro : les 35 passes ViT-L (5×5 + 3×3 + 1 patchs de 384 px) étaient
+  enregistrées dans le graphe autograd → OOM > 11 GiB même à batch 1, quel que soit le crop.
+  Le crop ne pouvait pas aider : `DepthPro.forward` impose 1536×1536 (`assert H == W == img_size`,
+  embedding de position 384 px × 4 fixé par l'architecture) et `infer` y redimensionne toute entrée.
+- **Correctif** : `symtrs.engine.trainer.apply_run_freeze(model, cfg)`, appelée dans `_run` avant
+  `model.to()`, DDP et `build_optimizer` (DDP fige l'ensemble des paramètres à `requires_grad` au
+  moment du wrap). Lève une `RuntimeError` nommant `symtrs doctor --model <clé> --freeze <politique>`
+  si la politique ne laisse rien d'entraînable. Pas appelée dans `evaluate_run` (pas de gradient).
+  Un encodeur gelé n'a plus besoin de `no_grad` explicite : aucune entrée ni aucun paramètre en amont
+  ne demande de gradient, donc autograd n'enregistre rien (vérifié : 7,9 GiB mesurés).
+- **Effet de bord corrigé** : MiDaS range tout son réseau sous `backbone.` (ViT dans
+  `backbone.pretrained`, décodeur dans `backbone.scratch`) ; le préfixe par défaut `backbone`
+  gelait donc aussi le décodeur → 0 paramètre entraînable dès que la politique devenait réelle.
+  `apply_freeze_policy` lit maintenant l'attribut de classe `freeze_encoder_prefixes` ;
+  `MiDaSAdapter.freeze_encoder_prefixes = ("backbone.pretrained",)` → DPT-Large : 16,5 M entraînables
+  sur 344 M. ZoeDepth n'est pas touché (préfixe `.pretrained` correct ; son noyau MiDaS est de toute
+  façon déjà gelé à la construction : 0,48 M entraînables).
+  **Conséquence** : les configs MiDaS DPT-Large / BEiT-L et ZoeDepth avec `freeze: encoder`
+  s'entraînaient jusqu'ici en fine-tuning complet ; les smoke tests / mesures de batch faits avant ce
+  correctif pour ces modèles sont à refaire (leur mémoire baisse, leur batch maximal monte).
+- **Mesures** (RTX 5070 Ti Laptop 12 Go, amp fp16, `torch.cuda.max_memory_allocated`, 1 pas fwd+bwd
+  (+ AdamW) à batch 1) :
+  | cas | pic |
+  |---|---|
+  | avant : encodeur non gelé, crop 512 | OOM à 11,1 GiB |
+  | après : encodeur gelé, crop 512 | 7,82 GiB |
+  | après : encodeur gelé, image 2048 entière (pas de crop) | 7,94 GiB |
+  | évaluation 2048 native, tile_size 0, batch 1, amp | 5,74 GiB |
+  Poids fp32 : 3,6 GiB ; entraînables : 20,5 M (décodeur 19,7 + tête 0,4 + tête FOV 0,4).
+  Smoke bout en bout via le trainer (`depth_pro_1024.yaml`, 2 pas, val + test) : OK avec
+  `SYMTRS_CUDA_MEM_FRACTION=0.8` ; à 0.7 (8,3 GiB) il échoue de justesse (7,3 GiB alloués +
+  ~1 GiB de fragmentation) — le plafond 0.92 de `run_env` laisse la marge.
+  AMP : fp16 + GradScaler fonctionne (perte finie) ; ni bf16 ni checkpointing du décodeur n'ont été
+  nécessaires (7,9 GiB < 10,5 GiB).
+- **Configs** (`configs/generate_grid.py`, ligne `depth_pro`) : batch 1 à toutes les résolutions
+  (avant 1/2/4/8 : le batch 2 ne tient pas), `patch_size: 0` partout (un crop 512 coûte autant que
+  l'image entière, est sur-échantillonné ×3 vers 1536 à l'entraînement alors que l'évaluation
+  sous-échantillonne : décalage train/test), `grad_accum: 8` inchangé → batch effectif 8 uniforme.
+  Texte de la note régénéré avec ces mesures.
+- Tests : `tests/test_depth_pro_memory.py` (6) — politique appliquée sur la disposition de
+  modules de Depth Pro (seuls décodeur/tête/tête FOV entraînables), politique vide inerte, erreur
+  explicite si tout est gelé, ordre `apply_run_freeze` < `model.to` < DDP < `build_optimizer` dans
+  `_run`, configs Depth Pro (batch 1, pas de crop, `freeze: encoder`, amp, batch effectif 8),
+  MiDaS garde son décodeur entraînable.
+- **Recommandation validation** : Depth Pro est fine-tunable sur 12 Go, pas besoin de repli
+  zero-shot. Lancer depuis la racine du dépôt (checkpoint `./checkpoints/depth_pro.pt`) avec
+  `SYMTRS_CUDA_MEM_FRACTION=0.92`, `--batch-size 1` (valeur des configs ; ne pas laisser
+  `smoke_all` essayer 2). Le zero-shot reste disponible :
+  `symtrs eval --task depth --model depth_pro --resolution 2048 --data-root <root> --eval-split test`.
+
+## Protocole d'évaluation (depth + segmentation) — 2026-10-17
+
+Audit smoke (`docs/claude/AUDIT_smoke.md` A1, A4, A5) : trois erreurs de protocole corrigées côté
+évaluation, plus deux défauts découverts en chemin. Aucune de ces corrections ne vise à améliorer
+un chiffre : elles changent ce que le chiffre mesure.
+
+- **Val et test au 2048 étaient notés sur UN crop aléatoire de 512** (`factory.from_config` :
+  `val_patch_size or train.patch_size`, et les datasets tiraient un crop aléatoire même hors
+  entraînement). Conséquences : test non reproductible, non comparable aux lignes 1024/512/256
+  (image entière), `best.pt` choisi sur 2 fenêtres. Correctif :
+  - `from_config` : l'évaluation n'hérite plus jamais de `train.patch_size` ; `val_patch_size: 0`
+    = image entière (`symtrs/config.py` documente la sémantique) ; une valeur > 0 est un crop
+    **central déterministe** (`transforms.center_crop_params`), jamais aléatoire.
+  - `DepthTaskDataset` / `SemanticDataset` : crop aléatoire uniquement si `augment` (donc
+    entraînement), crop central sinon.
+- **Politique de tuiles** (`configs/generate_grid.py::eval_tiling`) : une ligne qui s'entraîne sur
+  des crops plus petits que l'image est évaluée, val et test, sur l'image ENTIÈRE en fenêtres
+  glissantes de la taille du patch d'entraînement (`eval.tile_size = patch`, recouvrement = patch/4,
+  fondu de Hann d'`engine/tiling.py`) : le réseau voit le champ de vue et la GSD de l'entraînement,
+  la mémoire reste celle d'un pas d'entraînement, chaque pixel est couvert. Une ligne entraînée sur
+  image entière est évaluée entière (`tile_size: 0`). Concrètement : 2048 patch 512 → tuiles
+  512/128 (25 par image : U-Net, DeepLabV3, SegFormer, DA3, ZoeD-K/NK, ZoeD-N) ; 2048 patch 384 →
+  384/96 (49 : MiDaS small, DPT-Hybrid, DPT-Large, Swin2-tiny, BEiT-L) ; 1024 patch 512 → 512/128
+  (9 : segmentation, DA3, MiDaS DPT-Large et BEiT-L) ; tous les autres, dont Depth Pro, `0`.
+  Val et test passent par la même fonction `evaluate` et lisent le même `cfg.eval`.
+- **Tuilage et profondeur relative** : l'alignement (`align_prediction`) était déjà calculé une
+  fois par image complète, après recollement — correct. Mais chaque passe d'un modèle relatif
+  (disparité MiDaS, profondeur relative DA3) a sa propre échelle ET son propre décalage : mélanger
+  les tuiles brutes laisse des marches aux coutures qu'aucun alignement global ne corrige.
+  `predict_tiled(..., match_affine=True)` ajuste (moindres carrés pondérés) chaque nouvelle fenêtre
+  sur la zone déjà recollée avant le mélange ; `forward_native` l'active seulement si
+  `model.protocol == "relative"` (profondeur métrique et logits sont absolus : jamais ajustés).
+- **Remplissage rogné, plus étiré** (`loop._restore_size`) : quand `prepare_input` ne fait que
+  compléter à un multiple (DA3 : 512 → 518), la sortie est rognée au lieu d'être redimensionnée —
+  le redimensionnement décalait chaque pixel de la GT (jusqu'à 6 px) sur les tuiles et l'image.
+- **NaN n'est jamais « best »** (`trainer.is_improvement`) : la branche `best is None → True` passait
+  avant le test NaN, donc un premier epoch NaN était sauvé en `best.pt` (rmse=NaN) et rien ne
+  pouvait le battre. Une valeur non finie ne gagne jamais, même la première ; elle est signalée
+  (avertissement par epoch, `non_finite_monitor_epochs` dans `summary.json`) ; si aucun epoch n'est
+  fini, aucun `best.pt` n'est écrit, `best` vaut `null` et le message dit de traiter le run comme
+  échoué (les chiffres test viennent alors des poids du dernier epoch).
+- **JSON valide** : nouveau `symtrs/common/jsonio.py` (`json_safe`, `dumps`, `write_json`,
+  `allow_nan=False` en garde-fou). Tous les `summary.json` (trainer, domaine, shadow, super-résolution)
+  et `per_image_*.json` écrivent `null` pour NaN/inf. `metrics.csv` : cellule vide. `symtrs tables`
+  lit `null` (et l'ancien `NaN`) et affiche `n/a` ; le tri place les valeurs manquantes en dernier ;
+  la sortie `--format json` est valide.
+- **mIoU** (`metrics/semantic.py`) : une classe d'union nulle (absente de la GT et des prédictions)
+  est NaN → `null` dans `summary.json` (`iou_k`, `dice_k`) au lieu de `0.0`, et reste exclue de la
+  moyenne ; une classe absente de la GT mais prédite garde son IoU 0 (union > 0, comportement
+  standard). Nouveau champ `miou_classes` = nombre de classes moyennées. La classe 0 (fond) n'a
+  aucun pixel dans aucun split de la capture actuelle : le mIoU est donc la moyenne des classes
+  présentes, et deux mIoU de `miou_classes` différents ne sont pas comparables (note ajoutée dans
+  chaque config de segmentation via `SEG_CLASS_NOTE`). L'ancien test qui exigeait `iou_2 == 0.0`
+  pour une classe absente a été inversé (c'était précisément le défaut).
+- **Tests** (`tests/test_eval_protocol.py`, 20) : l'évaluation n'hérite pas du crop (spy sur
+  `dataloader`) ; crop d'éval = centre déterministe, crop d'entraînement toujours aléatoire (jeu
+  de données factice, depth et segmentation) ; val et test utilisent la même fonction ; politique
+  de tuiles (unitaire + vérifiée sur les 91 YAML générés) ; les tuiles relatives sont ajustées
+  (l'erreur de couture est ≥ 5× plus faible qu'en mélange brut) et les sorties absolues non ;
+  `forward_native` n'ajuste que `protocol == "relative"` ; rognage du remplissage ; NaN/inf jamais
+  « best », même au premier epoch ; JSON valide (`parse_constant` qui échoue sur NaN) ; CSV ;
+  `tables` avec `null`/`NaN` ; classe d'union nulle exclue, classe prédite-mais-absente comptée,
+  `null` jusque dans le JSON.
+- **Sonde GPU** (smoke ckpt non entraînés, split val 2048, 24 images, plafond 50 %, machine partagée
+  avec le smoke en cours donc durées indicatives) :
+  | modèle | fenêtres | pic alloué | durée |
+  |---|---|---|---|
+  | `unet_small` 2048 | 512/128 (25/img) | 0,65 GiB | 15 s |
+  | `unet_small` 2048 | image entière | 5,21 GiB | 10 s |
+  | `midas_small` 2048 | 384/96 (49/img) | 0,51 GiB | 39 s |
+  | `midas_small` 2048 | image entière | 0,51 GiB | 16 s |
+  Pour U-Net, tuilé et entier donnent le même mIoU (0,0958) à 4 décimales : le recollement ne
+  change rien pour un réseau convolutif. MiDaS change (rmse 28,2 vs 29,9) : normal, il ne voit
+  pas la même chose (tuile 384 native vs image réduite à 384), et c'est la tuile qui correspond
+  à l'entraînement. Coût : ~1,6 s/image pour MiDaS-small, donc ~40 s par passe de validation de
+  24 images — les gros MiDaS/BEiT-L en coûteront plus ; baisser `eval.tile_overlap` ou
+  `val_patch_size` (crop central) si la validation par epoch devient le goulot.
+- **Limite connue** : un run de smoke existant (`runs/smoke/*`) a été noté avec l'ancien protocole ;
+  ses chiffres 2048 ne sont pas comparables à ceux produits après ce changement.
+
+## 2026-10-17 - Conventions de sortie des modèles de profondeur (MiDaS, DA3-métrique, ZoeDepth)
+- **MiDaS : alignement en espace disparité (règle 3 d'AGENTS.md réécrite).** MiDaS sort `s/z + t`
+  (échelle ET décalage inconnus). Avant : `to_metres` inversait puis `eval.align: scale` ; `1/(s/z+t)`
+  n'est pas proportionnel à `z` et une échelle ne retire pas `t`. Maintenant : nouvel alignement
+  `scale_shift_disparity` (`metrics/depth.py`) = moindres carrés échelle+décalage sur la disparité brute
+  contre `1/GT`, disparité ajustée avec plancher `1/data.max_depth` (1000 m ; `DEFAULT_MAX_DEPTH` si
+  non fourni), puis inversion. L'espace de sortie est déclaré dans le registre (`ModelSpec.output_space`,
+  `registry.depth_pairing(protocol, output_space)` = seule définition de (loss, align)) ; les adaptateurs
+  refusent un `align` incohérent à la construction et dans `evaluate_depth`
+  (`DepthAdapter.validate_alignment`) ; `DepthAdapter.scoring_input` fournit la disparité brute (et non
+  les mètres) à ces alignements ; l'espace est écrit dans les métadonnées du checkpoint.
+  Les configs MiDaS (5 modèles x 4 résolutions) passent à `align: scale_shift_disparity` + `loss: ssi`.
+- **Perte `ssi`** (`model/depth/losses.py`) : L1 sur le résidu d'un ajustement échelle+décalage en forme
+  fermée par image (différentiable), divisé par l'étalement de la cible -> sans dimension (~1 pour un
+  plan constant, 0 si parfait ; sans cela la perte vaudrait ~1e-6 sur des disparités 1/70-1/270 et
+  l'epsilon d'Adam étoufferait le gradient). Avant, `silog` sur la disparité ne pardonnait que
+  l'échelle. Ni normalisation médiane/MAD ni terme de gradient multi-échelle de MiDaS (non reproduits ;
+  `loss_kwargs.gradient_weight` ajoute un terme de bord).
+- **Sonde réelle** (midas_small 256, 6 images test, GPU, ancien vs nouveau protocole sur les mêmes
+  prédictions) : silog 47,9 -> 29,2 ; abs_rel 0,358 -> 0,239 ; rmse 56,5 -> 34,8 ; d1 0,39 -> 0,49.
+  Test unitaire de la raison : sur une disparité `37/z + 0,4`, l'ancienne voie garde une erreur
+  >1000x supérieure à la nouvelle (qui retrouve `z` exactement).
+- **DA3-métrique : `focal_px` dérivé du champ de vision.** `DataConfig.camera_hfov_deg = 60.0`
+  (config.py), `focal_px_for_resolution(res, fov) = (res/2)/tan(fov/2)` : 1773,6 px à 2048, 886,8 à
+  1024, 443,4 à 512, 221,7 à 256. `build_from_config` (`_fill_camera_kwargs`) l'écrit dans
+  `cfg.model_kwargs.focal_px` si `ModelSpec.focal_kwarg` le demande et s'il est vide : il suit donc la
+  résolution automatiquement, ne dépend ni du crop ni des tuiles (même taille de pixel), est enregistré
+  dans le checkpoint et `config.yaml` (donc `autoloader` le retrouve), et une valeur explicite l'emporte.
+  L'adaptateur avertit si une instance métrique est construite sans focale. **HYPOTHÈSE À CONFIRMER :**
+  FOV horizontal 60 deg = valeur par défaut de l'acteur de capture (`FieldOfView = 60.f`,
+  SyMTRSDatasetCaptureActor.h:97), modifiable par niveau.
+  **Sonde réelle :** avec la focale appliquée, le zero-shot reste ~25x trop petit (médiane prédite
+  2-9 m contre 150 m de GT à 256/512/1024 ; abs_rel 0,95, d1 = 0). La focale était nécessaire
+  (sans elle la sortie est encore ~3x plus petite) mais n'est pas la cause principale : DA3-métrique
+  lit la vue nadir à 70-270 m comme une scène proche (écart de domaine). Seul le fine-tuning corrigera.
+- **ZoeD-N : NaN sous fp16, confirmé et corrigé.** Sonde GPU (RTX 5070 Ti, 1 image test réelle, forward
+  seul) : autocast fp16 -> ~10 % de pixels non finis à 512 et à 1024 (finis : 0,903 / 0,906) ; fp32 et
+  bf16 entièrement finis et identiques à 3 chiffres (moyenne 1,674 m). ZoeD-K et ZoeD-NK finis dans
+  les 3 modes. Correctif dans l'adaptateur (pas de nouvelle clé de config) :
+  `ZoeDepthAdapter._safe_precision` exécute le variant N en bf16 (fp32 si le GPU ne le supporte pas)
+  dans tout autocast CUDA et renvoie du float32 ; `amp: true` reste identique aux autres configs.
+  Vérifié : perte `silog` finie (2,49) et gradients finis à l'entraînement ; évaluation 1024 avec
+  `eval.amp: true` sur 3 images test : abs_rel 0,19, d1 0,55 (avant : « every valid pixel had a
+  non-positive prediction »).
+- **ZoeD-K/NK : le « plafond de bins » n'est vrai que pour K, et le hub se trompe de valeur.**
+  Lu dans le code épinglé : `bin_centers_type` vaut `normed` pour K (bins bornés à `[min,max]_depth`)
+  mais `softplus` pour N et NK (`SeedBinRegressorUnnormed` : « max_depth: Not used »), donc N et NK
+  ne sont PAS plafonnés (leurs 1-4 m sont une erreur d'appréciation, pas un plafond). Pire : l'entrée
+  hub `ZoeD_K` appelle `get_config(..., config_version="kitti")` sans `dataset="kitti"`, donc le
+  `max_depth: 80` n'est jamais fusionné et la tête est construite avec 10 m (défaut de la classe) alors
+  que les poids ont été entraînés à 80. Correctif : `ZoeDepthAdapter(max_depth=...)`, défaut
+  `ZOED_K_TRAINED_MAX_DEPTH = 80` (zero-shot fidèle ; la clé est aussi dans les `default_kwargs` du
+  registre, avec un test d'égalité), refusé (`ValueError`) pour N/NK qui n'ont pas de plafond. Les
+  configs `zoedepth_k_*` mettent `model_kwargs.max_depth: 300.0` (couvre le max de 279 m ; les
+  paramètres gardent leurs formes, la disposition normalisée des bins est simplement étirée : point de
+  départ, pas calibration). Sonde réelle (zoedepth_k 512, 3 images test, médiane GT ~152 m) :
+  max_depth 10 (hub) -> pred. médiane 1,4-2,8 m, abs_rel 0,98 ; 80 -> 11-22 m, abs_rel 0,88 ;
+  300 -> 41-84 m, abs_rel 0,53 ; silog identique (27,4) car la plage ne fait qu'étirer la sortie. Le
+  zero-shot de K doit donc utiliser le défaut 80, pas la valeur de la config d'entraînement.
+- Docstring de `zoedepth.py` corrigé : ZoeD-N est le modèle métrique NYU (ZoeD_M12_N), noté ici en
+  relatif par choix de protocole (mètres intérieurs non transférables), pas « sans supervision métrique ».
+- **Tests** : `tests/test_depth_conventions.py` (29) : appariement par (protocole, espace), retour exact
+  de `z` depuis une disparité affine, l'ancienne voie échoue, plancher/clamp, refus d'alignements
+  incohérents (messages vérifiés), `scoring_input` garde le signe, perte `ssi` (invariance
+  échelle+décalage, sans dimension, gradient fini, prédiction constante), focale par résolution /
+  indépendante du crop et des tuiles / FOV seul réglage / valeur explicite prioritaire, échelle
+  `focal/300` de DA3, plage K par défaut = 80, refus de `max_depth` pour N/NK, N seul exclu de fp16,
+  bf16 effectif sur CUDA. Tests de grille et de registre réécrits pour imposer l'appariement
+  `depth_pairing` à chaque résolution et MiDaS en `ssi`/`scale_shift_disparity` partout. 581 tests
+  verts, `generate_grid.py --check` OK.
+- **Conséquence pour l'existant** : les `config.yaml` des smoke runs MiDaS (`align: scale`) sont
+  maintenant refusés à la construction (message explicite) ; relancer depuis les configs régénérées.
+  Les chiffres MiDaS des anciens runs ne sont pas comparables.
+- **Non fait / à noter** : l'aperçu depth trace toujours la prédiction non alignée (`to_metres`), donc
+  pour MiDaS une carte en 1/disparité sans échelle ; Depth Pro garde `f_px: null` (il estime son propre
+  FOV) : `focal_kwarg="f_px"` dans le registre suffirait à lui donner la même focale dérivée si l'on
+  veut ancrer cette ligne de base (cela change la nature du test, à décider).
+
+## 2026-10-17 - Translation ombre ⇄ sans ombre via le front-end domain (objectif optionnel 3)
+
+- **La paire est une donnée.** `upstream.DIRECTION_ROLES` (`symtrs/model/domain/upstream.py`) donne, par
+  direction, les dossiers A/B et le sens upstream : `day2night`/`night2day` = `rgb_day`/`rgb_night`,
+  `shadow2noshadow`/`noshadow2shadow` = `rgb_day`/`rgb_noshadow` (A est toujours `rgb_day`). Staging
+  (`build_staging_dir(..., direction=)`), `upstream_direction`, cible réelle du FID/KID (`target_role`) et
+  côté généré (`fake_A`/`fake_B`) en dérivent ; plus aucun `== "day2night"` en dur. Le comportement
+  jour/nuit est inchangé (configs et tests existants identiques ; les 4 YAML existants régénérés à
+  l'octet près). Toujours 2048 seulement (refus explicite sinon, message cite `rgb_noshadow`).
+- **4 configs générées** (`cyclegan|pix2pix` x `shadow2noshadow|noshadow2shadow`) depuis les tables de
+  `configs/generate_grid.py` (`DOMAIN_DIRECTIONS`, `DOMAIN_FOLDERS`, `DomainModel.shadow_note`) :
+  95 fichiers au total (`--check` OK). `tests/test_vendored_and_grid.py` compare la table du générateur
+  (qui ne peut pas importer le paquet) à `DIRECTION_ROLES`.
+- **Notation appariée** pour `shadow2noshadow` uniquement : `runner.score_shadow_removal` réutilise tel quel
+  `stage_split` (dérivation du masque), `score_split` et `symtrs.metrics.shadow` du `shadow_removal`
+  (PSNR/SSIM/erreur LAB sur tout/ombre/hors ombre, mêmes colonnes) en plus de FID/KID ; les chiffres sont
+  donc comparables aux lignes ShadowFormer/Restormer/Uformer. Taille : le front-end ne passe aucun
+  `--preprocess`/`--load_size` (inchangé) ; `test.py` écrit donc du 256x256 (image entière redimensionnée),
+  ré-échantillonné en bicubique à la taille de la vérité terrain avant le score. La perte de détail
+  compte contre le modèle ; la note est écrite dans `summary.json` (`paired_scoring`) et dans l'en-tête
+  de la config. `noshadow2shadow` : FID/KID seulement (une PSNR « zone d'ombre » mesurerait la qualité
+  d'un ombrage, pas d'un retrait).
+- **Bug pré-existant corrigé : pix2pix ne pouvait pas démarrer.** L'`AlignedDataset` vendu ignore
+  `trainA/trainB` et lit `<dataroot>/<phase>/*.png` comme des images `[A | B]` côte à côte ; sans cela il
+  tombe sur son auto-split `hr/`/`night/` et plante (`FileNotFoundError`). Aucun run pix2pix jour/nuit n'a
+  donc jamais pu tourner. `build_staging_dir(aligned=True)` (pix2pix) écrit maintenant ces paires
+  (`write_aligned_pairs`, format `combine_A_and_B.py` d'upstream, réutilisées si plus récentes que leurs
+  sources, périmées supprimées). Le raw-dir + `--train_ratio` aurait perdu des images (somme < 1 exigée).
+  Coût : un PNG sans perte par scène dans `<run>/staging/<split>/<split>/`.
+- `symtrs tables` : colonne `direction` (4 lignes par modèle sinon indiscernables) et colonnes PSNR/SSIM/LAB
+  dans le groupe `domain_adapt`. `sweep` : message natif-seul cite `rgb_noshadow` (le plan ne varie
+  toujours pas la direction : passer `--extra model_kwargs.direction=...` ET un `--out-dir` par direction).
+  Docs : AGENTS.md §1/§2.5/arbre (95), `configs/README.md`, `README.md`, descriptions du registre.
+- **Tests** (+15, 603 verts) : staging A=`rgb_day`/B=`rgb_noshadow` appariés par clé pour les deux sens,
+  jour/nuit inchangé, table direction -> côté upstream/cible, argv des deux directions accepté par le
+  parseur vendu, côté généré par direction, refus à 1024 (message), scoring apparié sur paire synthétique
+  (sortie 16 px ré-échantillonnée ; ombre conservée -> PSNR ombre chute, hors ombre inchangé) et erreur
+  nommée si des images manquent, paires `[A|B]` pix2pix (moitiés, nettoyage), colonnes de `tables`.
+- **Smoke** (dummy 512 px, 6/2/2, `--epochs 1`, ~37 s chacun) : `pix2pix_shadow2noshadow` termine, FID/KID
+  + PSNR 15,7 / SSIM 0,39 / mae_lab 37,4 (chiffres dummy sans sens) ; `cyclegan_noshadow2shadow` termine
+  (FID/KID seuls). Lancement réel : `symtrs train configs/domain_adapt/pix2pix_shadow2noshadow.yaml
+  --data-root <racine>` (idem `cyclegan_*`), à la suite de la file, mono-GPU, `train.epochs: 40`.

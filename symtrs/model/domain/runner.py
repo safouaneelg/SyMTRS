@@ -1,10 +1,14 @@
-"""Day-to-night and night-to-day translation, driven through the upstream code.
+"""Day-to-night, night-to-day and shadow <-> shadow-free translation, driven through the
+upstream code.
 
     symtrs train --task domain_adapt --model cyclegan --data-root /data/SyMTRS \\
                  --set model_kwargs.direction=day2night --epochs 40
 
     symtrs train --task domain_adapt --model pix2pix --data-root /data/SyMTRS \\
                  --set model_kwargs.direction=night2day --epochs 40
+
+    symtrs train --task domain_adapt --model pix2pix --data-root /data/SyMTRS \\
+                 --set model_kwargs.direction=shadow2noshadow --epochs 40
 
 The training itself is upstream `train.py`, unmodified. This module prepares the inputs
 upstream needs (see `symtrs.model.domain.upstream` for the auto-split trap that makes the
@@ -23,9 +27,27 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from symtrs.model.domain import upstream as upstream_module
+from symtrs.common.jsonio import dumps as json_dumps_safe
 
-#: direction -> "translate A into B" or the reverse. Stated once; everything else derives.
-DIRECTIONS = ("day2night", "night2day")
+#: Every direction there is. The table (which folders are A and B, and which way upstream
+#: translates) lives in `upstream.DIRECTION_ROLES`; this is only its keys.
+DIRECTIONS = tuple(upstream_module.DIRECTION_ROLES)
+
+#: Directions whose generated image has a pixel-aligned ground truth that is a *shadow
+#: removal* result, so the full-reference metrics of the `shadow_removal` task apply and the
+#: row can sit next to ShadowFormer / Restormer / Uformer. `noshadow2shadow` also has a
+#: ground truth (`rgb_day`), but "PSNR in the shadow region against the shadowed image"
+#: measures how well a shadow was painted, which is not what that table's columns mean.
+SHADOW_REMOVAL_DIRECTIONS = ("shadow2noshadow",)
+
+#: Written into summary.json beside the paired metrics, because without it the numbers look
+#: like they were measured at 2048 the way the shadow_removal rows are.
+PAIRED_SCORING_NOTE = (
+    "paired metrics are symtrs.metrics.shadow on the generated image resampled (bicubic) "
+    "to the rgb_noshadow ground-truth size; upstream generates at its own working size "
+    "(test.py: load_size = crop_size = 256 unless extra_args change it), so detail finer "
+    "than that is lost before scoring and is counted against the model"
+)
 
 #: Which upstream model class and dataset mode each SyMTRS model key uses.
 UPSTREAM_MODELS = {
@@ -58,8 +80,7 @@ class DomainAdaptation:
         decay_epochs: Optional[int] = None,
         **kwargs: Any,
     ) -> None:
-        if direction not in DIRECTIONS:
-            raise ValueError(f"unknown direction {direction!r}; expected one of {DIRECTIONS}")
+        upstream_module.direction_spec(direction)  # unknown direction -> ValueError
         self.direction = direction
         self.upstream_root = upstream
         self.experiment = name
@@ -107,14 +128,17 @@ class DomainAdaptation:
         dry_run: bool = False,
     ) -> List[str]:
         root = self.resolve_upstream()
-        staging = upstream_module.build_staging_dir(dataroot, run_dir, split)
-        day, night = upstream_module.count_staged(staging, split)
-        print(f"[symtrs] staged {split}: {day} domain-A images, {night} domain-B images")
-        if day <= 0 or night <= 0:
+        staging = upstream_module.build_staging_dir(
+            dataroot, run_dir, split, direction=self.direction, aligned=self.dataset_mode == "aligned"
+        )
+        count_a, count_b = upstream_module.count_staged(staging, split)
+        print(f"[symtrs] staged {split}: {count_a} domain-A images, {count_b} domain-B images")
+        if count_a <= 0 or count_b <= 0:
+            a_role, b_role, _ = upstream_module.direction_spec(self.direction)
             raise RuntimeError(
-                f"the staging directory {staging} has {day} A and {night} B images, so "
+                f"the staging directory {staging} has {count_a} A and {count_b} B images, so "
                 "upstream would train on nothing. The dataset root is probably wrong, or "
-                "the 2048 rgb_day / rgb_night folders are empty."
+                f"the 2048 rgb_{a_role} / rgb_{b_role} folders are empty."
             )
 
         command = upstream_module.train_command(
@@ -146,7 +170,9 @@ class DomainAdaptation:
         dry_run: bool = False,
     ) -> List[str]:
         root = self.resolve_upstream()
-        staging = upstream_module.build_staging_dir(dataroot, run_dir, split)
+        staging = upstream_module.build_staging_dir(
+            dataroot, run_dir, split, direction=self.direction, aligned=self.dataset_mode == "aligned"
+        )
 
         command = upstream_module.test_command(
             upstream=root,
@@ -190,11 +216,11 @@ class DomainAdaptation:
     def generated_paths(self, run_dir: str, split: str, checkpoint: str = "latest") -> List[Path]:
         """The files holding *this direction's* generated images.
 
-        `AtoB` (day to night) writes `fake_B`; `BtoA` writes `fake_A`. Both are written
+        `AtoB` (day to night, shadow to shadow-free) writes `fake_B`; `BtoA` writes `fake_A`. Both are written
         in every run, so taking the wrong one would score the translation the run was not
         asked to learn.
         """
-        side = "B" if self.direction == "day2night" else "A"
+        side = "B" if upstream_module.upstream_direction(self.direction) == "AtoB" else "A"
         return sorted(self.generated_dir(run_dir, split, checkpoint).glob(f"*_fake_{side}.png"))
 
 
@@ -271,9 +297,9 @@ def run_domain_adaptation(cfg, mode: str = "finetune") -> Dict[str, Any]:
 
     if cfg.resolution != 2048:
         raise ValueError(
-            f"domain adaptation is 2048-only: the rgb_night folders are not downsampled, "
-            f"so there is no night imagery at {cfg.resolution}px. Got resolution "
-            f"{cfg.resolution} from the config."
+            f"domain adaptation is 2048-only: the rgb_night and rgb_noshadow folders are not "
+            f"downsampled, so there is no such imagery at {cfg.resolution}px. Got "
+            f"resolution {cfg.resolution} from the config."
         )
 
     run_dir = cfg.resolved_out_dir
@@ -324,7 +350,9 @@ def run_domain_adaptation(cfg, mode: str = "finetune") -> Dict[str, Any]:
         raise ValueError(f"unknown domain-adaptation mode {mode!r}; expected finetune or score")
 
     summary["test"] = evaluate_adaptation(cfg, task, run_dir)
-    (run_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    if task.direction in SHADOW_REMOVAL_DIRECTIONS:
+        summary["paired_scoring"] = PAIRED_SCORING_NOTE
+    (run_dir / "summary.json").write_text(json_dumps_safe(summary, indent=2), encoding="utf-8")
     return summary
 
 
@@ -346,7 +374,7 @@ def evaluate_adaptation(cfg, task: "DomainAdaptation", run_dir: Path) -> Dict[st
 
     # Which side of the translation is "generated" depends on the direction: AtoB writes
     # fake_B, BtoA writes fake_A, and the real target domain is the other one.
-    target_domain = "night" if task.direction == "day2night" else "day"
+    target_domain = upstream_module.target_role(task.direction)
     generated = task.generated_paths(str(run_dir), cfg.data.test_split)
 
     if not generated:
@@ -374,7 +402,65 @@ def evaluate_adaptation(cfg, task: "DomainAdaptation", run_dir: Path) -> Dict[st
     metrics = distribution_metrics(real_features, fake_features)
     print(f"[symtrs] fid={metrics['fid']:.2f} kid={metrics.get('kid', float('nan')):.5f} "
           f"(real={metrics['n_real']:.0f}, generated={metrics['n_fake']:.0f})")
+
+    if task.direction in SHADOW_REMOVAL_DIRECTIONS:
+        metrics.update(score_shadow_removal(cfg, task, run_dir, generated))
     return metrics
+
+
+def score_shadow_removal(
+    cfg, task: "DomainAdaptation", run_dir: Path, generated: List[Path]
+) -> Dict[str, float]:
+    """PSNR / SSIM / LAB error of `shadow2noshadow` against `rgb_noshadow`, in the
+    `shadow_removal` task's own columns.
+
+    The metric code, the shadow-mask derivation and the per-image/preview/metrics.csv
+    outputs are the shadow-removal task's, called as they are: this function only turns
+    upstream's output into what that scorer reads, `<run_dir>/predictions/<split>/<key>.png`
+    at the ground truth's size. Upstream's `test.py` writes 256x256 images (it resizes the
+    whole 2048 frame down, `load_size = crop_size = 256`), so each is resampled (bicubic) up
+    to the ground truth first. The alternative, scoring at 256, would make the row
+    incomparable with every shadow_removal row, which are full 2048 frames.
+    The up-sampling cost is therefore part of this row, which is the honest reading of
+    "what a 256 px CycleGAN/pix2pix gives you".
+    """
+    from PIL import Image
+
+    from symtrs.model.shadow.runner import score_split
+    from symtrs.model.shadow.staging import stage_split, staged_keys
+
+    split = cfg.data.test_split
+    # Same staging as shadow removal: input/ target/ mask/ beside the testA/testB links.
+    staging = stage_split(
+        cfg.data.root, str(run_dir), split, cfg.shadow.mask_threshold, cfg.shadow.mask_open
+    )
+    keys = staged_keys(staging)
+
+    suffix = "_fake_B"  # shadow2noshadow is AtoB; `generated_paths` selects exactly these
+    by_key = {path.stem[: -len(suffix)]: path for path in generated if path.stem.endswith(suffix)}
+    missing = [key for key in keys if key not in by_key]
+    if missing:
+        raise RuntimeError(
+            f"{len(missing)} of {len(keys)} {split} images have no generated counterpart in "
+            f"{task.generated_dir(str(run_dir), split)} (first: {missing[0]}). Upstream's "
+            "test.py did not finish, or --num_test truncated it; re-score with "
+            f"`symtrs eval <config> --eval-split {split}` once it has."
+        )
+
+    predictions = Path(run_dir) / "predictions" / split
+    predictions.mkdir(parents=True, exist_ok=True)
+    sizes = set()
+    for key in keys:
+        with Image.open(staging / "target" / f"{key}.png") as target:
+            size = target.size
+        with Image.open(by_key[key]) as image:
+            sizes.add(image.size)
+            image.convert("RGB").resize(size, Image.BICUBIC).save(predictions / f"{key}.png")
+    print(
+        f"[symtrs] shadow-removal metrics: generated {sorted(sizes)} resampled to the "
+        f"ground-truth size (bicubic) before scoring"
+    )
+    return score_split(cfg, Path(run_dir), split)
 
 
 #: Suffixes the metric code will read. Kept next to the readers so a new format cannot
@@ -426,8 +512,11 @@ __all__ = [
     "DIRECTIONS",
     "DomainAdaptation",
     "IMAGE_SUFFIXES",
+    "PAIRED_SCORING_NOTE",
+    "SHADOW_REMOVAL_DIRECTIONS",
     "UPSTREAM_MODELS",
     "device_env",
     "evaluate_adaptation",
     "run_domain_adaptation",
+    "score_shadow_removal",
 ]

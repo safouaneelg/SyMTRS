@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from symtrs.model.shadow.archs import arch_for, upstream_missing
+from symtrs.common.jsonio import dumps as json_dumps_safe
 
 WORKER_MODULE = "symtrs.model.shadow.worker"
 
@@ -135,7 +136,7 @@ def score_split(cfg, run_dir: Path, split: str) -> Dict[str, float]:
         if index < cfg.eval.num_visualizations:
             _write_preview(run_dir / "preview" / f"{split}_{key}.png", staging, key, prediction, mask)
 
-    (run_dir / f"per_image_{split}.json").write_text(json.dumps(per_image, indent=1), encoding="utf-8")
+    (run_dir / f"per_image_{split}.json").write_text(json_dumps_safe(per_image, indent=1), encoding="utf-8")
     metrics = aggregate(rows)
     append_metrics_row(run_dir / "metrics.csv", {"iteration": -1, "split": split, **metrics})
     print(
@@ -263,7 +264,7 @@ def run_shadow_removal(
         for name in scored:
             label = "test" if name == cfg.data.test_split else "val" if name == cfg.data.val_split else name
             summary[label] = score_split(cfg, run_dir, name)
-    (run_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    (run_dir / "summary.json").write_text(json_dumps_safe(summary, indent=2), encoding="utf-8")
     return summary
 
 

@@ -66,7 +66,7 @@ def build_plan(
     if task in NATIVE_ONLY_TASKS:
         if [r for r in resolutions if r != 2048]:
             print(
-                f"[symtrs] {task} only exists at 2048: the rgb_night folders are not "
+                f"[symtrs] {task} only exists at 2048: the rgb_night and rgb_noshadow folders are not "
                 "downsampled, so the lower resolutions are dropped from the plan"
             )
         resolutions = [2048]

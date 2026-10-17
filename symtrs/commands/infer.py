@@ -39,7 +39,8 @@ def add_parser(subparsers) -> None:
                         help="sliding-window inference for large images")
     parser.add_argument("--tile-overlap", dest="tile_overlap", type=int, default=128)
     parser.add_argument("--align", default="",
-                        help="depth alignment before saving: none | median | scale | scale_shift")
+                        help="depth alignment before saving: none | median | scale | scale_shift | "
+                             "scale_shift_disparity")
     parser.add_argument("--device", default=None)
     parser.add_argument("--save-npy", dest="save_npy", action="store_true",
                         help="also write the raw array next to the picture")

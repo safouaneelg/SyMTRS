@@ -5,9 +5,11 @@ Two protocols, matching the two kinds of depth model:
 *Metric* models (ZoeDepth-K, Depth Anything 3 metric, Depth Pro) predict metres, so
 their error is reported directly and no alignment is applied.
 
-*Relative* models (MiDaS/DPT, ZoeDepth-N, relative Depth Anything 3) predict an
-affine-invariant quantity, often inverse depth. Their numbers are only meaningful
-after per-image alignment to the ground truth, and the convention differs between
+*Relative* models predict an affine-invariant quantity, and which affine family depends on
+the output space (`symtrs.registry.depth_pairing`). ZoeDepth-N and relative Depth Anything 3
+emit depth up to a scale, aligned by `scale`. MiDaS/DPT emits disparity `s / z + t`, aligned by
+`scale_shift_disparity`: scale AND shift fitted against `1 / ground truth`, then inverted. Their
+numbers are only meaningful after per-image alignment, and the convention differs between
 papers, so `align` is recorded per model in the registry rather than hardcoded.
 
 Everything is computed on the validity mask. Invalid ground-truth pixels (sky, no
@@ -22,7 +24,18 @@ from typing import Dict, Optional
 import torch
 
 #: Alignment strategies for relative-depth models.
-ALIGNMENTS = ("none", "median", "scale", "scale_shift")
+ALIGNMENTS = ("none", "median", "scale", "scale_shift", "scale_shift_disparity")
+
+#: Alignments whose input is the raw disparity of the model, not metres. Everything else takes
+#: depth. `DepthAdapter.scoring_input` is what hands the right one over.
+DISPARITY_ALIGNMENTS = ("scale_shift_disparity",)
+
+#: Ceiling, in metres, applied to the depth recovered from an aligned disparity when the caller
+#: does not pass `max_depth`. A fitted disparity can reach or cross zero (sky, far field), and
+#: `1 / d` then explodes or flips sign; the MiDaS evaluation clamps the disparity to the
+#: dataset's depth ceiling for the same reason. 1000 m is `data.max_depth` in every generated
+#: config, i.e. the same cut-off that defines which ground-truth pixels are valid.
+DEFAULT_MAX_DEPTH = 1000.0
 
 #: Canonical metric order. Anything that logs or tabulates depth uses this order, so
 #: CSV columns and result tables stay stable.
@@ -50,6 +63,7 @@ def align_prediction(
     mask: torch.Tensor,
     mode: str = "scale_shift",
     eps: float = EPS,
+    max_depth: Optional[float] = None,
 ) -> tuple:
     """Fit `pred ~ scale * pred + shift` to `target` per image and apply it.
 
@@ -67,6 +81,14 @@ def align_prediction(
         scale_shift   - least-squares scale and shift. The most permissive, and the
                         right default when comparing models whose output space is
                         unknown.
+        scale_shift_disparity
+                      - the MiDaS protocol. `pred` is the model's raw DISPARITY (not
+                        metres); scale and shift are fitted by least squares against
+                        `1 / target` over the valid pixels, the fitted disparity is clamped
+                        to at least `1 / max_depth`, and the returned map is DEPTH
+                        (`1 / disparity`). Fitting after inverting, as `scale` on
+                        `1 / pred` would, cannot absorb the shift `t` in `s / z + t`.
+                        The returned fit is in disparity units.
     """
     if mode not in ALIGNMENTS:
         raise ValueError(f"unknown alignment {mode!r}; expected one of {ALIGNMENTS}")
@@ -92,6 +114,20 @@ def align_prediction(
                 f"image {index} has {int(m.sum())} valid pixels; alignment needs at least 2"
             )
         p_m, t_m = p[m], t[m]
+
+        if mode == "scale_shift_disparity":
+            disparity_target = 1.0 / t_m
+            p_mean = p_m.mean()
+            g_mean = disparity_target.mean()
+            p_centered = p_m - p_mean
+            denominator = (p_centered * p_centered).sum().clamp_min(eps)
+            scale = float((p_centered * (disparity_target - g_mean)).sum() / denominator)
+            shift = float(g_mean - scale * p_mean)
+            floor = 1.0 / float(max_depth if max_depth else DEFAULT_MAX_DEPTH)
+            fitted = (pred[index].double() * scale + shift).clamp_min(floor)
+            aligned[index] = (1.0 / fitted).to(pred.dtype)
+            fits.append(AlignmentFit(mode=mode, scale=scale, shift=shift))
+            continue
 
         if mode == "median":
             p_med = torch.median(p_m)
@@ -124,14 +160,19 @@ def compute_depth_metrics(
     target: torch.Tensor,
     mask: Optional[torch.Tensor] = None,
     align: str = "none",
+    max_depth: Optional[float] = None,
 ) -> Dict[str, float]:
     """Depth metrics over the valid pixels of a batch.
 
     Args:
-        pred: predicted depth in metres, `[B, 1, H, W]` or `[B, H, W]`.
+        pred: predicted depth in metres, `[B, 1, H, W]` or `[B, H, W]` - or, when `align`
+            is in `DISPARITY_ALIGNMENTS`, the model's raw disparity, which the alignment turns
+            into metres.
         target: ground-truth depth in metres, same shape.
         mask: boolean validity mask; defaults to "finite and positive in target".
         align: one of `ALIGNMENTS`, applied before the metrics.
+        max_depth: ceiling for depth recovered from disparity (see `DEFAULT_MAX_DEPTH`);
+            ignored by the other alignments.
 
     Returns a dict with the keys in `DEPTH_METRIC_NAMES`:
         rmse, mae        - metres, the interpretable ones for a metric benchmark.
@@ -165,9 +206,17 @@ def compute_depth_metrics(
             single_mask = mask[index : index + 1]
             if int(single_mask.sum()) >= 2:
                 fixed, _ = align_prediction(
-                    pred[index : index + 1], target[index : index + 1], single_mask, mode=align
+                    pred[index : index + 1], target[index : index + 1], single_mask, mode=align,
+                    max_depth=max_depth,
                 )
                 aligned[index : index + 1] = fixed
+            elif align in DISPARITY_ALIGNMENTS:
+                # Left untouched, a disparity map would be read as metres and score as an
+                # absurd model rather than as an unscorable image.
+                raise AllInvalidError(
+                    f"image {index} has fewer than 2 valid pixels; a disparity alignment cannot "
+                    "be fitted, and the raw disparity is not a depth"
+                )
         pred = aligned
 
     # A relative model can emit non-positive depth after alignment; those predictions

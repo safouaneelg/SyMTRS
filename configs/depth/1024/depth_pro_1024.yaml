@@ -42,23 +42,22 @@ data:
 
 train:
   epochs: 20
-  batch_size: 2
+  batch_size: 1
   lr: 5.0e-6
   weight_decay: 0.01
   optim: adamw
   sched: cosine
   warmup_epochs: 1
   min_lr_ratio: 0.01
-  # Random 512px crops: a full 1024px batch is more memory than this
-  # encoder can hold, and the crop still shows a representative slice of the scene
-  # at this ground sampling distance.
-  patch_size: 512
+  # The whole image fits at this resolution, so no cropping is needed.
+  patch_size: 0
+  # 0 = the whole image at val and test, whatever patch_size is (see eval.tile_size).
   val_patch_size: 0
   amp: true
   gpus: 1
   grad_clip: 1.0
   grad_accum: 8
-  # Effective batch = 2 x 8 = 16,
+  # Effective batch = 1 x 8 = 8,
   # which is what the learning rate was chosen against.
   loss: berhu
   freeze: encoder
@@ -72,8 +71,7 @@ eval:
   metrics: [rmse, mae, abs_rel, sq_rel, d1, d2, d3, silog]
   batch_size: 1
   amp: true
-  # 0 runs the whole image in one forward pass, which is what the published numbers
-  # use. If you hit OOM, a sweep over 512/128 tiles scores the same metres.
+  # Whole image in one forward pass: training did not crop at this resolution either.
   tile_size: 0
   tile_overlap: 128
   align: none

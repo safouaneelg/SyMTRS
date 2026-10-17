@@ -69,3 +69,23 @@ dataset preview (144 transforms, 96/24/24). Pas de convergence recherchée ; auc
   `.venv\Scripts\python.exe -u scripts\smoke_all.py --data-root "C:\Users\bapti\Documents\Unreal Projects\SyMTRS\Saved\DatasetCaptures"`
   (saute les configs déjà `ok` dans `runs/smoke/smoke.tsv`).
 - 2026-10-16 : **décision utilisateur** : shadow removal en fine-tuning depuis les poids publiés (ShadowFormer ISTD+, Restormer real_denoising, Uformer-B SIDD), inscrit dans `scripts/smoke_all.py` (SHADOW_INIT → `--set shadow.init_weights=...` dans la file).
+- 2026-10-17 03:45 : PC en veille ~20:00→03:39 pendant le smoke (7,6 h perdues ; da3_large_2048 affiché 460 min). Ajout `keep_awake()` (SetThreadExecutionState) dans run_queue/smoke_all ; garder le capot ouvert. 39/91 smoke faits (33 ok, 6 FAIL : DA3 1024 OOM patch 0, Depth Pro OOM, BEiT-L drop_path/timm). 3 agents Sonnet : DA3+BEiT, Depth Pro 12 GB, audit plausibilité métriques.
+- 2026-10-17 04:00 : audit (`docs/claude/AUDIT_smoke.md`) → bugs de protocole confirmés : (1) val/test
+  2048 évalués sur un crop aléatoire 512 ; (2) MiDaS = disparité inversée + alignement échelle seule ;
+  (3) DA3-metric sans focale ; (4) ZoeD-N NaN en fp16 ; (5) mIoU compte 0 pour classe absente ;
+  + ZoeD-K/NK plafonnés (bins 80 m / 10 m) vs scènes 70–270 m. Fix DA3 1024 (patch 512) + BEiT→.venv-zoe
+  faits. 2 agents : protocole d'évaluation ; conventions profondeur (FOV 60° supposé, à confirmer).
+  Après corrections : **refaire tout le smoke** (résultats depth/seg actuels périmés).
+  Constat dataset : test plus profond (médiane ~208 m vs 92 train) et classes très différentes entre
+  splits (val : 63 % route) — split géographique, à mentionner avec tout chiffre.
+- 2026-10-17 04:10 : protocole d'évaluation corrigé (agent ; 581 tests) ; Depth Pro fine-tunable (freeze jamais appliqué → corrigé, 7,9 GiB). Objectif optionnel 3 (translation ombre⇄sans ombre pix2pix/CycleGAN via le front-end domain) lancé (agent). Restant : conventions profondeur (agent), re-smoke complet, file de nuit, RESULTS/RUNS, PR.
+
+## Checklist PR (à faire avant la PR, dépôt PUBLIC safouaneelg/SyMTRS)
+- [x] `gh auth status` : compte baptiste-lucas, droit push OK ; local `features` en avance sur `origin/features`.
+- [ ] Retirer les chemins personnels des fichiers commités (`C:\Users\bapti\...`, `Unreal Projects`) :
+      DATASET.md / RUNS.md → `<DATA_ROOT>` ; `scripts/run_queue.ps1` → paramètre/env `SYMTRS_DATA_ROOT` ;
+      PLAN.md / PROGRESS.md → chemins relatifs. Vérifier `git grep -i "Users\bapti\|Unreal Projects"`.
+- [ ] Email d'auteur des commits : demander à l'utilisateur (email perso public vs noreply GitHub).
+- [ ] Aucun .pt/.pth/log/donnée/`.cache`/`checkpoints`/`runs` suivi ; `third_party/*/` ignoré.
+- [ ] Suite de tests verte, `generate_grid.py --check`, RESULTS.md + RUNS.md à jour.
+- [ ] Nouvelle branche depuis `features`, push, PR → `features`, corps de PR prêt ; **confirmation utilisateur avant création**.

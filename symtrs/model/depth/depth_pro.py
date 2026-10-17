@@ -28,6 +28,20 @@ That function builds a model as well as a transform, so a fork that did provide 
 entrypoint would end up with two copies of the 1.9GB weights; the released repository
 always takes the fallback path, which loads them once.
 
+Memory, and why it cannot be shrunk from the outside
+----------------------------------------------------
+`DepthPro.forward` asserts a 1536x1536 input and `infer` resizes everything to it, so
+the work per image is fixed by the architecture: the patch encoder's 384px position
+embedding is tiled 4x4 into 35 overlapping ViT-L passes. A smaller crop or a lower
+`resolution` therefore does not make a step cheaper (the configs run batch 1 and
+uncropped at every resolution); only the batch and the freeze policy do. Measured on a
+12GB RTX 5070 Ti Laptop, amp on, batch 1: one training step peaks at ~7.9GiB with
+`freeze: encoder` (3.6GiB of fp32 weights, the rest decoder activations; the frozen ViTs
+build no autograd graph because nothing upstream of them requires grad), and runs out of
+memory above 11GiB without it. Scoring the native 2048 frame in one pass peaks at
+~5.7GiB. `symtrs.engine.trainer.apply_run_freeze` is what makes the policy real; it was
+once only stored and never applied.
+
 Gradients
 ---------
 `DepthPro.infer` is decorated with `@torch.no_grad()`, which would make the model

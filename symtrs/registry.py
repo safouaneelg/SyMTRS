@@ -28,6 +28,38 @@ class RegistryError(KeyError):
     """Raised for an unknown model key or a registry entry that cannot be built."""
 
 
+#: What a depth network's raw output means. `depth` is metres (metric models) or depth up to a
+#: scale (ZoeDepth-N, Depth Anything 3 relative); `disparity` is MiDaS's inverse depth, which is
+#: only known up to an affine transform `s / z + t`.
+OUTPUT_SPACES = ("depth", "disparity")
+
+
+def depth_pairing(protocol: str, output_space: str = "depth") -> Tuple[str, str]:
+    """`(loss, eval.align)` that a depth model's protocol and output space imply.
+
+    This is the single statement of AGENTS.md rule 3. The registry, the adapters' own
+    defaults and `configs/generate_grid.py` (which cannot import the package, so keeps a copy
+    that `tests/test_vendored_and_grid.py` compares against this function) all follow it.
+
+    * metric                      -> berhu, none
+    * relative, output is depth   -> silog, scale           (unknown global scale only)
+    * relative, output is disparity -> ssi, scale_shift_disparity
+      MiDaS emits `s / z + t`: the shift `t` is as unknown as the scale, and inverting before
+      fitting turns it into a non-linear distortion that no scale can undo. The fit therefore
+      happens in disparity space, against `1 / ground truth`, and only then is the result
+      inverted. The loss is the matching scale-and-shift-invariant one.
+    """
+    if protocol == "metric":
+        return "berhu", "none"
+    if protocol != "relative":
+        raise RegistryError(f"unknown depth protocol {protocol!r}; expected 'metric' or 'relative'")
+    if output_space == "disparity":
+        return "ssi", "scale_shift_disparity"
+    if output_space == "depth":
+        return "silog", "scale"
+    raise RegistryError(f"unknown output_space {output_space!r}; expected one of {OUTPUT_SPACES}")
+
+
 @dataclass(frozen=True)
 class ModelSpec:
     """Everything needed to build and describe one model."""
@@ -47,6 +79,14 @@ class ModelSpec:
     protocol: str = ""
     #: depth only: the alignment convention the model is compared under.
     default_align: str = ""
+    #: depth only: what the raw output is, one of `OUTPUT_SPACES`. With `protocol` it fixes the
+    #: loss and the alignment (`depth_pairing`); a relative model whose output is disparity
+    #: needs a disparity-space fit.
+    output_space: str = ""
+    #: depth only: the constructor argument that takes the focal length in pixels, for models
+    #: that cannot give metres without it. When the config leaves it unset, `build_from_config`
+    #: fills it from `data.camera_hfov_deg` and `resolution`. Empty = the model needs none.
+    focal_kwarg: str = ""
 
     def load_class(self):
         """Import the adapter class this entry points at."""
@@ -91,7 +131,8 @@ REGISTRY: Dict[str, ModelSpec] = {
         aliases=("midas",),
         description="MiDaS small, 256px, relative/DPT-lite. The cheapest depth baseline.",
         protocol="relative",
-        default_align="scale",
+        default_align="scale_shift_disparity",
+        output_space="disparity",
     ),
     "midas_dpt_hybrid": _spec(
         "midas_dpt_hybrid",
@@ -101,7 +142,8 @@ REGISTRY: Dict[str, ModelSpec] = {
         default_kwargs={"hub_model": "DPT_Hybrid"},
         description="MiDaS DPT-Hybrid, 384px, relative. The standard published baseline.",
         protocol="relative",
-        default_align="scale",
+        default_align="scale_shift_disparity",
+        output_space="disparity",
     ),
     "midas_dpt_large": _spec(
         "midas_dpt_large",
@@ -111,7 +153,8 @@ REGISTRY: Dict[str, ModelSpec] = {
         default_kwargs={"hub_model": "DPT_Large"},
         description="MiDaS DPT-Large, 384px, relative.",
         protocol="relative",
-        default_align="scale",
+        default_align="scale_shift_disparity",
+        output_space="disparity",
     ),
     "midas_dpt_swin2_tiny": _spec(
         "midas_dpt_swin2_tiny",
@@ -121,7 +164,8 @@ REGISTRY: Dict[str, ModelSpec] = {
         default_kwargs={"hub_model": "DPT_SwinV2_T_256"},
         description="MiDaS DPT-SwinV2-Tiny, 256px, relative.",
         protocol="relative",
-        default_align="scale",
+        default_align="scale_shift_disparity",
+        output_space="disparity",
     ),
     "midas_dpt_beit_large": _spec(
         "midas_dpt_beit_large",
@@ -131,7 +175,8 @@ REGISTRY: Dict[str, ModelSpec] = {
         default_kwargs={"hub_model": "DPT_BEiT_L_384"},
         description="MiDaS DPT-BEiT-Large, 384px, relative. Largest MiDaS variant.",
         protocol="relative",
-        default_align="scale",
+        default_align="scale_shift_disparity",
+        output_space="disparity",
     ),
     # The ZoeDepth entries need timm but not cv2, which is worth a word because the MiDaS
     # entries need both. timm arrives with the MiDaS DPT-BEiT core that ZoeDepth builds on:
@@ -145,21 +190,31 @@ REGISTRY: Dict[str, ModelSpec] = {
         "depth",
         f"{_DEPTH}.zoedepth:ZoeDepthAdapter",
         default_kwargs={"variant": "N"},
-        description="ZoeDepth-N, relative. A MiDaS backbone with a relative depth head.",
+        description=(
+            "ZoeDepth-N (ZoeD_M12_N): NYU-metric head, scored as relative (depth up to a scale) "
+            "because indoor metres do not transfer to aerial scenes."
+        ),
         requires=("torch", "timm"),
         protocol="relative",
         default_align="scale",
+        output_space="depth",
     ),
     "zoedepth_k": _spec(
         "zoedepth_k",
         "depth",
         f"{_DEPTH}.zoedepth:ZoeDepthAdapter",
-        default_kwargs={"variant": "K"},
+        # 80 m is what ZoeD_M12_K was trained with; the hub entry point builds the head with 10 m.
+        # The adapter owns the constant (`ZOED_K_TRAINED_MAX_DEPTH`) and a test keeps the two equal.
+        default_kwargs={"variant": "K", "max_depth": 80.0},
         aliases=("zoedepth",),
-        description="ZoeDepth-K, metric (metres). The metric baseline to beat.",
+        description=(
+            "ZoeDepth-K, metric (metres). Bounded bin head: model_kwargs.max_depth (80 m = "
+            "the released weights) is its output ceiling."
+        ),
         requires=("torch", "timm"),
         protocol="metric",
         default_align="none",
+        output_space="depth",
     ),
     "zoedepth_nk": _spec(
         "zoedepth_nk",
@@ -170,6 +225,7 @@ REGISTRY: Dict[str, ModelSpec] = {
         requires=("torch", "timm"),
         protocol="metric",
         default_align="none",
+        output_space="depth",
     ),
     "da3_large": _spec(
         "da3_large",
@@ -181,6 +237,7 @@ REGISTRY: Dict[str, ModelSpec] = {
         requires=("torch", "depth_anything_3", "omegaconf", "addict", "safetensors"),
         protocol="relative",
         default_align="scale",
+        output_space="depth",
     ),
     "da3_metric_large": _spec(
         "da3_metric_large",
@@ -191,6 +248,8 @@ REGISTRY: Dict[str, ModelSpec] = {
         requires=("torch", "depth_anything_3", "omegaconf", "addict", "safetensors"),
         protocol="metric",
         default_align="none",
+        output_space="depth",
+        focal_kwarg="focal_px",
     ),
     "depth_pro": _spec(
         "depth_pro",
@@ -201,6 +260,7 @@ REGISTRY: Dict[str, ModelSpec] = {
         requires=("depth_pro",),
         protocol="metric",
         default_align="none",
+        output_space="depth",
     ),
     # ------------------------------------------------------------ segmentation
     "unet_small": _spec(
@@ -261,7 +321,8 @@ REGISTRY: Dict[str, ModelSpec] = {
         default_kwargs={"direction": "day2night"},
         aliases=("cycle_gan",),
         description=(
-            "CycleGAN day<->night translation, unpaired. Direction is model_kwargs.direction."
+            "CycleGAN day<->night or shadow<->shadow-free translation, unpaired. Direction "
+            "(day2night, night2day, shadow2noshadow, noshadow2shadow) is model_kwargs.direction."
         ),
         requires=("torch",),
     ),
@@ -271,7 +332,8 @@ REGISTRY: Dict[str, ModelSpec] = {
         "symtrs.model.domain:DomainAdaptation",
         default_kwargs={"direction": "day2night"},
         description=(
-            "pix2pix day<->night translation, paired by filename. Direction is "
+            "pix2pix day<->night or shadow<->shadow-free translation, paired by filename. "
+            "Direction (day2night, night2day, shadow2noshadow, noshadow2shadow) is "
             "model_kwargs.direction."
         ),
         requires=("torch",),
@@ -387,7 +449,7 @@ def build_model(model: str, **overrides: Any):
     kwargs: Dict[str, Any] = dict(spec.default_kwargs)
     kwargs.update({k: v for k, v in overrides.items() if v is not None})
 
-    unknown = set(kwargs) - set(spec.default_kwargs) - _COMMON_MODEL_KWARGS
+    unknown = set(kwargs) - set(spec.default_kwargs) - _COMMON_MODEL_KWARGS - {spec.focal_kwarg}
     if unknown:
         # Not fatal: a model-specific option such as Domain id belongs here. Warn so a
         # typo in the YAML is visible rather than silently ignored by **kwargs.
@@ -419,12 +481,12 @@ def describe_registry(task: Optional[str] = None, specs: Optional[List[ModelSpec
             current = spec.task
             lines.append(f"\n{current}")
             lines.append("-" * 78)
-            lines.append(f"{'key':<26} {'protocol':<10} {'align':<12} description")
+            lines.append(f"{'key':<26} {'protocol':<10} {'align':<22} description")
         protocol = spec.protocol or "-"
         align = spec.default_align or "-"
-        lines.append(f"{spec.key:<26} {protocol:<10} {align:<12} {spec.description}")
+        lines.append(f"{spec.key:<26} {protocol:<10} {align:<22} {spec.description}")
         if spec.aliases:
-            lines.append(f"{'':<26} {'':<10} {'':<12} aliases: {', '.join(spec.aliases)}")
+            lines.append(f"{'':<26} {'':<10} {'':<22} aliases: {', '.join(spec.aliases)}")
     return "\n".join(lines).lstrip("\n")
 
 
@@ -438,6 +500,8 @@ def _suggest(model: str, cutoff: float = 0.6) -> Optional[str]:
 
 __all__ = [
     "ModelSpec",
+    "OUTPUT_SPACES",
+    "depth_pairing",
     "RegistryError",
     "REGISTRY",
     "build_model",
