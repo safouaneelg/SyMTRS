@@ -5,7 +5,9 @@ Future leads, not done.
 - When the 20k-transform dataset is ready: re-run the grid with the epochs of the generated configs
   (the current runs are 2-epoch validation runs).
 - `SyMTRS_Pipeline.md` contradicts itself (gray ×51 vs ×63, 6 vs 5 classes): to be fixed on the Docs side.
-- Sensitivity of the derived shadow-mask threshold (ShadowFormer, per-region metrics).
+- Sensitivity of the derived shadow-mask threshold (ShadowFormer, per-region metrics): rerun the
+  scoring at 0.05 and 0.2. The darkening is bimodal (7.4 % of pixels in the 5-30 % band; shadow
+  fraction 56 % -> 49 % from 0.05 to 0.3), so a UE-exported mask is not worth it (QA.md, follow-up).
 - Tiled shadow-removal inference: ~10 s per 2048 image (Restormer, 256 tiles one at a time, 0.6 GB VRAM) → batching the tiles together would speed up evaluation ~5–10×.
 - Super-resolution: with crops, one epoch = 1 crop per training image (96 → 6 steps at batch 16).
   Before the real runs, add a "crops per image per epoch" option or revisit the epochs/batches
@@ -29,11 +31,13 @@ Future leads, not done.
 - Dataset regeneration, camera altitude (see DATASET.md, "Depth range and camera altitude"): the
   actor places the camera above the first `ECC_Visibility` hit, so at loc010/loc011 (test) it sits
   70 m above a skyscraper roof and the ground is 152-275 m away, outside the training range (to
-  ~182 m). Either trace against terrain/streets only (or take the lowest hit), or keep
-  "above the first surface" on purpose and balance it across train/val/test.
-- Dataset regeneration, metadata: write a per-frame JSON with the altitude above ground, the camera
-  position and yaw, and the intrinsics (FOV). The dataset has none today, and the package's
-  `data.camera_hfov_deg: 60` is an assumption confirmed only by a car-size estimate (54-63 deg).
+  ~182 m). Decided with the dataset owner (QA.md, "Keep the altitude rule"): keep the rule
+  (option A). All three split zones contain skyscrapers; the preview's shift is a sampling
+  accident of 12 locations, which more than 20,000 views remove, so no per-split check is needed.
+  If the rule ever changes, capture into a fresh folder: resume keys on file names that include `z`.
+- Dataset regeneration, metadata: no per-frame JSON needed (withdrawn 2026-10-17). The pose is
+  already in the file names (`x`, `y`, `z`, `rot`), single-image tasks do not use it, and the FOV is
+  always 60 deg (confirmed by the dataset owner).
 - Shadow removal, validation cadence: `shadow.val_every` is 500 in the validation runs, i.e. one validation
   point, so `best` is `last` and the curve is empty. For full runs use ~100 (validation on 2048 images is
   tiled and slow, so weigh it against the iteration count).
@@ -53,4 +57,5 @@ Future leads, not done.
   `zoedepth_nk_512`; patched by hand with a smaller batch and a raised `grad_accum`).
 - Next light shadow model: BMNet (0.43 M parameters, weights in its repo, two-stage training, the path to
   `condition.pth` is hard-coded upstream). Cheaper than ShadowMaskFormer (2.28 M) and ShadowFormer (11.4 M),
-  which makes it a useful low-compute point.
+  which makes it a useful low-compute point. Deferred (QA.md, follow-up): the shared loop would not
+  reproduce its two-stage recipe, and it adds little coverage; revisit for a size/accuracy curve.

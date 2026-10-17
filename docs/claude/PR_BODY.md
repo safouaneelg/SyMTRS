@@ -89,7 +89,7 @@ $env:SYMTRS_DATA_ROOT = "<DATA_ROOT>"; powershell -File scripts\run_queue.ps1
 
 ## Known limitations / open items
 
-- **Camera FOV (60 deg horizontal) is an assumption** (the Unreal capture actor default), isolated in `data.camera_hfov_deg`. It sets the focal length for DA3-metric; it needs confirming against the level that rendered the dataset. Depth Pro keeps `f_px: null` (it estimates its own FOV); giving it the derived focal is a one-line registry change.
+- **Camera FOV is 60 deg horizontal, confirmed by the dataset owner (2026-10-17)**, isolated in `data.camera_hfov_deg`. It sets the focal length for DA3-metric. Depth Pro keeps `f_px: null` (it estimates its own FOV); giving it the derived focal is a one-line registry change.
 - **DA3-metric zero-shot is ~25x too small** on nadir views at 70-270 m even with the correct focal: a domain gap, not a unit bug. Only fine-tuning recovers it. ZoeD-K's bin head is bounded (80 m in the released weights; the generated fine-tuning configs use `max_depth: 300` to cover scenes up to ~280 m). Depth Pro and ZoeD-NK also predict ~10x too shallow zero-shot.
 - Shadow-removal init heterogeneity (above); a common start (all from scratch with a real budget) is the fix.
 - `scripts/smoke_all.py` picks the batch from a few-frame smoke with no whole-image scoring pass, so it can choose a batch that OOMs in a real run (4 depth rows did; they were re-run with a smaller batch and a raised `--grad-accum`, same effective batch).
@@ -104,9 +104,9 @@ Checked on the preview dataset (details and the per-location table in [docs/clau
 - **Depth format is fine**: the EXR is planar scene depth in centimetres, with the same convention in train, val and test.
 - **Camera altitude is relative to the first surface hit**, not to the ground (capture actor, `ECC_Visibility` trace). At test loc010/loc011 the centre is a skyscraper roof, so the camera is 70 m above the roof and the street is 152-275 m away; train/val ground sits at 70-160 m (to ~182 m).
 - **Effect on the test split**: test depths (to ~275 m) lie largely outside the training range. This makes the test split harder for a capture reason and explains a large part of the metric-depth test error.
-- **FOV is not stored in the dataset.** The 60 deg assumption is consistent with a car-size estimate over 838 cars (54-63 deg for 4.2-5.0 m cars) but is not proven; confirm against the actor in the level.
-- The dataset owner's questions (FOV, data each model needs, why Restormer/Uformer, the shadow mask) and the answers are in [docs/claude/QA.md](docs/claude/QA.md).
-- For the dataset regeneration: trace to terrain/streets only (or balance the altitude rule across splits) and write per-frame altitude, pose and intrinsics to a JSON (see `SUGGESTIONS.md`).
+- **FOV is not stored in the dataset.** The owner confirmed 60 deg; a car-size estimate over 838 cars (54-63 deg for 4.2-5.0 m cars) agrees. A capture with another FOV must set `data.camera_hfov_deg`.
+- The dataset owner's questions (FOV, data each model needs, why Restormer/Uformer, the shadow mask, BMNet, the altitude rule) and the answers are in [docs/claude/QA.md](docs/claude/QA.md).
+- For the dataset regeneration: the altitude rule is kept (decided with the dataset owner). All three split zones contain skyscrapers; in the preview, none of the 8 train locations happened to fall on a tower while both test locations did, an accident of the small capture that more than 20,000 views remove (see `QA.md`). No per-frame metadata or UE shadow mask is needed: the pose is in the file names, the FOV is always 60 deg, and the derived mask is close to exact (bimodal darkening).
 
 ## Tests
 

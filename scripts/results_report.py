@@ -59,7 +59,7 @@ NOTES = {
              "model is scored under (relative models: per-image fit; metric: none). "
              "`invalid pred` = fraction of pixels with a non-positive prediction (kept in the "
              "metrics, not dropped). `test weights` = which checkpoint was scored (`best`/`last`). "
-             "DA3-metric uses an assumed 60 deg horizontal FOV to derive the focal length. "
+             "DA3-metric derives the focal length from the 60 deg horizontal FOV (confirmed by the dataset owner). "
              "Test depth is deeper than train (median ~208 m vs ~92 m).",
     "superresolution": "PSNR / SSIM on the legacy trainer's definition (Y channel when "
                        "`--use_y_channel`), per whole test image (windowed), averaged over "
@@ -268,9 +268,9 @@ def render(rows: List[Dict[str, Any]], runs_label: str, runs_dir: Path = Path(".
         "The depth shift has a capture cause: the camera altitude is set above the first surface "
         "hit under the location, and both test locations sit on skyscraper roofs, so their "
         "street is 152-275 m away against 70-182 m in train/val (DATASET.md).",
-        "- **FOV**: the capture camera's 60 deg horizontal FOV is an assumption (the Unreal "
-        "actor default; a car-size estimate over 838 cars gives 54-63 deg, consistent but not a "
-        "proof); it sets the focal length that DA3-metric (and Depth Pro, `f_px`) use. "
+        "- **FOV**: the capture camera's horizontal FOV is 60 deg, confirmed by the dataset "
+        "owner on 2026-10-17 (a car-size estimate over 838 cars, 54-63 deg, agrees); it sets "
+        "the focal length that DA3-metric (and Depth Pro, `f_px`) use. "
         "Zero-shot DA3-metric stays far too small on nadir views at 70-270 m (domain gap, not a "
         "unit bug).",
         "- **Shadow-removal inits are heterogeneous**: ShadowFormer starts from ISTD+ "

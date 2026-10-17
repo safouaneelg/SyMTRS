@@ -104,14 +104,20 @@ for a capture reason, not because of the scenes: a large part of the metric-dept
 comes from predicting outside the training range. Val/test gaps for depth must not be read as
 model quality alone.
 
+**Decision (2026-10-17).** The rule is kept. All three split zones contain skyscrapers; here none
+of the 8 train locations fell on a tower while both test locations did, a sampling accident of the
+12-location preview that the regenerated capture (more than 20,000 views) removes. The options
+considered are in `QA.md` ("Keep the altitude rule", "Is a per-split depth check needed?").
+
 ### FOV
 
 The dataset carries no camera intrinsics. The capture actor's default is `FieldOfView = 60`
 (`SyMTRSDatasetCaptureActor.h:97`, `EditAnywhere`, so it can differ per instance in the level);
-the package assumes 60 deg horizontal (`data.camera_hfov_deg`).
+the package uses 60 deg horizontal (`data.camera_hfov_deg`). **Confirmed by the dataset owner on
+2026-10-17: the capture camera's horizontal FOV is always 60 deg** for the SyMTRS capture.
 
 Estimate from the data: 838 car blobs in `train/` (segmentation class car; blob length by PCA,
 median depth of the blob) give a horizontal FOV of 54 / 59 / 63 deg for assumed car lengths of
-4.2 / 4.6 / 5.0 m (IQR about +-3.5 deg); from a 1.85 m width, 55 deg. That is consistent with 60
-and rules out 45, 75 and 90, but it is not a proof of exactly 60. Reading the value off the
-actor instance in the editor is the authoritative check and is still to do.
+4.2 / 4.6 / 5.0 m (IQR about +-3.5 deg); from a 1.85 m width, 55 deg. That agrees with 60
+(and rules out 45, 75 and 90); the owner's confirmation is the authoritative source, the estimate
+is a consistency check. A future capture with a different FOV must set `data.camera_hfov_deg`.

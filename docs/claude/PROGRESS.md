@@ -175,3 +175,4 @@ State: the 96 validation runs are done (step 5); what is left is the PR checklis
   outside train because of the altitude rule (DATASET.md). (e) The SR front-end never wrote `config.yaml`
   for training runs: fixed (it now writes it after the dry-run return); `runs_report.py` lists the 16 earlier SR
   runs from their `summary.json` (marked †) instead of dropping them, so RUNS.md has all 96 runs.
+- 2026-10-17: **FOV confirmed** by the dataset owner (capture camera horizontal FOV always 60 deg); the assumption wording was removed from AGENTS.md, README, the generator header, config.py, the results report and the docs. Default unchanged; the car-size estimate stays as a consistency check.

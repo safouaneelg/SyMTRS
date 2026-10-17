@@ -235,9 +235,9 @@ a number: they change what the number measures.
   `cfg.model_kwargs.focal_px` if `ModelSpec.focal_kwarg` asks for it and if it is empty: it therefore follows
   the resolution automatically, depends neither on the crop nor on the tiles (same pixel size), is recorded
   in the checkpoint and `config.yaml` (so `autoloader` finds it again), and an explicit value wins.
-  The adapter warns if a metric instance is built without a focal length. **HYPOTHESIS TO CONFIRM:**
+  The adapter warns if a metric instance is built without a focal length. **Confirmed by the dataset owner on 2026-10-17 (was a hypothesis):**
   horizontal FOV 60 deg = default value of the capture actor (`FieldOfView = 60.f`,
-  SyMTRSDatasetCaptureActor.h:97), editable per level.
+  SyMTRSDatasetCaptureActor.h:97), editable per level; always 60 for the SyMTRS capture.
   **Real probe:** with the focal length applied, the zero-shot stays ~25x too small (predicted median
   2-9 m against 150 m of GT at 256/512/1024; abs_rel 0.95, d1 = 0). The focal length was necessary
   (without it the output is still ~3x smaller) but is not the main cause: DA3-metric

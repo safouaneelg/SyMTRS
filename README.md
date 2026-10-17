@@ -208,7 +208,7 @@ Each model declares a **protocol**, which decides the loss and what "alignment" 
 | `zoedepth_k` | metric | none | KITTI metric; bounded bins, `model_kwargs.max_depth` (80 = released weights) |
 | `zoedepth_nk` | metric | none | NYU + KITTI heads, learned domain router |
 | `da3_large` | relative | scale | Depth Anything 3 Large |
-| `da3_metric_large` | metric | none | Depth Anything 3, metric head; needs `data.camera_hfov_deg` (assumed 60) |
+| `da3_metric_large` | metric | none | Depth Anything 3, metric head; needs `data.camera_hfov_deg` (60 deg, confirmed by the dataset owner) |
 | `depth_pro` | metric | none | Apple Depth Pro, 1536px, ~1.9GB of weights |
 
 Depth metrics: `rmse`, `mae`, `abs_rel`, `sq_rel`, `d1`, `d2`, `d3`, `silog`.

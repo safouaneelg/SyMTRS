@@ -105,9 +105,11 @@ changing anything.
    returns canonical depth, `metres = canonical * focal_px / 300`; `focal_px` is derived, not
    typed: `build_from_config` sets it to `(resolution / 2) / tan(data.camera_hfov_deg / 2)`
    (1773.6 px at 2048, halving per level; crops and tiles keep it because they keep the pixel
-   size). `data.camera_hfov_deg: 60` is an **assumption** (the capture actor's default
-   `FieldOfView = 60.f`, editable per level): confirm it against the level that rendered the
-   dataset. *ZoeD-K* has a bounded bin head: it cannot predict deeper than
+   size). `data.camera_hfov_deg: 60` is **confirmed**: the dataset owner stated on 2026-10-17 that
+   the capture camera's horizontal FOV is always 60 deg for the SyMTRS capture (a car-size
+   estimate over 838 cars, 54-63 deg, agrees). The actor property (`FieldOfView = 60.f`) is
+   editable per instance and the dataset does not store it, so a future capture with another
+   FOV must set `data.camera_hfov_deg`. *ZoeD-K* has a bounded bin head: it cannot predict deeper than
    `model_kwargs.max_depth` (80 m = what the released weights were trained with; the torch.hub
    entry point wrongly builds 10). The generated fine-tuning configs use 300 to cover the data
    (scenes reach ~280 m); a zero-shot run should keep the default. ZoeD-N/NK heads are

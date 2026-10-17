@@ -18,9 +18,10 @@
 # is derived, never typed: build_from_config sets model_kwargs.focal_px =
 # (resolution / 2) / tan(data.camera_hfov_deg / 2) - 1773.6 px at 2048, half that at
 # 1024, and so on - so it follows the resolution axis, and a crop or a tile keeps it
-# because it keeps the pixel size. data.camera_hfov_deg is an ASSUMPTION: 60 degrees,
-# the capture actor's default (FieldOfView = 60.f), editable per level. Confirm it
-# against the level that rendered the dataset before reading a DA3-metric number.
+# because it keeps the pixel size. data.camera_hfov_deg is 60 degrees, confirmed by
+# the dataset owner (2026-10-17: the SyMTRS capture camera is always 60). The dataset
+# does not store it and the actor property is editable per instance, so a capture
+# with another FOV must set data.camera_hfov_deg.
 #
 # The other three cells of this row are the same file at 1024, 512 and 256, in the
 # sibling folders. `symtrs sweep --task depth --models da3_metric_large` walks them.

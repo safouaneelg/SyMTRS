@@ -383,9 +383,10 @@ DEPTH_MODELS: List[DepthModel] = [
             "is derived, never typed: build_from_config sets model_kwargs.focal_px =\n"
             "(resolution / 2) / tan(data.camera_hfov_deg / 2) - 1773.6 px at 2048, half that at\n"
             "1024, and so on - so it follows the resolution axis, and a crop or a tile keeps it\n"
-            "because it keeps the pixel size. data.camera_hfov_deg is an ASSUMPTION: 60 degrees,\n"
-            "the capture actor's default (FieldOfView = 60.f), editable per level. Confirm it\n"
-            "against the level that rendered the dataset before reading a DA3-metric number."
+            "because it keeps the pixel size. data.camera_hfov_deg is 60 degrees, confirmed by\n"
+            "the dataset owner (2026-10-17: the SyMTRS capture camera is always 60). The dataset\n"
+            "does not store it and the actor property is editable per instance, so a capture\n"
+            "with another FOV must set data.camera_hfov_deg."
         ),
         needs_camera=True,
     ),

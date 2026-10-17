@@ -74,9 +74,10 @@ class DataConfig:
     depth_channel: int = 0
     # Horizontal field of view of the capture camera, in degrees, for the metric models whose
     # output needs the focal length in pixels (Depth Anything 3 metric: metres = canonical
-    # depth * focal_px / 300). ASSUMPTION, not a measurement: 60 is the default of the capture
-    # actor (`FieldOfView = 60.f`, SyMTRSDatasetCaptureActor.h) and it is editable per level, so
-    # confirm it against the level that rendered the dataset. The images are square, so the
+    # depth * focal_px / 300). 60 is confirmed by the dataset owner (2026-10-17: always 60 for
+    # the SyMTRS capture; a car-size estimate over 838 cars, 54-63 deg, agrees). The dataset does
+    # not store it and the actor property (`FieldOfView`) is editable per instance, so a capture
+    # with another FOV must set this. The images are square, so the
     # vertical FOV is the same. `focal_px_for_resolution` turns it into pixels at the data's
     # resolution; cropping and tiling do not change it, because a crop keeps the pixel size.
     camera_hfov_deg: float = 60.0
