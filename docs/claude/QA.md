@@ -256,3 +256,27 @@ more than 20,000 views drawn from zones that all contain skyscrapers, every spli
 tower-top frames, so the check is dropped. The earlier statement that "the splits balance
 largely by themselves" is right for this reason (every zone contains towers), not because the
 split is random: it is not.
+
+### Should the derived shadow masks be computed upfront?
+
+Exporting a shadow mask from UE is still not worth it (see the section above: the derived
+mask is close to what a UE pass would give). Computing the *derived* masks once is worth it,
+for time and not for quality. Deriving one costs about 1 s per 2048 px pair (0.7 s decoding
+the two PNGs, 0.3 s the derivation), and the result is deterministic. Until now every run
+re-derived it into its own `<run_dir>/staging/<split>/mask/`: at the planned 20,000+ views
+that is about 5.5 h single-threaded, paid again by each of the four shadow-removal models and
+by the shadow2noshadow translators' scoring.
+
+Now there is one shared cache (`shadow.mask_cache`, default `.cache/shadow_masks`, gitignored),
+keyed by data root and by `mask_threshold` / `mask_open`, with a sidecar per mask recording the
+size and mtime of the two source files. A regenerated pair, or another threshold (the 0.05 / 0.2
+sensitivity runs), recomputes only what changed. It is filled in parallel (`shadow.mask_workers`,
+default half the cores up to 8, because this laptop blue-screens under combined CPU and GPU
+load), written atomically, and never written into the dataset (a cache inside the data root is
+refused). `scripts/precompute_shadow_masks.py` fills it for whole splits before any run.
+
+Measured on the 144-view preview (train 96, val 24, test 24; CPU only, 8 workers): 35.2 s for
+all 144 masks (about 0.24 s per pair wall-clock), and 0.2 s on the second invocation, which
+computed 0. The 48 masks that existing runs had already staged for val and test are
+byte-identical to the cached ones. At 20,000 views the same pool is roughly an hour once,
+instead of hours per run.

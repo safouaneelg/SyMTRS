@@ -242,7 +242,10 @@ def run_shadow_removal(
     scored = [split] if split else [cfg.data.val_split, cfg.data.test_split]
     wanted = ([cfg.data.split] if mode == "finetune" else []) + scored
     for name in dict.fromkeys(wanted):
-        stage_split(cfg.data.root, str(run_dir), name, shadow.mask_threshold, shadow.mask_open)
+        stage_split(
+            cfg.data.root, str(run_dir), name, shadow.mask_threshold, shadow.mask_open,
+            cache=shadow.mask_cache, workers=shadow.mask_workers,
+        )
 
     summary: Dict[str, Any] = {
         "run_dir": str(run_dir),

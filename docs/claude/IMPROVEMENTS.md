@@ -578,3 +578,34 @@ a number: they change what the number measures.
   (`<DATA_ROOT>`/`<REPO>`). A directory with neither file is named on stderr; directories starting
   with `_` are skipped. The 16 old runs were not given a fabricated `config.yaml`. `RUNS.md` now
   reports 96 runs.
+
+
+## Derived shadow masks are computed once and shared by every run (2026-10-17)
+
+- **Why.** `stage_split` re-derived the masks into each run's staging: ~1 s per 2048 px pair
+  (0.7 s reading the PNGs, 0.3 s `derive_mask`), so at 20,000+ views every shadow run (4
+  shadow-removal models and the shadow2noshadow translators' scoring) spent ~5.5 h on the same
+  deterministic result.
+- **Cache.** New `symtrs/model/shadow/mask_cache.py`: `<cache>/<data-root name>-<hash>/thr<t>_open<k>/<split>/<key>.png`
+  plus a `<key>.json` sidecar with the resolved path, size and `mtime_ns` of both sources. A mask
+  is valid only while those match, so a regenerated dataset or a changed setting recomputes just
+  what changed. Writes are atomic (temp file + `os.replace`; the sidecar is removed before a
+  rewrite and written last). A cache inside the data root is refused.
+- **Config.** `shadow.mask_cache` (default `.cache/shadow_masks`, "" = old per-run behaviour,
+  resolved by `RunConfig.anchored()`) and `shadow.mask_workers` (default `min(8, cores // 2)`,
+  0/1 = serial) in `symtrs/config.py`.
+- **Staging.** `stage_split(..., cache=, workers=)` links the cached masks into
+  `<run_dir>/staging/<split>/mask/` (`link_file`), so the worker's layout is unchanged;
+  `mask_params.json` also records the cache folder (or "" when derived into the run). Both
+  callers (shadow runner, domain runner's shadow2noshadow scoring) pass the config values.
+- **Precompute.** `scripts/precompute_shadow_masks.py --data-root ... --splits train,val,test`
+  calls the same `mask_cache.precompute` and prints cached / computed / invalidated and the time.
+  On the 144-view preview: 35.2 s with 8 workers, 0.2 s and 0 computed on the second run; the 48
+  val/test masks from `runs/validation/shadowformer/staging` are byte-identical to the cached ones.
+- **Tests.** `tests/test_shadow_mask_cache.py` (18): no recomputation on the second staging nor in
+  another run dir, bit-identity with a direct `derive_mask`, settings folders, per-pair
+  invalidation (content and mtime), counts, nothing written under the data root, cache-in-dataset
+  refused, two roots do not share, disabled cache, no write-through into the cache, atomic-write
+  failure, torn PNG, parallel == serial, config defaults and anchoring. Two existing
+  `test_domain_commands.py` scoring tests now point `shadow.mask_cache` at their tmp dir so tests
+  never fill the repo's own cache.

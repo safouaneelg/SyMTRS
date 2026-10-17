@@ -98,7 +98,7 @@ def test_shadow_worker_gets_absolute_config_and_weights(
     monkeypatch.setattr(runner, "score_split", lambda cfg, run_dir, split: {})
     staged = []
     monkeypatch.setattr(
-        staging, "stage_split", lambda root, run_dir, name, *a: staged.append((root, run_dir, name))
+        staging, "stage_split", lambda root, run_dir, name, *a, **kw: staged.append((root, run_dir, name))
     )
 
     runner.run_shadow_removal(_shadow_cfg(), mode="finetune", checkpoint=os.path.join("ckpt", "best.pt"))

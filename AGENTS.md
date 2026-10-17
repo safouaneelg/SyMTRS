@@ -43,7 +43,11 @@ removal is a third case, below):
 **Shadow removal** takes only the network *class* from four upstream checkouts under
 `third_party/` (pinned in `third_party/PINS.md`, cloned by `python scripts/fetch_third_party.py`,
 gitignored). `symtrs/model/shadow/` stages `rgb_day`/`rgb_noshadow` pairs plus a *derived* shadow
-mask (the dataset has none; `shadow.mask_threshold`/`mask_open`), runs one shared worker loop
+mask (the dataset has none; `shadow.mask_threshold`/`mask_open`; derived once per pair and settings into the shared,
+gitignored `shadow.mask_cache` (`.cache/shadow_masks`, valid while the sources' size/mtime match,
+filled by `shadow.mask_workers` processes, never inside the dataset) and only linked into each run,
+see `symtrs/model/shadow/mask_cache.py`; `python scripts/precompute_shadow_masks.py --data-root
+<root>` builds them upfront), runs one shared worker loop
 (`python -m symtrs.model.shadow.worker`, cwd = the upstream repo, so paths must be absolute),
 and scores the written PNGs with `symtrs/metrics/shadow.py` (PSNR/SSIM/LAB on all, shadow and
 non-shadow pixels). 2048 only; zero-shot is refused (the released weights are ISTD/SIDD, not

@@ -16,6 +16,7 @@ Override keys may be dotted paths into the nested dataclasses, e.g.
 from __future__ import annotations
 
 import copy
+import os
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
@@ -250,10 +251,24 @@ class ShadowConfig:
     init_weights: str = ""
     # Skip the final full-image prediction / scoring (smoke tests of the training loop).
     skip_final_eval: bool = False
+    # Where the derived masks are kept, shared by every run. Deriving one costs ~1 s per 2048 px
+    # pair and is a pure function of the pair and of mask_threshold / mask_open, so at 20,000+
+    # views re-deriving it in every run (4 shadow models + the shadow2noshadow translators) is
+    # hours of identical work. Entries are keyed by data root and settings and invalidated by
+    # the source files' size/mtime (see symtrs/model/shadow/mask_cache.py). Relative paths are
+    # resolved against the caller's cwd (`anchored`); .cache is gitignored; the folder must not
+    # be inside the dataset. "" turns the cache off: each run derives its own masks.
+    mask_cache: str = ".cache/shadow_masks"
+    # Processes that fill missing masks. Bounded on purpose: the development laptop
+    # blue-screens under combined CPU + GPU load, so this is half the cores, at most 8.
+    # 0 or 1 = serial.
+    mask_workers: int = field(default_factory=lambda: max(1, min(8, (os.cpu_count() or 2) // 2)))
 
     def validate(self) -> None:
         if not 0.0 < self.mask_threshold < 1.0:
             raise ConfigError("shadow.mask_threshold must be in (0, 1)")
+        if self.mask_workers < 0:
+            raise ConfigError("shadow.mask_workers must be >= 0 (0 or 1 = serial)")
         if self.mask_open < 0 or self.iterations < 0 or self.val_every < 0 or self.val_crops < 0:
             raise ConfigError(
                 "shadow.mask_open, iterations, val_every and val_crops must not be negative"
@@ -334,6 +349,7 @@ class RunConfig:
         for owner, name in (
             (cfg.data, "root"),
             (cfg.shadow, "init_weights"),
+            (cfg.shadow, "mask_cache"),
             (cfg.train, "resume"),
         ):
             value = getattr(owner, name)

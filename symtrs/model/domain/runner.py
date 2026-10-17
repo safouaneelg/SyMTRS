@@ -490,7 +490,8 @@ def score_shadow_removal(
     split = cfg.data.test_split
     # Same staging as shadow removal: input/ target/ mask/ beside the testA/testB links.
     staging = stage_split(
-        cfg.data.root, str(run_dir), split, cfg.shadow.mask_threshold, cfg.shadow.mask_open
+        cfg.data.root, str(run_dir), split, cfg.shadow.mask_threshold, cfg.shadow.mask_open,
+        cache=cfg.shadow.mask_cache, workers=cfg.shadow.mask_workers,
     )
     keys = staged_keys(staging)
 

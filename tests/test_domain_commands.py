@@ -470,7 +470,10 @@ def test_scoring_without_real_target_images_is_an_error(tmp_path: Path) -> None:
     root = _shadow_root(tmp_path, count=1, size=16)
     run = tmp_path / "run"
     cfg = RunConfig(task="domain_adapt", model="cyclegan", resolution=2048).with_overrides(
-        {"data.root": str(root), "out_dir": str(run)}
+        {
+            "data.root": str(root), "out_dir": str(run),
+            "shadow.mask_cache": str(tmp_path / "mask_cache"),
+        }
     )
     task = runner.DomainAdaptation(direction="night2day", name="run")
     task.run_test = lambda **kwargs: None  # upstream is not launched here
@@ -516,7 +519,10 @@ def test_the_paired_scoring_runs_the_shadow_removal_metrics_on_a_resampled_outpu
     root = _shadow_root(tmp_path, count=2, size=64)
     run = tmp_path / "run"
     cfg = RunConfig(task="domain_adapt", model="pix2pix", resolution=2048).with_overrides(
-        {"data.root": str(root), "out_dir": str(run), "eval.num_visualizations": 0}
+        {
+            "data.root": str(root), "out_dir": str(run), "eval.num_visualizations": 0,
+            "shadow.mask_cache": str(tmp_path / "mask_cache"),  # never the repo's own cache
+        }
     )
     task = runner.DomainAdaptation(direction="shadow2noshadow", name="run")
     images = task.generated_dir(str(run), "test")
@@ -550,7 +556,10 @@ def test_the_paired_scoring_names_missing_generated_images(tmp_path: Path) -> No
     root = _shadow_root(tmp_path, count=2, size=64)
     run = tmp_path / "run"
     cfg = RunConfig(task="domain_adapt", model="pix2pix", resolution=2048).with_overrides(
-        {"data.root": str(root), "out_dir": str(run)}
+        {
+            "data.root": str(root), "out_dir": str(run),
+            "shadow.mask_cache": str(tmp_path / "mask_cache"),
+        }
     )
     task = runner.DomainAdaptation(direction="shadow2noshadow", name="run")
     task.generated_dir(str(run), "test").mkdir(parents=True)
@@ -627,7 +636,10 @@ def test_a_partial_translation_of_the_split_is_an_error(tmp_path: Path) -> None:
     root = _shadow_root(tmp_path, count=2, size=16)
     run = tmp_path / "run"
     cfg = RunConfig(task="domain_adapt", model="cyclegan", resolution=2048).with_overrides(
-        {"data.root": str(root), "out_dir": str(run)}
+        {
+            "data.root": str(root), "out_dir": str(run),
+            "shadow.mask_cache": str(tmp_path / "mask_cache"),
+        }
     )
     task = runner.DomainAdaptation(direction="night2day", name="run")
     task.run_test = lambda **kwargs: None  # upstream is not launched here

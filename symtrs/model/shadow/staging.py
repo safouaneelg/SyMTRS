@@ -15,7 +15,9 @@ copy) - the same staging primitive domain adaptation uses. The dataset's PNGs ar
 are converted to RGB by the reader, never rewritten here.
 
 The mask does not exist in the dataset; `symtrs.metrics.shadow.derive_mask` derives it from
-the pair. It is written once and reused until `shadow.mask_threshold` / `shadow.mask_open`
+the pair. With `shadow.mask_cache` set it is derived once per (pair, settings) for every run
+(`mask_cache.py` says why, and how a stale one is detected) and only linked here. Without it
+the mask is written into the run and reused until `shadow.mask_threshold` / `shadow.mask_open`
 change, which `mask_params.json` records, because a stale mask would silently keep the old
 regional metrics.
 """
@@ -68,13 +70,24 @@ def pairs_for(root: str, split: str) -> List[Tuple[str, Path, Path]]:
 
 
 def stage_split(
-    root: str, run_dir: str, split: str, threshold: float, open_size: int
+    root: str,
+    run_dir: str,
+    split: str,
+    threshold: float,
+    open_size: int,
+    *,
+    cache: str = "",
+    workers: int = 0,
 ) -> Path:
-    """Build `<run_dir>/staging/<split>` and return it. Idempotent."""
-    import numpy as np
-    from PIL import Image
+    """Build `<run_dir>/staging/<split>` and return it. Idempotent.
 
-    from symtrs.metrics.shadow import derive_mask
+    `cache` is `shadow.mask_cache`: with a folder, the masks come from the shared cache
+    (`mask_cache.ensure_masks`) and are only linked here; with "" every run derives its own
+    into `mask/` as it did before the cache existed. `workers` is `shadow.mask_workers`.
+    The empty-string and zero here mean "feature off" for a caller that has no config; the
+    defaults a run actually uses live in `symtrs.config.ShadowConfig`.
+    """
+    from symtrs.model.shadow import mask_cache
 
     pairs = pairs_for(root, split)
     staging = Path(run_dir) / "staging" / split
@@ -91,33 +104,44 @@ def stage_split(
         methods.add(link_file(day.resolve(), staging / "input" / f"{key}.png"))
         methods.add(link_file(clean.resolve(), staging / "target" / f"{key}.png"))
 
-    params = {"threshold": threshold, "open": open_size, "keys": [k for k, _, _ in pairs]}
+    params = {
+        "threshold": threshold,
+        "open": open_size,
+        "keys": [k for k, _, _ in pairs],
+        # Where the masks came from, so the file stays truthful when a run dir is reused with
+        # the cache turned on or off ("" = derived into this run).
+        "cache": str(mask_cache.cache_dir_for(cache, root, split, threshold, open_size))
+        if cache
+        else "",
+    }
     params_path = staging / "mask_params.json"
-    cached = None
-    if params_path.is_file():
-        try:
-            cached = json.loads(params_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            cached = None
-    complete = all((staging / "mask" / f"{k}.png").is_file() for k, _, _ in pairs)
-    if cached != params or not complete:
-        print(
-            f"[symtrs] deriving {len(pairs)} shadow masks for {split} "
-            f"(threshold={threshold}, open={open_size})"
+    mask_dir = staging / "mask"
+    if cache:
+        folder, counts = mask_cache.ensure_masks(
+            pairs, root, split, threshold, open_size, cache, workers
         )
-        for key, day, clean in pairs:
-            a = np.asarray(Image.open(day).convert("RGB"), dtype=np.float32) / 255.0
-            b = np.asarray(Image.open(clean).convert("RGB"), dtype=np.float32) / 255.0
-            if a.shape != b.shape:
-                raise ShadowStagingError(
-                    f"{key}: rgb_day is {a.shape[1]}x{a.shape[0]} but rgb_noshadow is "
-                    f"{b.shape[1]}x{b.shape[0]}; the pair is not aligned"
-                )
-            mask = derive_mask(a, b, threshold, open_size)
-            Image.fromarray(mask.astype(np.uint8) * 255, mode="L").save(
-                staging / "mask" / f"{key}.png"
+        print(
+            f"[symtrs] shadow masks {split} (threshold={threshold}, open={open_size}): "
+            f"{counts.cached} cached, {counts.computed} computed "
+            f"({counts.invalidated} stale) <- {folder}"
+        )
+        for key, _, _ in pairs:
+            methods.add(link_file((folder / f"{key}.png").resolve(), mask_dir / f"{key}.png"))
+    else:
+        cached = None
+        if params_path.is_file():
+            try:
+                cached = json.loads(params_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                cached = None
+        complete = all((mask_dir / f"{k}.png").is_file() for k, _, _ in pairs)
+        if cached != params or not complete:
+            print(
+                f"[symtrs] deriving {len(pairs)} shadow masks for {split} "
+                f"(threshold={threshold}, open={open_size})"
             )
-        params_path.write_text(json.dumps(params), encoding="utf-8")
+            mask_cache.derive_into(pairs, mask_dir, threshold, open_size, workers)
+    params_path.write_text(json.dumps(params), encoding="utf-8")
 
     print(
         f"[symtrs] staged {split}: {len(pairs)} pairs "
