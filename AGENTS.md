@@ -110,9 +110,11 @@ changing anything.
    unbounded and refuse the key. ZoeD-N is kept out of float16 inside the adapter (it
    produced NaN under fp16 autocast).
 
-4. **Six segmentation classes, `ignore_index: 255`.** Both are recorded in the checkpoint.
-   If the mask generator ever writes `0` for "no class", change `data.ignore_index` — never
-   make the metric guess which pixels to ignore.
+4. **Five segmentation classes, `ignore_index: 255`.** Background, building, green, road,
+   car (`data.num_classes: 5`); the masks store `class_id * data.label_step` (63) as 8-bit
+   gray, and an off-grid gray value decodes to the ignore index. All three are recorded in the
+   checkpoint. If the mask generator ever writes `0` for "no class", change
+   `data.ignore_index` — never make the metric guess which pixels to ignore.
 
 5. **`rgb_night` and `rgb_noshadow` are native-only.** There is no downsampled night or
    shadow-free imagery, which is why

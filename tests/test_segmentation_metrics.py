@@ -184,15 +184,16 @@ def test_reset_clears_the_accumulation():
     assert float(matrix.matrix.sum()) == 0.0
 
 
-def test_six_class_report_names_every_class():
-    """The dataset has six classes; the report is what a reader checks a run against."""
-    matrix = ConfusionMatrix(num_classes=6, ignore_index=255)
-    matrix.update(torch.arange(6), torch.arange(6))
-    report = matrix.format_report(["ground", "road", "building", "veg", "water", "sky"])
+def test_five_class_report_names_every_class():
+    """The capture has five classes; the report is what a reader checks a run against."""
+    names = ["background", "building", "green", "road", "car"]
+    matrix = ConfusionMatrix(num_classes=5, ignore_index=255)
+    matrix.update(torch.arange(5), torch.arange(5))
+    report = matrix.format_report(names)
 
     assert "miou" not in report  # the table spells it "mIoU"
     assert "mIoU" in report and "pixel_acc" in report
-    for name in ("ground", "road", "building", "veg", "water", "sky"):
+    for name in names:
         assert name in report, name
     # Every class was predicted perfectly, so mIoU is 1 and the per-class rows say so.
     assert matrix.miou() == pytest.approx(1.0, abs=1e-9)

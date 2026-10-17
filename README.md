@@ -215,7 +215,8 @@ Depth metrics: `rmse`, `mae`, `abs_rel`, `sq_rel`, `d1`, `d2`, `d3`, `silog`.
 
 ### Segmentation
 
-**The dataset has 6 classes**, and any pixel labelled `255` is the ignore index — excluded
+**The dataset has 5 classes** (background, building, green, road, car; stored as
+`class_id * 63` gray, `data.label_step`), and any pixel labelled `255` is the ignore index — excluded
 from both the loss and the confusion matrix. Both the class count and the ignore index are
 recorded in the checkpoint, so a model cannot later be scored against a differently
 labelled mask set by accident.
@@ -269,7 +270,7 @@ symtrs <command> [options]
 symtrs train --task depth --model midas_dpt_hybrid --resolution 2048 --data-root /data/SyMTRS
 symtrs train --task depth --model midas_dpt_hybrid --resolution 1024 --data-root /data/SyMTRS
 
-# segmentation, 6 classes
+# segmentation, 5 classes
 symtrs train --task segmentation --model segformer_b2 --resolution 2048 --data-root /data/SyMTRS
 
 # super-resolution: --resolution names the input scale, the factor is derived (2048 -> x1)

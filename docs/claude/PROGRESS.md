@@ -12,8 +12,8 @@ dataset preview (144 transforms, 96/24/24). Pas de convergence recherchée ; auc
 | 0b Pré-téléchargement (pip, poids, repos tiers) | fait | ~13,6 GB, builds offline OK |
 | 1 Data loader D1–D6 | fait | 486 tests OK, doctor : appariement 100 % |
 | 2 Portage view_dataset | fait (tests OK) | `symtrs view`, `notebooks/view_dataset.ipynb` |
-| 3 Tâche shadow_removal | fait (dummy) | 3 modèles, 12 tests ; réel = smoke en cours |
-| 4 Smoke tests | en cours | `scripts/smoke_all.py` |
+| 3 Tâche shadow_removal | fait | 3 modèles ; smoke réel OK ; référence identité (test 12,4 dB) |
+| 4 Smoke tests | fait (passes 3-5) | 95/95 configs ; voir journal 2026-10-17 06:48 / 08:00 |
 | 5 Runs courtes (file `runs/queue.txt`) | à faire | |
 
 ## Journal
@@ -105,3 +105,16 @@ dataset preview (144 transforms, 96/24/24). Pas de convergence recherchée ; auc
   vérifiés en échec sur l'ancien code). Passe 2 arrêtée (code intermédiaire, archivée
   `runs/smoke_pass2_partial/`). **Passe 3 propre** lancée sur le code final (95 configs) →
   `logs/smoke_all_pass3_*.log`, horodatage début/fin dans `logs/smoke_pass3_start.txt`.
+- 2026-10-17 06:48 : **passe 3 terminée** : 1 h 39 de mur (05:09 → 06:48), 94 min de calcul cumulé,
+  pas de veille. 95/95 « ok » **mais vérification critique : faux**. 13/16 SR avaient échoué (OOM
+  entraînement sur images 2048 entières, SwinIR x1 OOM à la construction, SRGAN x1 `ValueError`) et
+  `symtrs train` sortait en 0 → jamais détecté ni réduit en batch ; pix2pix `night2day`/`noshadow2shadow`
+  avec `test: {}` ; CycleGAN `night2day`/`noshadow2shadow` scoraient la traduction opposée (`fake_A`).
+  Constats sains : depth/seg/shadow plausibles ; métriques profondeur métrique ~10x trop proches en
+  zero-shot (écart de domaine, à revérifier après fine-tuning) ; `iou_0` = null attendu (classe absente).
+  2 agents Sonnet (SR, domain) + 1 revue indépendante du diff SR ; correctifs + tests (703).
+- 2026-10-17 08:00 : **passe 4** (SR + domain, 07:24 → 08:00) : domain 8/8 ok (BtoA : 24 images
+  générées, KID cohérents) ; SR 14/16, `autoencoder_x4/x8` OOM en évaluation (le réseau tourne à la
+  taille cible) → fenêtre d'éval plafonnée à 1024 px cible (`eval_hr_window`). Corrections de la revue
+  (clamp [0,1] avant métriques, `best_psnr` conservé au resume, crop trop grand = erreur, `summary.json`
+  périmé supprimé avant relance). Commit `4f9769e`. **Passe 5** = re-smoke des 16 SR sur ce code.
