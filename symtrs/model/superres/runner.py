@@ -234,14 +234,24 @@ class SuperResolution:
             "--adv_weight", str(self.adv_weight),
         ]
 
-        # The script only implements AMP and gradient checkpointing for SwinIR, and only
-        # crops pairs for SwinIR, so those flags are passed with the same restriction
-        # rather than implying they apply everywhere.
+        # Crops are for every model: a 2048 px frame does not fit a 12 GB card for any of
+        # them (SRCNN's first activation alone was 31.75 GiB at batch 16), and the trainer
+        # used to crop SwinIR only. `train.patch_size` is the LR patch; the HR patch is
+        # `patch_size * scale`. Evaluation never inherits it: `val_patch_size: 0` is the
+        # whole image, scored in `eval.tile_size` windows when one pass does not fit.
+        if cfg.train.patch_size > 0:
+            command += ["--patch_size", str(cfg.train.patch_size)]
+        if cfg.train.val_patch_size > 0:
+            command += ["--val_patch_size", str(cfg.train.val_patch_size)]
+        if cfg.eval.tile_size > 0:
+            command += [
+                "--eval_tile_size", str(cfg.eval.tile_size),
+                "--eval_tile_overlap", str(cfg.eval.tile_overlap),
+            ]
+
+        # The script only implements AMP and gradient checkpointing for SwinIR, so those
+        # flags are passed with that restriction rather than implying they apply everywhere.
         if self.model_name == "swinir":
-            if cfg.train.patch_size > 0:
-                command += ["--patch_size", str(cfg.train.patch_size)]
-            if cfg.train.val_patch_size > 0:
-                command += ["--val_patch_size", str(cfg.train.val_patch_size)]
             if cfg.train.amp:
                 command += ["--amp"]
             if self.swinir_checkpoint:
@@ -260,6 +270,22 @@ class SuperResolution:
 
         if cfg.train.resume:
             command += ["--weights", cfg.train.resume]
+
+        # Validation comes from the dataset's own `val/` (ground rule 6). Without it the
+        # trainer would carve 20% out of `train/`, which is what it did before this flag
+        # existed; that fallback stays reachable only by running the legacy script by hand.
+        # From here it is an error: a checkpoint chosen on frames it trained next to is not
+        # a number this package reports.
+        if not eval_only:
+            val_lr, val_hr = expected_test_dirs(root, cfg.data.val_split, cfg.resolution)
+            if not (val_lr.is_dir() and val_hr.is_dir()):
+                raise SuperResolutionError(
+                    f"the {cfg.data.val_split} split has no {val_lr} or no {val_hr}. The legacy "
+                    f"trainer would carve its validation set out of {cfg.data.split}/ instead, "
+                    "which AGENTS.md ground rule 6 forbids. Check --data-root with "
+                    "`symtrs doctor --data-root <root>`."
+                )
+            command += ["--val_lr_root", str(val_lr), "--val_hr_root", str(val_hr)]
 
         if with_test:
             test_lr, test_hr = expected_test_dirs(root, cfg.data.test_split, cfg.resolution)
@@ -373,19 +399,47 @@ def run_super_resolution(cfg: RunConfig, mode: str = "finetune", dry_run: bool =
         print("[symtrs] " + " ".join(command))
         return summary_from_run(cfg, run_dir, 0, command, mode=mode)
 
+    # The trainer rewrites this file when it scores the test split. A stale one from an
+    # earlier run in the same directory would otherwise be folded into the summary of a run
+    # that scored nothing.
+    (run_dir / "test_metrics.json").unlink(missing_ok=True)
+    # Same for a training run's summary: if this run fails, an older success left beside
+    # `summary_failed.json` would still read as finished to `run_queue` and `symtrs tables`.
+    # Re-scoring (`eval_only`) keeps it - the trained run it describes is still valid.
+    if not eval_only:
+        (run_dir / "summary.json").unlink(missing_ok=True)
+
     print(f"[symtrs] launching: {' '.join(command)}")
     completed = subprocess.run(command)
     summary = summary_from_run(cfg, run_dir, completed.returncode, command, mode=mode)
+
+    if completed.returncode != 0:
+        # The partial record goes to `summary_failed.json`, NOT `summary.json`: the queue
+        # (`scripts/run_queue.py`) treats an existing summary.json as "done" and skips the run
+        # forever, and `symtrs tables` would print a row for a run that never finished. The
+        # record is still written because the command line and return code are the first
+        # things you want when reading the log. Raising makes `symtrs train` exit non-zero,
+        # as the domain and shadow runners already do.
+        failed = run_dir / "summary_failed.json"
+        failed.write_text(json_dumps_safe(summary, indent=2) + "\n", encoding="utf-8")
+        raise SuperResolutionError(
+            f"{TRAIN_MODULE} exited with code {completed.returncode}; its own output is above. "
+            f"The command and return code are in {failed}. If it reports an out-of-memory "
+            "error, lower train.batch_size or train.patch_size (the crop, in LR pixels) when it "
+            "happened in training, or eval.tile_size when it happened scoring a whole image."
+        )
+
+    if mode == "eval" and "test" not in summary:
+        raise SuperResolutionError(
+            f"{TRAIN_MODULE} exited 0 but wrote no {run_dir / 'test_metrics.json'}, so nothing "
+            f"was scored. Check that {cfg.data.root}/{cfg.data.test_split} holds both "
+            f"rgb_day and the resolution-{cfg.resolution} folder (`symtrs doctor --data-root "
+            f"{cfg.data.root}`)."
+        )
+
     (run_dir / "summary.json").write_text(
         json_dumps_safe(summary, indent=2) + "\n", encoding="utf-8"
     )
-
-    if completed.returncode != 0:
-        print(
-            f"[symtrs] {TRAIN_MODULE} exited with {completed.returncode}; "
-            f"see the output above. Partial results are in {run_dir}"
-        )
-        return summary
 
     if "test" in summary:
         test = summary["test"]

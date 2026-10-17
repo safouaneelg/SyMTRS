@@ -696,10 +696,12 @@ def test_command(
 
     `--model cycle_gan --dataset_mode unaligned` rather than upstream's `--model test`:
     the unaligned dataset loads both domains, so CycleGAN's own `get_current_visuals()`
-    writes `fake_B` *and* `fake_A` into `results/<name>/<phase>_<epoch>/images/`, and the
-    SyMTRS score can pick the side the direction actually generated. `--num_test` is
-    raised out of the way because upstream defaults it to 50 and silently truncates a
-    larger test split.
+    writes `fake_A` *and* `fake_B` (plus `real_*`, `rec_*`) into
+    `results/<name>/<phase>_<epoch>/images/`. The requested translation is `fake_B` in
+    both directions: `--direction BtoA` swaps the *inputs* in `set_input` and `fake_B` is
+    still `G(real_A)`, while `fake_A` is the opposite translation; see
+    `symtrs.model.domain.runner.GENERATED_LABEL`. `--num_test` is raised out of the way
+    because upstream defaults it to 50 and silently truncates a larger test split.
     """
     command = [
         sys.executable, str(upstream / "test.py"),

@@ -140,13 +140,26 @@ def test_a_missing_trainer_is_named_with_its_fix(monkeypatch, layout: Path) -> N
 def test_test_roots_are_skipped_when_the_split_is_absent(tmp_path: Path, capsys) -> None:
     """A training run without a test split still runs - but it has to say so."""
     root = tmp_path / "no-test"
-    (root / "train" / "rgb_day").mkdir(parents=True)
-    (root / "train" / "rgb_day_lr" / "x4").mkdir(parents=True)
+    for split in ("train", "val"):
+        (root / split / "rgb_day").mkdir(parents=True)
+        (root / split / "rgb_day_lr" / "x4").mkdir(parents=True)
 
     command = build_model("srcnn").train_command(_config(root), root / "run")
 
     assert "--test_lr_root" not in command
     assert "validation number only" in capsys.readouterr().out
+
+
+def test_missing_val_split_is_fatal_when_training(tmp_path: Path) -> None:
+    """Without `val/` the legacy trainer would carve validation out of `train/` (rule 6)."""
+    root = tmp_path / "no-val"
+    for split in ("train", "test"):
+        (root / split / "rgb_day").mkdir(parents=True)
+        (root / split / "rgb_day_lr" / "x4").mkdir(parents=True)
+
+    with pytest.raises(SuperResolutionError) as excinfo:
+        build_model("srcnn").train_command(_config(root), root / "run")
+    assert "ground rule 6" in str(excinfo.value)
 
 
 def test_missing_test_split_is_fatal_when_scoring(tmp_path: Path) -> None:
@@ -163,7 +176,10 @@ def test_missing_test_split_is_fatal_when_scoring(tmp_path: Path) -> None:
 
 
 def test_swinir_flags_are_confined_to_swinir(layout: Path) -> None:
-    """The script implements crops and AMP for SwinIR only; passing them elsewhere lies."""
+    """The script implements AMP and gradient checkpointing for SwinIR only; passing them elsewhere lies.
+
+    Crops are NOT in this list any more: every model trains on them (see test_superres_training.py).
+    """
     srcnn = build_model("srcnn").train_command(_config(layout), layout / "run")
     swinir = build_model("swinir").train_command(
         _config(layout, model="swinir"), layout / "run"

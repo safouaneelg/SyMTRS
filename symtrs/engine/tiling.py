@@ -204,6 +204,7 @@ def predict_tiled(
     match_affine: bool = False,
     match: str = "none",
     stats: Optional[Dict[str, int]] = None,
+    scale: int = 1,
 ) -> torch.Tensor:
     """Run `forward_fn` over overlapping windows and stitch the results.
 
@@ -222,9 +223,15 @@ def predict_tiled(
         stats: if given, incremented in place with `windows` (windows placed), `matched` (fitted
             at all), `fallbacks` (fitted, but degraded: flat/uncorrelated overlap, clamped slope)
             and `unmatched` (overlap too small or degenerate: left on its own scale).
+        scale: how much larger than its window the network's answer is. 1 for every dense-prediction
+            task (depth, segmentation, shadow removal). Super-resolution passes its upscale factor:
+            windows are laid out and overlapped in INPUT pixels, `forward_fn` returns
+            `[1, K, scale * h, scale * w]`, and the stitched field is `scale * H` by `scale * W`.
+            A window whose answer has any other size is refused rather than resized, because
+            stretching it would blend a misregistered tile into its neighbours.
 
     Returns:
-        `[B, K, H, W]` in whatever space `forward_fn` produces.
+        `[B, K, scale * H, scale * W]` in whatever space `forward_fn` produces.
     """
     if image.dim() == 3:
         image = image.unsqueeze(0)
@@ -234,32 +241,44 @@ def predict_tiled(
         match = "affine"
     if match not in MATCH_MODES:
         raise ValueError(f"unknown match mode {match!r}; expected one of {MATCH_MODES}")
+    if scale < 1:
+        raise ValueError("scale must be a positive integer")
     if stats is None:
         stats = {}
     for key in ("windows", "matched", "fallbacks", "unmatched"):
         stats.setdefault(key, 0)
 
     height, width = image.shape[-2:]
+    out_height, out_width = height * scale, width * scale
     outputs = []
     for batch_index in range(image.shape[0]):
         single = image[batch_index : batch_index + 1]
         accumulator = None
         weights = None
 
-        for top, left, tile_h, tile_w in tile_grid(height, width, tile_size, overlap):
-            tile = single[..., top : top + tile_h, left : left + tile_w]
+        for in_top, in_left, tile_h, tile_w in tile_grid(height, width, tile_size, overlap):
+            tile = single[..., in_top : in_top + tile_h, in_left : in_left + tile_w]
             prediction = forward_fn(tile)
             if prediction.dim() == 3:
                 prediction = prediction.unsqueeze(1)
+            # Everything below is in OUTPUT pixels (identical to input pixels when scale == 1).
+            top, left, tile_h, tile_w = in_top * scale, in_left * scale, tile_h * scale, tile_w * scale
+            if scale > 1 and tuple(prediction.shape[-2:]) != (tile_h, tile_w):
+                raise ValueError(
+                    f"forward_fn returned {tuple(prediction.shape[-2:])} for a window that should "
+                    f"come back as {(tile_h, tile_w)} (scale {scale}); an upscaling network must "
+                    "return exactly scale x its input, so fix forward_fn instead of resizing"
+                )
             prediction = _resize(prediction, (tile_h, tile_w)).float()
 
             if accumulator is None:
                 channels = prediction.shape[1]
                 accumulator = torch.zeros(
-                    (1, channels, height, width), device=prediction.device, dtype=prediction.dtype
+                    (1, channels, out_height, out_width),
+                    device=prediction.device, dtype=prediction.dtype,
                 )
                 weights = torch.zeros(
-                    (1, 1, height, width), device=prediction.device, dtype=prediction.dtype
+                    (1, 1, out_height, out_width), device=prediction.device, dtype=prediction.dtype
                 )
 
             window = hann_window(tile_h, tile_w, device=prediction.device, dtype=prediction.dtype)

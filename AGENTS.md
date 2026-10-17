@@ -35,7 +35,10 @@ removal is a third case, below):
   ShadowFormer / Restormer / Uformer in `symtrs tables`.
 - **super-resolution** runs the trainer at `symtrs/legacy/superres/train.py` (launched as
   `python -m symtrs.legacy.superres.train`), which predates the package and was moved
-  inside it unchanged in 2026-10-15 — see `symtrs/legacy/README.md`.
+  inside it unchanged in 2026-10-15, then changed on purpose on 2026-10-17 (crops for every
+  model, whole-image tiled evaluation, `val/` as the validation set, SRGAN x1, SwinIR
+  `img_size`) — `symtrs/legacy/README.md`, "Changes after the move", lists every edit. A
+  failed trainer run exits non-zero and leaves `summary_failed.json`, never `summary.json`.
 
 **Shadow removal** takes only the network *class* from three upstream checkouts under
 `third_party/` (pinned in `third_party/PINS.md`, cloned by `python scripts/fetch_third_party.py`,
@@ -248,7 +251,7 @@ symtrs/
     domain/            the CycleGAN/pix2pix subprocess front-end + vendored-tree check
     superres/          the SR subprocess front-end
 configs/               95 generated YAMLs + generate_grid.py (see configs/README.md)
-symtrs/legacy/          the SR implementation and datasets: moved inside, byte-identical
+symtrs/legacy/          the SR implementation and datasets: moved inside, then edited (see its README)
 train_superresolution.py, dataloader/   shims that re-export from symtrs/legacy/
 pytorch-CycleGAN-and-pix2pix/                           vendored upstream, pinned
 tests/                 pytest; conftest.py holds the layout and data fixtures
@@ -294,6 +297,15 @@ subprocess. Add it to §1 of this file and to the table in `configs/README.md`.
   files and fails if it does not. Upstream writes its generated images **flat** in
   `results/<name>/<phase>_<epoch>/images/` as `<image>_fake_B.png` — not one folder per
   label, which is the other way it was read once and scored nothing.
+- **The generated image is `fake_B` in every direction, `BtoA` included.** Upstream's
+  `set_input` (`models/pix2pix_model.py`, `models/cycle_gan_model.py`) does
+  `real_A = input["A" if AtoB else "B"]` and `forward` does `fake_B = G(real_A)`, so
+  `--direction BtoA` swaps the *inputs*, not the output label; `fake_A` is CycleGAN's other
+  generator on the other input, i.e. the opposite translation. Reading `fake_A` for
+  `night2day`/`noshadow2shadow` made pix2pix score nothing (`test: {}`) and CycleGAN score
+  day-to-night against real day images. `DomainAdaptation.generated_paths` now selects
+  `GENERATED_LABEL` and raises when it finds nothing; `tests/test_domain_commands.py` parses
+  the two upstream files and fails if the premise changes.
 - **Upstream's `--save_epoch_freq` default is 5, and the score step loads `latest`.** A run
   shorter than five epochs trains and then fails at scoring with a `FileNotFoundError`. The
   front-end passes `--save_epoch_freq 1` for that reason; a caller can thin it out again,

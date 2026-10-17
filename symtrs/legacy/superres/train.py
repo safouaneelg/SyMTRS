@@ -2,9 +2,10 @@
 
 Predates the `symtrs` package and now lives inside it (see `symtrs/legacy/README.md`),
 launched as `python -m symtrs.legacy.superres.train` by `symtrs.model.superres`. The code
-below is unchanged from `train_superresolution.py` at the repository root, except for this
-header: it used to reach `models/`, `utils/` and `dataloader/` by putting the root on
-`sys.path`, and imports them by name now.
+below is `train_superresolution.py` from the repository root with the changes listed in
+`symtrs/legacy/README.md` ("Changes after the move"): the header and imports, then crops for
+every model, whole-image (optionally windowed) validation and test, and an optional held-out
+validation split. Read that list before assuming a number came from the original loop.
 """
 
 import argparse
@@ -29,6 +30,7 @@ from torch.utils.data.distributed import DistributedSampler
 # so it is the hand-run default and nothing else.
 ROOT = Path(__file__).resolve().parent
 
+from symtrs.engine.tiling import predict_tiled
 from symtrs.legacy.dataloader import SuperResDataset, split_indices
 from symtrs.legacy.superres.models import (
     SRCNN,
@@ -80,8 +82,22 @@ def parse_args():
     p.add_argument("--eval_only", action="store_true",
                    help="skip training and score out_dir/weights/best.pt on the test split")
     p.add_argument("--gpus", type=int, default=1, help="Number of GPUs to use (1 for single-GPU, >1 for DDP)")
-    p.add_argument("--patch_size", type=int, default=0, help="LR patch size for SwinIR training (0 = disabled)")
-    p.add_argument("--val_patch_size", type=int, default=0, help="LR patch size for SwinIR validation (0 = use train patch size)")
+    # Validation set. Without these the script carves `--split` out of `--lr_root`, i.e. out of
+    # train/, which AGENTS.md ground rule 6 forbids for the SyMTRS layout; the `symtrs`
+    # front-end passes <root>/val here so the split lives in the dataset.
+    p.add_argument("--val_lr_root", type=str, default="", help="LR images of the validation split")
+    p.add_argument("--val_hr_root", type=str, default="", help="HR images of the validation split")
+    p.add_argument("--patch_size", type=int, default=0,
+                   help="LR patch size for TRAINING, every model (0 = whole frames; 2048 px frames "
+                        "do not fit a 12 GB card). The HR patch is patch_size * scale.")
+    p.add_argument("--val_patch_size", type=int, default=0,
+                   help="LR size of a deterministic CENTRE crop to validate/test on, for speed only "
+                        "(0 = the whole image, never the training patch: ground rule 11)")
+    p.add_argument("--eval_tile_size", type=int, default=0,
+                   help="validate/test the whole image in overlapping windows of this many LR pixels "
+                        "(0 = one forward pass). Metrics are computed on the stitched image.")
+    p.add_argument("--eval_tile_overlap", type=int, default=0,
+                   help="LR pixels shared by neighbouring evaluation windows")
     p.add_argument("--amp", action="store_true", help="Enable AMP (SwinIR only)")
     p.add_argument("--swinir_checkpoint", action="store_true", help="Enable gradient checkpointing (SwinIR only)")
     # SwinIR config (optional overrides)
@@ -92,6 +108,24 @@ def parse_args():
     p.add_argument("--swinir_mlp_ratio", type=float, default=4.0)
     p.add_argument("--swinir_upsampler", type=str, default="pixelshuffle")
     return p.parse_args()
+
+
+def swinir_img_size(args, sample_lr):
+    """The `img_size` SwinIR is built with: the training patch, else the full LR frame.
+
+    SwinIR precomputes its shifted-window attention masks for `img_size` and stores them in
+    the state dict as buffers, one `[windows, 49, 49]` tensor per shifted block. Built for a
+    whole 2048 px frame that is ~10 GB (the x1 smoke OOM'd just constructing the model) and
+    it ends up in every checkpoint. Any other input size recomputes the mask on the fly, so
+    the size only has to be the one the training step uses: the crop. Training, resume and
+    `evaluate_on_test` all call this, so the buffers always match the checkpoint.
+    """
+    ws = args.swinir_window
+    if args.patch_size > 0:
+        h = w = args.patch_size
+    else:
+        h, w = sample_lr.shape[1], sample_lr.shape[2]
+    return (((h + ws - 1) // ws) * ws, ((w + ws - 1) // ws) * ws)
 
 
 def build_models(args, in_channels, out_channels, img_size=None):
@@ -123,13 +157,60 @@ def build_models(args, in_channels, out_channels, img_size=None):
     raise ValueError("Unknown model")
 
 
-def prepare_batch(lr, hr, model_name, use_y):
+def prepare_input(lr, model_name, use_y, out_size):
+    """The tensor the network sees for an LR image whose target is `out_size` (H, W).
+
+    SRCNN and the autoencoder refine a bicubic upsample, so they receive `out_size`; SRGAN and
+    SwinIR upsample themselves and receive the LR image. One function for training and for
+    evaluation, so a windowed evaluation cannot drift from what the loop trained on.
+    """
     if use_y:
         lr = rgb_to_y(lr)
-        hr = rgb_to_y(hr)
     if model_name in {"srcnn", "autoencoder"}:
-        lr = F.interpolate(lr, size=hr.shape[-2:], mode="bicubic", align_corners=False)
-    return lr, hr
+        lr = F.interpolate(lr, size=tuple(out_size), mode="bicubic", align_corners=False)
+    return lr
+
+
+def prepare_batch(lr, hr, model_name, use_y):
+    if use_y:
+        hr = rgb_to_y(hr)
+    return prepare_input(lr, model_name, use_y, hr.shape[-2:]), hr
+
+
+#: SRCNN has no padding in its 9x9 and 5x5 convolutions, so it returns 12 px less than it is
+#: given (6 per side). Training scores the interior (`match_size` centre-crops the target); an
+#: evaluation that stitches windows needs an answer exactly as large as the window, so the
+#: window is reflect-padded by what the valid convolutions will eat.
+SRCNN_MARGIN = 6
+
+
+def super_resolve(args, model, lr):
+    """Upscale one LR image `[1, 3, h, w]` to `[1, C, h*scale, w*scale]`, whole or in windows.
+
+    The single inference path of validation, test and the sample panels. The whole image goes
+    through in one pass unless `--eval_tile_size` asks for overlapping windows of that many LR
+    pixels, which `symtrs.engine.tiling.predict_tiled` blends with a Hann weight and stitches
+    at `scale` times the input size. Metrics are then computed on the stitched full image.
+    """
+    scale = args.scale
+
+    def forward(tile):
+        x = prepare_input(tile, args.model, args.use_y_channel, (tile.shape[-2] * scale, tile.shape[-1] * scale))
+        if args.model == "srcnn":
+            x = F.pad(x, (SRCNN_MARGIN,) * 4, mode="reflect")
+        if args.model == "swinir" and args.amp:
+            with autocast():
+                sr = model(x)
+        else:
+            sr = model(x)
+        return sr.float()
+
+    h, w = lr.shape[-2:]
+    if args.eval_tile_size > 0 and (h > args.eval_tile_size or w > args.eval_tile_size):
+        return predict_tiled(
+            lr, forward, args.eval_tile_size, overlap=args.eval_tile_overlap, scale=scale
+        )
+    return forward(lr)
 
 
 def collate_same_size(batch):
@@ -151,11 +232,14 @@ def random_crop_pair(lr, hr, scale, patch_size):
         return lr, hr
     b, _, h_lr, w_lr = lr.shape
     h_hr, w_hr = hr.shape[2], hr.shape[3]
-    if h_lr < patch_size or w_lr < patch_size:
-        return lr, hr
     ps_hr = patch_size * scale
-    if h_hr < ps_hr or w_hr < ps_hr:
-        return lr, hr
+    if h_lr < patch_size or w_lr < patch_size or h_hr < ps_hr or w_hr < ps_hr:
+        # Used to return the whole frame, which turned a too-large patch into a silent
+        # whole-image step (and an out-of-memory error far from its cause at 2048 px).
+        raise ValueError(
+            f"--patch_size {patch_size} (x{scale} = {ps_hr} target px) does not fit a "
+            f"{h_lr}x{w_lr} LR / {h_hr}x{w_hr} HR frame; lower train.patch_size"
+        )
 
     cropped_lr = []
     cropped_hr = []
@@ -201,11 +285,14 @@ def train_one_epoch(args, model, disc, loader, optim_g, optim_d, device, scaler=
     for batch in tqdm(loader, desc="train", leave=False, disable=not args.is_main):
         if batch is None:
             continue
-        lr = batch["lr"].to(device)
-        hr = batch["hr"].to(device)
+        # Crop first, for EVERY model, and on the CPU: this used to happen only for SwinIR and
+        # after the bicubic upsample, so SRCNN / the autoencoder / SRGAN trained on whole
+        # 2048 px frames (31.75 GiB for one SRCNN activation at batch 16). Cropping the LR
+        # image before `prepare_batch` also keeps the upsample patch-sized.
+        lr, hr = random_crop_pair(batch["lr"], batch["hr"], args.scale, args.patch_size)
+        lr = lr.to(device)
+        hr = hr.to(device)
         lr, hr = prepare_batch(lr, hr, args.model, args.use_y_channel)
-        if args.model == "swinir" and args.patch_size > 0:
-            lr, hr = random_crop_pair(lr, hr, args.scale, args.patch_size)
 
         if args.model == "srgan":
             # Train discriminator
@@ -258,6 +345,16 @@ def train_one_epoch(args, model, disc, loader, optim_g, optim_d, device, scaler=
 
 
 def eval_one_epoch(args, model, disc, loader, device):
+    """Score `loader` on WHOLE images, one at a time, by the same path for val and test.
+
+    This used to centre-crop to `--val_patch_size` (or, at 0, to the TRAINING patch) for
+    SwinIR and push whole batches of whole frames through the other models, and it computed
+    PSNR from the mean MSE of a batch. Now every image goes through `super_resolve` alone
+    (whole, or stitched from windows when `--eval_tile_size` is set), is scored at full size,
+    and PSNR / SSIM / MSE are per-image values averaged over images, which is what a test
+    table means by them. `--val_patch_size > 0` is the one remaining way to score a centre
+    crop, for a quick run.
+    """
     model.eval()
     if disc is not None:
         disc.eval()
@@ -271,34 +368,28 @@ def eval_one_epoch(args, model, disc, loader, device):
         for batch in tqdm(loader, desc="val", leave=False, disable=not args.is_main):
             if batch is None:
                 continue
-            lr = batch["lr"].to(device)
-            hr = batch["hr"].to(device)
-            lr, hr = prepare_batch(lr, hr, args.model, args.use_y_channel)
-            if args.model == "swinir":
-                val_ps = args.val_patch_size if args.val_patch_size > 0 else args.patch_size
-                if val_ps > 0:
-                    lr, hr = center_crop_pair(lr, hr, args.scale, val_ps)
-
-            if args.model == "srgan":
-                sr = model(lr)
+            for i in range(batch["lr"].size(0)):
+                lr = batch["lr"][i : i + 1].to(device)
+                hr = batch["hr"][i : i + 1].to(device)
+                if args.val_patch_size > 0:
+                    lr, hr = center_crop_pair(lr, hr, args.scale, args.val_patch_size)
+                if args.use_y_channel:
+                    hr = rgb_to_y(hr)
+                sr = super_resolve(args, model, lr)
                 hr_c, sr_c = match_size(hr, sr)
-                d_fake = disc(sr_c)
-                loss_val = srgan_generator_loss(d_fake, sr_c, hr_c, adv_weight=args.adv_weight)
-            else:
-                use_amp = args.model == "swinir" and args.amp
-                if use_amp:
-                    with autocast():
-                        sr = model(lr)
+                if args.model == "srgan":
+                    d_fake = disc(sr_c)
+                    loss_val = srgan_generator_loss(d_fake, sr_c, hr_c, adv_weight=args.adv_weight)
                 else:
-                    sr = model(lr)
-                hr_c, sr_c = match_size(hr, sr)
-                loss_val = pixel_mse_loss(sr_c, hr_c)
+                    loss_val = pixel_mse_loss(sr_c, hr_c)
 
-            metric_psnr = psnr(sr_c, hr_c).item()
-            loss_meter.update(loss_val.item(), n=lr.size(0))
-            psnr_meter.update(metric_psnr, n=lr.size(0))
-            mse_meter.update(pixel_mse_loss(sr_c, hr_c).item(), n=lr.size(0))
-            ssim_meter.update(ssim(sr_c, hr_c).item(), n=lr.size(0))
+                loss_meter.update(loss_val.item())
+                # Scored on the image a user would save: the network output is unbounded, the
+                # written PNG is clamped to [0, 1], and PSNR is defined for data range 1.
+                sr_m = sr_c.clamp(0.0, 1.0)
+                psnr_meter.update(psnr(sr_m, hr_c).item())
+                mse_meter.update(pixel_mse_loss(sr_m, hr_c).item())
+                ssim_meter.update(ssim(sr_m, hr_c).item())
 
     return loss_meter.avg, psnr_meter.avg, mse_meter.avg, ssim_meter.avg
 
@@ -327,7 +418,7 @@ def evaluate_on_test(args, device):
     test_dataset = SuperResDataset(args.test_lr_root, args.test_hr_root)
     test_loader = DataLoader(
         test_dataset,
-        batch_size=args.batch_size,
+        batch_size=1,
         shuffle=False,
         num_workers=args.num_workers,
         pin_memory=torch.cuda.is_available(),
@@ -337,10 +428,7 @@ def evaluate_on_test(args, device):
     in_channels = 1 if args.use_y_channel else 3
     img_size = None
     if args.model == "swinir":
-        sample_lr = test_dataset[0]["lr"]
-        ws = args.swinir_window
-        h, w = sample_lr.shape[1], sample_lr.shape[2]
-        img_size = (((h + ws - 1) // ws) * ws, ((w + ws - 1) // ws) * ws)
+        img_size = swinir_img_size(args, test_dataset[0]["lr"])
 
     model, disc = build_models(args, in_channels, in_channels, img_size=img_size)
     checkpoint = torch.load(best_path, map_location=device)
@@ -457,14 +545,24 @@ def main_worker(rank, world_size, args):
         samples_dir.mkdir(parents=True, exist_ok=True)
 
     dataset = SuperResDataset(args.lr_root, args.hr_root)
-    splits = split_indices(len(dataset), ratios=args.split, seed=args.seed, shuffle=True)
-    train_idx, val_idx = splits[0], splits[1]
+    if args.val_lr_root and args.val_hr_root:
+        # The split lives in the dataset (ground rule 6): train on all of train/, validate on
+        # val/. Two datasets, so the index lists are into different datasets.
+        val_dataset = SuperResDataset(args.val_lr_root, args.val_hr_root)
+        train_idx = list(range(len(dataset)))
+        val_idx = list(range(len(val_dataset)))
+    else:
+        print(f"[split] no --val_lr_root/--val_hr_root: carving {args.split} out of {args.lr_root} "
+              "(the original behaviour; the symtrs front-end passes val/ whenever it exists)")
+        val_dataset = dataset
+        splits = split_indices(len(dataset), ratios=args.split, seed=args.seed, shuffle=True)
+        train_idx, val_idx = splits[0], splits[1]
 
     train_sampler = None
     val_sampler = None
     if world_size > 1:
         train_sampler = DistributedSampler(Subset(dataset, train_idx), num_replicas=world_size, rank=rank, shuffle=True)
-        val_sampler = DistributedSampler(Subset(dataset, val_idx), num_replicas=world_size, rank=rank, shuffle=False)
+        val_sampler = DistributedSampler(Subset(val_dataset, val_idx), num_replicas=world_size, rank=rank, shuffle=False)
 
     train_loader = DataLoader(
         Subset(dataset, train_idx) if train_sampler is None else train_sampler.dataset,
@@ -476,8 +574,8 @@ def main_worker(rank, world_size, args):
         sampler=train_sampler,
     )
     val_loader = DataLoader(
-        Subset(dataset, val_idx) if val_sampler is None else val_sampler.dataset,
-        batch_size=args.batch_size,
+        Subset(val_dataset, val_idx) if val_sampler is None else val_sampler.dataset,
+        batch_size=1,
         shuffle=False,
         num_workers=args.num_workers,
         pin_memory=torch.cuda.is_available(),
@@ -492,13 +590,7 @@ def main_worker(rank, world_size, args):
     # For SwinIR, pass the LR spatial size as img_size
     img_size = None
     if args.model == "swinir":
-        sample_lr = dataset[0]["lr"]
-        h, w = sample_lr.shape[1], sample_lr.shape[2]
-        ws = args.swinir_window
-        # SwinIR requires init img_size divisible by window_size
-        h = ((h + ws - 1) // ws) * ws
-        w = ((w + ws - 1) // ws) * ws
-        img_size = (h, w)
+        img_size = swinir_img_size(args, dataset[0]["lr"])
 
     model, disc = build_models(args, in_channels, out_channels, img_size=img_size)
     model = model.to(device)
@@ -529,7 +621,11 @@ def main_worker(rank, world_size, args):
             optim_d.load_state_dict(ckpt["optimizer_d"])
         if "epoch" in ckpt:
             start_epoch = int(ckpt["epoch"]) + 1
-        if "val_psnr" in ckpt:
+        # The best score so far, not the last epoch's: resuming from `last.pt` with that epoch's
+        # val_psnr let a worse later epoch overwrite best.pt. Older checkpoints lack the key.
+        if "best_psnr" in ckpt:
+            best_psnr = float(ckpt["best_psnr"])
+        elif "val_psnr" in ckpt:
             best_psnr = float(ckpt["val_psnr"])
     history = []
 
@@ -574,21 +670,20 @@ def main_worker(rank, world_size, args):
                 # Save sample images
                 if args.save_samples_every > 0 and epoch % args.save_samples_every == 0:
                     sample = next(iter(val_loader))
-                    lr = sample["lr"].to(device)
-                    hr = sample["hr"].to(device)
-                    lr, hr = prepare_batch(lr, hr, args.model, args.use_y_channel)
-                    if args.model == "swinir":
-                        val_ps = args.val_patch_size if args.val_patch_size > 0 else args.patch_size
-                        if val_ps > 0:
-                            lr, hr = center_crop_pair(lr, hr, args.scale, val_ps)
+                    lr_raw = sample["lr"][:1].to(device)
+                    hr = sample["hr"][:1].to(device)
+                    if args.use_y_channel:
+                        hr = rgb_to_y(hr)
                     with torch.no_grad():
-                        if args.model == "swinir" and args.amp:
-                            with autocast():
-                                sr = model(lr)
-                        else:
-                            sr = model(lr)
+                        sr = super_resolve(args, model, lr_raw)
                     hr_c, sr_c = match_size(hr, sr)
-                    lr_c, _ = match_size(lr, sr_c)
+                    # A whole 2048 px triplet is ~25 MB of PNG per epoch; the panel is a
+                    # visual check, so show the centre 512 px of the whole-image result.
+                    side = min(512, sr_c.shape[-2], sr_c.shape[-1])
+                    sr_c, hr_c = center_crop_pair(sr_c, hr_c, 1, side)
+                    lr_view = rgb_to_y(lr_raw) if args.use_y_channel else lr_raw
+                    lr_c, _ = center_crop_pair(lr_view, hr_c, args.scale, max(1, side // args.scale))
+                    lr_c = F.interpolate(lr_c, size=sr_c.shape[-2:], mode="nearest")
                     save_image_triplet(lr_c, sr_c, hr_c, str(samples_dir / f"epoch_{epoch:03d}.png"))
 
                 # Save checkpoints: best and last only
@@ -597,6 +692,7 @@ def main_worker(rank, world_size, args):
                     "model": model.state_dict(),
                     "optimizer": optim_g.state_dict(),
                     "val_psnr": val_psnr,
+                    "best_psnr": max(best_psnr, val_psnr),
                     "args": vars(args),
                 }
                 if disc is not None:

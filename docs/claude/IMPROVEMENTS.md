@@ -292,7 +292,7 @@ un chiffre : elles changent ce que le chiffre mesure.
   direction, les dossiers A/B et le sens upstream : `day2night`/`night2day` = `rgb_day`/`rgb_night`,
   `shadow2noshadow`/`noshadow2shadow` = `rgb_day`/`rgb_noshadow` (A est toujours `rgb_day`). Staging
   (`build_staging_dir(..., direction=)`), `upstream_direction`, cible réelle du FID/KID (`target_role`) et
-  côté généré (`fake_A`/`fake_B`) en dérivent ; plus aucun `== "day2night"` en dur. Le comportement
+  (le côté généré n'en dérive PAS : c'est `fake_B` partout, voir l'entrée « Côté généré » ci-dessous) en dérivent ; plus aucun `== "day2night"` en dur. Le comportement
   jour/nuit est inchangé (configs et tests existants identiques ; les 4 YAML existants régénérés à
   l'octet près). Toujours 2048 seulement (refus explicite sinon, message cite `rgb_noshadow`).
 - **4 configs générées** (`cyclegan|pix2pix` x `shadow2noshadow|noshadow2shadow`) depuis les tables de
@@ -451,3 +451,47 @@ un chiffre : elles changent ce que le chiffre mesure.
   complet), `test_tiling.py` (a,b aléatoires par tuile retrouvés, moitié plate sans explosion, pas de décalage
   en mode `scale`, seuil indépendant de l'unité, pente bornée, non-retournement, biais OLS), `test_depth_metrics.py`
   (prédiction négative/NaN/inf notée, `invalid_pred_fraction`, silog sans NaN sur un cas à variance -2e-16).
+
+## 2026-10-17 - Domain adaptation : le côté généré est `fake_B` dans toutes les directions
+
+- **Bug.** `DomainTask.generated_paths` lisait `*_fake_A.png` pour `night2day` et `noshadow2shadow`
+  (`BtoA`). Or `set_input` d'upstream (`models/pix2pix_model.py`, `models/cycle_gan_model.py`) fait
+  `real_A = input["A" if AtoB else "B"]` et `forward` fait `fake_B = G(real_A)` : `--direction BtoA` échange
+  les ENTREES, la traduction demandée reste `fake_B`. Conséquences observées sur le vrai jeu : pix2pix
+  n'écrit que `fake_B`/`real_A`/`real_B`, le scoring ne trouvait rien et rendait `test: {}` (run « réussi »
+  sans métrique) ; CycleGAN scorait `fake_A = netG_B(real_B)`, la traduction OPPOSEE (jour -> nuit), contre
+  des images réelles de jour : un chiffre faux sans erreur.
+- **Correctif.** `runner.GENERATED_LABEL = "fake_B"` (explication et renvoi aux lignes upstream dans le
+  commentaire), utilisé par `generated_paths` et `score_shadow_removal`. Les noms viennent de `B_paths` (les
+  fichiers nuit/sans-ombre en stage), nommés par la même clé normalisée que ceux de jour : l'appariement par
+  clé du scoring pairé est inchangé.
+- **Plus de `{}` silencieux.** `generated_paths` lève `RuntimeError` (dossier, motif cherché, cause probable)
+  si rien n'est généré ; `evaluate_adaptation` lève aussi si le dossier réel (`rgb_<cible>`) est absent ou
+  vide. `summary["test"]` ne peut plus être `{}` côté domain.
+- **Tests.** `tests/test_domain_commands.py` : lecture des sources upstream (les deux faits dont dépend le
+  choix), `fake_B` pour les 4 directions x 2 modèles, erreurs nommées. Les anciens tests qui attendaient
+  `fake_A` pour `BtoA` ont été corrigés.
+- **A refaire.** Tout `summary.json` domain produit avant ce correctif pour `night2day`/`noshadow2shadow` est
+  à rejeter (CycleGAN : mauvaise direction ; pix2pix : vide) et à ré-évaluer avec
+  `symtrs eval <config> --eval-split test` (le scoring relance `test.py` puis relit `*_fake_B.png`).
+
+## 2026-10-17 - Super-résolution : échecs silencieux, crops, évaluation image entière
+
+- **Échec visible.** `symtrs/model/superres/runner.py` : un code de sortie non nul du trainer legacy lève
+  `SuperResolutionError` (CLI : sortie 2) et écrit `summary_failed.json` au lieu de `summary.json` ; un
+  `--eval_only` sans `test_metrics.json` lève aussi ; un `test_metrics.json` périmé est supprimé avant le
+  lancement. Un training sans `val/` est refusé (règle 6) au lieu de découper 80/20 dans `train/`.
+- **Verdict unique.** `scripts/run_queue.py:run_verdict` (rc 0, `summary.json` lisible, `returncode` absent
+  ou 0, `test` non vide sauf eval-only), utilisé par la file et par `smoke_all.py` ; `verified()` revérifie
+  les lignes `ok` du ledger. Frames d'éval legacy ajoutés à la classification OOM.
+- **Legacy trainer** (détail dans `symtrs/legacy/README.md`, « Changes after the move ») : crops alignés
+  pour les 4 modèles (`random_crop_pair` existant) ; validation = `val/` ; val et test sur l'image entière,
+  une image à la fois, en fenêtres (`symtrs/engine/tiling.predict_tiled`, nouveau paramètre `scale`) ;
+  PSNR/SSIM par image puis moyenne ; SRGAN accepte x1 ; SwinIR construit avec `img_size` = crop.
+- **Grille.** Patch LR = 256/scale pour SRCNN/AE/SRGAN (région cible fixe de 256 px), 64 pour SwinIR ;
+  fenêtre d'éval 512 px LR, recouvrement 64 (`SR_EVAL_TILE`, écart volontaire à « fenêtre = crop »).
+- **Tests.** `tests/test_superres_training.py` (nouveau) + `tests/test_superres.py`.
+- **Domain.** En plus du correctif `fake_B` : le scoring exige autant d'images générées que d'images réelles
+  (`test_a_partial_translation_of_the_split_is_an_error`).
+- **Référence shadow removal.** `scripts/shadow_identity_baseline.py` : l'entrée ombrée comme prédiction
+  (mêmes paires, masque et métriques) ; val 12,15 / test 12,40 dB PSNR, ombre 7,7 / 7,9, hors ombre 30,0 / 27,9.

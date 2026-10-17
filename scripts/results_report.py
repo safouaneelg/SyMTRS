@@ -52,7 +52,7 @@ PAIRED_COLUMNS = [("PSNR", "psnr"), ("SSIM_y", "ssim_y"), ("MAE LAB all", "mae_l
                   ("RMSE LAB non-shadow", "rmse_lab_nonshadow")]
 
 NOTES = {
-    "segmentation": "Test split, best-val-mIoU weights. `mIoU classes` = how many of the 6 classes "
+    "segmentation": "Test split, best-val-mIoU weights. `mIoU classes` = how many of the 5 classes "
                     "the mean covers (a class absent from the split is excluded, not scored 0). "
                     "Class shares differ strongly between the geographic splits.",
     "depth": "Test split, metres, pixels beyond `max_depth` masked. `align` is the alignment the "
@@ -62,15 +62,20 @@ NOTES = {
              "DA3-metric uses an assumed 60 deg horizontal FOV to derive the focal length. "
              "Test depth is deeper than train (median ~208 m vs ~92 m).",
     "superresolution": "PSNR / SSIM on the legacy trainer's definition (Y channel when "
-                       "`--use_y_channel`), LR at `2048 / scale` -> native `rgb_day`. x1 is the "
-                       "refiner control, not super-resolution.",
+                       "`--use_y_channel`), per whole test image (windowed), averaged over "
+                       "images; LR at `2048 / scale` -> native `rgb_day`. x1 is the refiner "
+                       "control, not super-resolution. For scale: bicubic upsampling scores "
+                       "x2 22.9 / x4 20.9 / x8 19.3 dB on this test split.",
     "shadow_removal": "`rgb_day` -> `rgb_noshadow` at 2048. `init` = what the run was "
                       "initialised from; the three models do NOT start from comparable weights "
                       "(ShadowFormer: ISTD+ shadow removal; Restormer/Uformer: denoising), so rows "
                       "must not be ranked. SSIM_y is luma-only SSIM (not comparable with "
-                      "published per-channel SSIM). Shadow mask is derived from the pair.",
-    "domain_adapt": "CycleGAN / pix2pix train and predict at 256 px; the generated images are "
-                    "upsampled and scored against the real ones at 2048. KID is the primary "
+                      "published per-channel SSIM). Shadow mask is derived from the pair. The "
+                      "`identity` row scores the shadowed input itself: a model removes "
+                      "shadows only where it beats that row.",
+    "domain_adapt": "CycleGAN / pix2pix train and predict at 256 px. KID / FID compare them "
+                    "with the real target images antialias-resized to the same 256 px; the "
+                    "paired shadow2noshadow metrics upsample the output to 2048. KID is the primary "
                     "metric; FID (N=24 vs 2048-d features, rank-deficient covariance) is shown "
                     "for completeness only.",
 }
@@ -163,7 +168,20 @@ def _sort_key(row: Dict[str, Any]) -> Tuple:
     return (str(row.get("model", "")), str(row.get("direction", "")), int(row.get("resolution") or 0))
 
 
-def render(rows: List[Dict[str, Any]], runs_label: str) -> str:
+def _identity_row(runs_dir: Path, head: Sequence[Tuple[str, str]]) -> List[str]:
+    """The "do nothing" reference (`scripts/shadow_identity_baseline.py`), if it was scored."""
+    import json
+
+    path = runs_dir / "_baselines" / "shadow_identity.json"
+    try:
+        test = json.loads(path.read_text(encoding="utf-8"))["test"]
+    except Exception:
+        return []
+    cells = ["-" if spec.startswith("@") else _format(test.get(spec)) for _, spec in head]
+    return ["| identity (input as output) | " + " | ".join(cells) + " |"]
+
+
+def render(rows: List[Dict[str, Any]], runs_label: str, runs_dir: Path = Path(".")) -> str:
     n_total = len(rows)
     L = [
         "# RESULTS",
@@ -218,7 +236,10 @@ def render(rows: List[Dict[str, Any]], runs_label: str) -> str:
             lead = ["model", "resolution"] if task in ("segmentation", "depth") else ["model"]
             if task == "superresolution":
                 lead = ["model"]
-            L += _table(items, COLUMNS[task], lead) + [""]
+            table = _table(items, COLUMNS[task], lead)
+            if task == "shadow_removal":
+                table += _identity_row(runs_dir, COLUMNS[task])
+            L += table + [""]
     seen = set(by_task) - set(TASK_ORDER)
     for task in sorted(seen):
         L += [f"## {task or '(unknown task)'} ({len(by_task[task])} runs)", "",
@@ -241,7 +262,7 @@ def main() -> int:
     out = Path(args.out)
     out = out if out.is_absolute() else REPO / out
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(render(rows, args.runs.replace("\\", "/")) + "\n", encoding="utf-8")
+    out.write_text(render(rows, args.runs.replace("\\", "/"), runs) + "\n", encoding="utf-8")
     print(f"{len(rows)} runs -> {out}")
     return 0
 

@@ -38,16 +38,20 @@ PROTOCOL = {
              "BerHu loss, no alignment (registry `protocol`). Monitor: val RMSE.",
     "superresolution": "`rgb_day_lr/xN` (LR input, `resolution` = its size) -> native "
                        "`rgb_day` (2048); scale = 2048 / resolution, x1 = refiner control. "
-                       "Legacy trainer `symtrs/legacy/superres/train.py` run as a subprocess.",
+                       "Legacy trainer `symtrs/legacy/superres/train.py` run as a subprocess; "
+                       "trained on aligned random crops (`patch` column, LR pixels), validated "
+                       "on `val/` and tested on whole images in 512 px LR windows.",
     "shadow_removal": "`rgb_day` (2048) -> `rgb_noshadow` (2048), native only. Shadow mask "
                       "(ShadowFormer input and the shadow / non-shadow metric split) derived "
                       "from the pair: `(Y_noshadow - Y_day) / Y_noshadow > mask_threshold`, "
                       "then a `mask_open` px opening. Upstream code in `third_party/` "
                       "(pins in `third_party/PINS.md`). Metrics: PSNR, SSIM, LAB RMSE over "
                       "all / shadow / non-shadow pixels.",
-    "domain_adapt": "`rgb_day` <-> `rgb_night` (2048 only); vendored "
+    "domain_adapt": "`rgb_day` <-> `rgb_night` and `rgb_day` <-> `rgb_noshadow` (2048 only; "
+                    "the generated side is upstream's `fake_B` in every direction); vendored "
                     "`pytorch-CycleGAN-and-pix2pix` at `2a7afba` run as a subprocess; data "
-                    "staged per split under `<run_dir>/staging/`. Metrics: FID / KID.",
+                    "staged per split under `<run_dir>/staging/`. Metrics: KID (primary) / FID at 256 px; "
+                    "shadow2noshadow also gets the shadow-removal metrics.",
 }
 
 

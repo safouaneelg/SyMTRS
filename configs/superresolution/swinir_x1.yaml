@@ -10,10 +10,12 @@
 # were produced by downsampling the same captures - but it is not super-resolution, and
 # the run's own summary says so. Nothing is upsampled here.
 #
-# Window-attention transformer: the heaviest SR baseline and, unlike the other
-# three, one whose cost grows with the *input* size rather than being fixed by the
-# network. That is what train.patch_size is for - the other three models train on the
-# whole image.
+# Window-attention transformer: the heaviest SR baseline, and the one whose cost grows
+# fastest with the *input* size (tokens, not pixels, set its memory). Every model in
+# this task trains on random aligned crops (train.patch_size, in LR pixels): the CNNs
+# on a fixed 256 px region of the target at every scale, SwinIR on a fixed 64 px LR
+# patch, i.e. a fixed token count - so its target region grows with the scale (64 px
+# at x1 up to 512 px at x8).
 #
 # The architecture keys in model_kwargs (embed_dim, depths, num_heads, window,
 # mlp_ratio, upsampler) are fixed at build time and have to match the checkpoint, so
@@ -23,8 +25,18 @@
 # memory. train.amp is also passed for this model only; the script implements AMP for
 # SwinIR and for nothing else.
 #
+# The attention masks are precomputed for the training crop, not for a whole frame
+# (a 2048 px frame needs ~10 GB of them, and they end up in every checkpoint); any
+# other input size recomputes them on the fly.
+#
 # The real super-resolution cells of this row are swinir_x2.yaml,
 # swinir_x4.yaml and swinir_x8.yaml in this folder.
+#
+# Training is on random aligned crops: 64px of the LR input and the
+# matching 64px of the target. A whole 2048px frame does not fit a 12 GB card for any
+# model here. Validation and test score the WHOLE image (val_patch_size: 0), pushed
+# through the network in eval.tile_size windows where it does not fit in one pass;
+# PSNR / SSIM / MSE are computed per image on the stitched result and averaged.
 #
 # The training code for this task predates the `symtrs` package and now lives inside
 # it: `symtrs/legacy/superres/train.py` owns the model set, the data loading and the
@@ -66,8 +78,10 @@ train:
   # A path here resumes a previous run; `symtrs eval` scores the run directory's
   # weights/best.pt without training at all.
   resume: ""
-  # LR-space crops, SwinIR only: the other three models train on the whole image.
+  # LR pixels of the random training crop, every model: a fixed 64px LR patch (token count), so the target
+  # crop is x1 that = 64px.
   patch_size: 64
+  # 0 = the whole image at val and test, never the training crop.
   val_patch_size: 0
   amp: true
 
@@ -78,3 +92,9 @@ eval:
   batch_size: 1
   amp: true
   num_visualizations: 4
+  # The whole image is scored in windows of this many LR pixels, blended and stitched;
+  # metrics are computed on the stitched image. Larger than the training crop on purpose
+  # (see SR_EVAL_TILE in configs/generate_grid.py); a frame no larger than the window is
+  # scored in one pass.
+  tile_size: 512
+  tile_overlap: 64

@@ -64,6 +64,18 @@ UPSTREAM_MODELS = {
     "pix2pix": ("pix2pix", "aligned"),
 }
 
+#: The visual upstream writes the *requested* translation under, in every direction.
+#: At the vendored revision both models' `set_input` do
+#: `real_A = input["A" if AtoB else "B"]` and their `forward` does `fake_B = G(real_A)`
+#: (`models/pix2pix_model.py`, `models/cycle_gan_model.py`), so `--direction BtoA` makes
+#: `real_A` the folder-B image (night / shadow-free) and `fake_B` its translation to the
+#: folder-A domain. `fake_A` is CycleGAN's *other* generator applied to the other input
+#: (`netG_B(real_B)`): the opposite translation, scored against the wrong real domain.
+#: Reading `fake_A` for `BtoA` once made pix2pix score nothing and CycleGAN score the
+#: reverse direction. `tests/test_domain_commands.py` parses those two upstream files and
+#: fails if this assumption stops holding, e.g. after a bump of the vendored tree.
+GENERATED_LABEL = "fake_B"
+
 
 class DomainAdaptation:
     """A non-neural task descriptor, so `symtrs models` and `symtrs doctor` stay uniform.
@@ -223,14 +235,30 @@ class DomainAdaptation:
         return Path(run_dir) / "results" / self.experiment_name() / f"{split}_{checkpoint}" / "images"
 
     def generated_paths(self, run_dir: str, split: str, checkpoint: str = "latest") -> List[Path]:
-        """The files holding *this direction's* generated images.
+        """The files holding *this direction's* generated images: always `*_fake_B.png`.
 
-        `AtoB` (day to night, shadow to shadow-free) writes `fake_B`; `BtoA` writes `fake_A`. Both are written
-        in every run, so taking the wrong one would score the translation the run was not
-        asked to learn.
+        Not `fake_A` for the `BtoA` directions. Upstream's `set_input` swaps the *inputs*
+        for `--direction BtoA` (`real_A = input["B"]`) and then generates `fake_B = G(real_A)`,
+        so the requested translation (night to day, shadow-free to shadow) is `fake_B` in
+        every direction; see `GENERATED_LABEL`. The image names come from the `B_paths` in
+        that case, i.e. the staged night/shadow-free files, which are named by the same
+        normalised key as the day ones (`upstream.staged_name`), so a stem still pairs with
+        the other domain's file.
+
+        An empty result is an error, never an empty list: a run that generated nothing must
+        not be able to finish with `test: {}`.
         """
-        side = "B" if upstream_module.upstream_direction(self.direction) == "AtoB" else "A"
-        return sorted(self.generated_dir(run_dir, split, checkpoint).glob(f"*_fake_{side}.png"))
+        folder = self.generated_dir(run_dir, split, checkpoint)
+        found = sorted(folder.glob(f"*_{GENERATED_LABEL}.png")) if folder.is_dir() else []
+        if not found:
+            raise RuntimeError(
+                f"no `*_{GENERATED_LABEL}.png` generated images for {self.direction} in {folder} "
+                f"({'the folder does not exist' if not folder.is_dir() else 'the folder has no such file'}). "
+                "Upstream's test.py probably failed or wrote elsewhere (its own output is above), "
+                "its checkpoint `--epoch` was not found, or its output layout changed. Re-run the "
+                "scoring with `symtrs eval <config> --eval-split <split>` once `results/` is filled."
+            )
+        return found
 
 
 def device_env(device: str = "", gpu_ids: str = "", gpus: int = 1) -> Dict[str, str]:
@@ -384,24 +412,30 @@ def evaluate_adaptation(cfg, task: "DomainAdaptation", run_dir: Path) -> Dict[st
         device=cfg.train.device,
     )
 
-    # Which side of the translation is "generated" depends on the direction: AtoB writes
-    # fake_B, BtoA writes fake_A, and the real target domain is the other one.
+    # The generated side is `fake_B` in every direction (see GENERATED_LABEL); the real
+    # target domain is the one the direction translates *into*. `generated_paths` raises when
+    # there is nothing to score, so an empty `{}` can never be written to summary.json.
     target_domain = upstream_module.target_role(task.direction)
     generated = task.generated_paths(str(run_dir), cfg.data.test_split)
 
-    if not generated:
-        print(
-            f"[symtrs] no generated images in "
-            f"{task.generated_dir(str(run_dir), cfg.data.test_split)}; upstream may have "
-            f"failed to write them, or used a different output layout. Metrics will be "
-            f"empty."
-        )
-        return {}
-
     real_directory = Path(cfg.data.root) / cfg.data.test_split / f"rgb_{target_domain}"
-    if not real_directory.is_dir():
-        print(f"[symtrs] no real {target_domain} images at {real_directory}; cannot score")
-        return {}
+    if not real_directory.is_dir() or not _image_paths(real_directory):
+        raise RuntimeError(
+            f"no real {target_domain} images to score {task.direction} against in "
+            f"{real_directory} ({'missing folder' if not real_directory.is_dir() else 'no image files'}). "
+            "Check `--data-root`/`data.test_split` with `symtrs doctor --data-root <root>`."
+        )
+    # The real side is the whole folder, so a test pass that stopped early (a crash, a small
+    # `--num_test`) would compare a subset of translations against every real image and
+    # report a distance between two different scene sets.
+    real_count = len(_image_paths(real_directory))
+    if len(generated) != real_count:
+        raise RuntimeError(
+            f"{len(generated)} generated images for {task.direction} but {real_count} real "
+            f"{target_domain} images in {real_directory}: upstream's test.py did not translate the "
+            "whole split (see its output above, and `--num_test` in upstream.test_command). "
+            "Re-run the scoring with `symtrs eval <config> --eval-split <split>`."
+        )
 
     from symtrs.metrics.domain import distribution_metrics, extract_features
 
@@ -457,7 +491,7 @@ def score_shadow_removal(
     )
     keys = staged_keys(staging)
 
-    suffix = "_fake_B"  # shadow2noshadow is AtoB; `generated_paths` selects exactly these
+    suffix = f"_{GENERATED_LABEL}"  # exactly the files `generated_paths` selects
     by_key = {path.stem[: -len(suffix)]: path for path in generated if path.stem.endswith(suffix)}
     missing = [key for key in keys if key not in by_key]
     if missing:
@@ -554,6 +588,7 @@ def _folder_loader(paths: List[Path], batch_size: int, num_workers: int = 0):
 
 __all__ = [
     "DIRECTIONS",
+    "GENERATED_LABEL",
     "DomainAdaptation",
     "IMAGE_SUFFIXES",
     "PAIRED_SCORING_NOTE",

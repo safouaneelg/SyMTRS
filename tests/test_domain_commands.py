@@ -185,9 +185,10 @@ def test_generated_images_are_found_in_the_flat_layout_upstream_writes(tmp_path:
         "000000_fake_B.png",
         "000001_fake_B.png",
     ]
+    # BtoA swaps the inputs, not the output label: the translation is still fake_B.
     assert [p.name for p in night2day.generated_paths(str(tmp_path), "test")] == [
-        "000000_fake_A.png",
-        "000001_fake_A.png",
+        "000000_fake_B.png",
+        "000001_fake_B.png",
     ]
 
     # The old shape - one folder per label - is *not* what this revision writes, and
@@ -372,7 +373,7 @@ def test_shadow_directions_pass_only_flags_the_vendored_parser_accepts(tmp_path:
     assert backward[backward.index("--direction") + 1] == "BtoA"
 
 
-def test_generated_images_of_each_shadow_direction_are_the_side_it_generated(tmp_path: Path) -> None:
+def test_generated_images_of_each_shadow_direction_are_fake_B(tmp_path: Path) -> None:
     images = tmp_path / "results" / "run" / "test_latest" / "images"
     images.mkdir(parents=True)
     for label in ("real_A", "real_B", "fake_A", "fake_B"):
@@ -380,7 +381,107 @@ def test_generated_images_of_each_shadow_direction_are_the_side_it_generated(tmp
     forward = runner.DomainAdaptation(direction="shadow2noshadow", name="run")
     backward = runner.DomainAdaptation(direction="noshadow2shadow", name="run")
     assert [p.name for p in forward.generated_paths(str(tmp_path), "test")] == ["loc000_fake_B.png"]
-    assert [p.name for p in backward.generated_paths(str(tmp_path), "test")] == ["loc000_fake_A.png"]
+    assert [p.name for p in backward.generated_paths(str(tmp_path), "test")] == ["loc000_fake_B.png"]
+
+
+def _upstream_source(name: str) -> str:
+    return (VENDORED / "models" / name).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("model_file", ["pix2pix_model.py", "cycle_gan_model.py"])
+def test_the_requested_translation_is_fake_B_whatever_the_direction(model_file: str) -> None:
+    """The premise behind `runner.GENERATED_LABEL`, read from the vendored source.
+
+    `--direction BtoA` makes upstream swap the *inputs* (`real_A` is the folder-B image) and
+    then generate `fake_B = G(real_A)`. If a bump of the vendored tree changes either line,
+    selecting `fake_B` silently scores the wrong side, so this fails instead. The patterns
+    tolerate whitespace, not meaning.
+    """
+    source = _upstream_source(model_file)
+    assert runner.GENERATED_LABEL == "fake_B"
+    assert re.search(r'real_A\s*=\s*input\[\s*"A"\s+if\s+AtoB\s+else\s+"B"\s*\]', source), (
+        f"{model_file}: set_input no longer takes real_A from the folder the direction names"
+    )
+    assert re.search(r'real_B\s*=\s*input\[\s*"B"\s+if\s+AtoB\s+else\s+"A"\s*\]', source)
+    assert re.search(r"self\.fake_B\s*=\s*self\.netG(_A)?\(\s*self\.real_A\s*\)", source), (
+        f"{model_file}: fake_B is no longer the generator applied to real_A"
+    )
+    # The image name follows the same swap, which is why the staged B files (named by the
+    # same normalised key as the A ones) still pair with their day counterpart.
+    assert re.search(r'image_paths\s*=\s*input\[\s*"A_paths"\s+if\s+AtoB\s+else\s+"B_paths"\s*\]', source)
+
+
+def test_cyclegan_fake_A_is_the_opposite_translation() -> None:
+    """Why `fake_A` must not be read for BtoA: it is the other generator on the other input."""
+    source = _upstream_source("cycle_gan_model.py")
+    assert re.search(r"self\.fake_A\s*=\s*self\.netG_B\(\s*self\.real_B\s*\)", source)
+
+
+@pytest.mark.parametrize("model", ["cyclegan", "pix2pix"])
+@pytest.mark.parametrize("direction", runner.DIRECTIONS)
+def test_every_direction_of_both_models_is_scored_on_fake_B(
+    model: str, direction: str, tmp_path: Path
+) -> None:
+    """All four directions x both models, with `fake_A` present to be picked by mistake."""
+    task = runner.DomainAdaptation(direction=direction, name="run")
+    task.key = model
+    images = task.generated_dir(str(tmp_path), "test")
+    images.mkdir(parents=True)
+    for key in ("loc000", "loc001"):
+        for label in ("real_A", "real_B", "fake_A", "fake_B", "rec_A", "rec_B"):
+            (images / f"{key}_{label}.png").write_bytes(b"")
+    names = [p.name for p in task.generated_paths(str(tmp_path), "test")]
+    assert names == ["loc000_fake_B.png", "loc001_fake_B.png"]
+
+
+def test_a_pix2pix_style_output_without_fake_A_is_still_found_for_BtoA(tmp_path: Path) -> None:
+    """The case that scored nothing: pix2pix writes no fake_A at all (smoke run, real data)."""
+    task = runner.DomainAdaptation(direction="night2day", name="run")
+    images = task.generated_dir(str(tmp_path), "test")
+    images.mkdir(parents=True)
+    for label in ("real_A", "real_B", "fake_B"):
+        (images / f"loc000_{label}.png").write_bytes(b"")
+    assert [p.name for p in task.generated_paths(str(tmp_path), "test")] == ["loc000_fake_B.png"]
+
+
+@pytest.mark.parametrize("direction", runner.DIRECTIONS)
+def test_nothing_generated_is_an_error_naming_what_was_looked_for(
+    direction: str, tmp_path: Path
+) -> None:
+    """A run that generated nothing must not finish with `test: {}`."""
+    task = runner.DomainAdaptation(direction=direction, name="run")
+    with pytest.raises(RuntimeError, match=r"no `\*_fake_B\.png` generated images") as excinfo:
+        task.generated_paths(str(tmp_path), "test")  # the folder does not exist
+    message = str(excinfo.value)
+    assert direction in message and "results" in message and "test.py" in message
+
+    images = task.generated_dir(str(tmp_path), "test")
+    images.mkdir(parents=True)
+    (images / "loc000_fake_A.png").write_bytes(b"")  # only the other side: still nothing
+    with pytest.raises(RuntimeError, match="the folder has no such file"):
+        task.generated_paths(str(tmp_path), "test")
+
+
+def test_scoring_without_real_target_images_is_an_error(tmp_path: Path) -> None:
+    """The second silent `{}`: no real images of the target domain to compare against."""
+    pytest.importorskip("PIL")
+    from symtrs.config import RunConfig
+
+    root = _shadow_root(tmp_path, count=1, size=16)
+    run = tmp_path / "run"
+    cfg = RunConfig(task="domain_adapt", model="cyclegan", resolution=2048).with_overrides(
+        {"data.root": str(root), "out_dir": str(run)}
+    )
+    task = runner.DomainAdaptation(direction="night2day", name="run")
+    task.run_test = lambda **kwargs: None  # upstream is not launched here
+    images = task.generated_dir(str(run), "test")
+    images.mkdir(parents=True)
+    (images / "loc000_fake_B.png").write_bytes(b"")
+    day = root / "test" / "rgb_day"  # night2day's target
+    for image in day.iterdir():
+        image.unlink()
+    with pytest.raises(RuntimeError, match="no real day images to score night2day"):
+        runner.evaluate_adaptation(cfg, task, run)
 
 
 @pytest.mark.parametrize("direction", SHADOW_DIRECTIONS)
@@ -515,3 +616,23 @@ def test_pix2pix_selects_the_aligned_dataset_mode_and_cyclegan_the_unaligned_one
     pix2pix = runner.DomainAdaptation(direction="shadow2noshadow")
     pix2pix.key = "pix2pix"
     assert cyclegan.dataset_mode == "unaligned" and pix2pix.dataset_mode == "aligned"
+
+
+def test_a_partial_translation_of_the_split_is_an_error(tmp_path: Path) -> None:
+    """KID/FID take the whole real folder: fewer translations than real images would compare
+    two different scene sets, so a truncated upstream test pass must not be scored."""
+    pytest.importorskip("PIL")
+    from symtrs.config import RunConfig
+
+    root = _shadow_root(tmp_path, count=2, size=16)
+    run = tmp_path / "run"
+    cfg = RunConfig(task="domain_adapt", model="cyclegan", resolution=2048).with_overrides(
+        {"data.root": str(root), "out_dir": str(run)}
+    )
+    task = runner.DomainAdaptation(direction="night2day", name="run")
+    task.run_test = lambda **kwargs: None  # upstream is not launched here
+    images = task.generated_dir(str(run), "test")
+    images.mkdir(parents=True)
+    (images / "loc000_fake_B.png").write_bytes(b"")  # one of the two test frames
+    with pytest.raises(RuntimeError, match="did not translate the whole split"):
+        runner.evaluate_adaptation(cfg, task, run)

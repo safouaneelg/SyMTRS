@@ -3,7 +3,8 @@
 Why this exists: the validation runs take a night, and the machine they run on has
 blue-screened under load, so the queue keeps no state in memory:
 
-- a job whose `<run_dir>/summary.json` exists is done and is skipped;
+- a job whose `<run_dir>/summary.json` exists AND says it succeeded (`run_verdict`) is done and
+  is skipped; a summary of a run that failed, or that scored no test split, is not;
 - a job with `<run_dir>/weights/last.pt` but no summary was interrupted and is resumed from it;
 - `runs/STOP` (an empty file) makes the queue exit after the current job, cleanly;
 - every start / end is appended to `logs/queue_<date>.log` and `<out_root>/status.tsv`, so the
@@ -23,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import os
 import shlex
 import subprocess
@@ -52,6 +54,40 @@ def run_dir_for(out_root: Path, config: str) -> Path:
     # One folder per config file: the stem is unique across configs/ (e.g. midas_small_512,
     # srcnn_x4, cyclegan_day2night), and keeping the name lets `symtrs tables` read them all.
     return out_root / Path(config).stem
+
+
+def run_verdict(rc, run_dir: Path, eval_only: bool = False) -> tuple:
+    """`(ok, why)`: did this job really finish, judged by what it left behind.
+
+    A job is `ok` only if ALL of these hold:
+
+    * its exit code is 0;
+    * `<run_dir>/summary.json` exists and parses;
+    * the summary has no `returncode`, or it is 0 (the super-resolution front-end used to write
+      `returncode: 1` into summary.json and exit 0, so 13 failed smoke runs were recorded `ok`
+      and the queue would have skipped them forever);
+    * the summary has a non-empty `test` dict, unless `eval_only` (a run that trained and
+      scored nothing is not a result; `symtrs tables` leaves such a row blank on purpose).
+
+    `rc` may be "timeout" or any non-zero value; `why` names the first condition that failed so
+    that smoke.tsv and status.tsv say it instead of a bare "FAIL".
+    """
+    if rc != 0:
+        return False, f"rc={rc}"
+    path = run_dir / "summary.json"
+    if not path.is_file():
+        return False, "no summary.json"
+    try:
+        summary = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False, "summary.json unreadable"
+    if not isinstance(summary, dict):
+        return False, "summary.json is not an object"
+    if summary.get("returncode", 0) != 0:
+        return False, f"summary returncode={summary['returncode']}"
+    if not eval_only and not (isinstance(summary.get("test"), dict) and summary["test"]):
+        return False, "summary has no test metrics"
+    return True, ""
 
 
 def keep_awake() -> None:
@@ -149,8 +185,8 @@ def main() -> int:
             return 0
         run_dir = run_dir_for(out_root, config)
         tag = f"[{i}/{len(jobs)}] {Path(config).stem}"
-        if (run_dir / "summary.json").exists():
-            note(f"{tag} skip (summary.json exists)")
+        if run_verdict(0, run_dir)[0]:
+            note(f"{tag} skip (summary.json exists and records a scored run)")
             continue
         cmd = train_cmd(venv, config, args.data_root, run_dir, extra)
         last = run_dir / "weights" / "last.pt"
@@ -161,8 +197,8 @@ def main() -> int:
         t0 = time.time()
         rc = run_job(cmd, log, env, args.timeout_min)
         mins = (time.time() - t0) / 60
-        ok = rc == 0 and (run_dir / "summary.json").exists()
-        state = "ok" if ok else f"FAIL rc={rc}"
+        ok, why = run_verdict(rc, run_dir)
+        state = "ok" if ok else f"FAIL rc={rc}" + (f" ({why})" if why != f"rc={rc}" else "")
         note(f"{tag} {state} in {mins:.1f} min")
         with status.open("a", encoding="utf-8") as fh:
             fh.write(f"{now()}\t{Path(config).stem}\t{state}\t{mins:.1f}\t{log.name}\n")

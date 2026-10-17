@@ -29,11 +29,12 @@ ds = load_dataset("safouaneelg/SyMTRS")
 - `symtrs/` — the benchmark package: multi-resolution **monocular depth**, **semantic
   segmentation**, **day/night domain adaptation** and **super-resolution**, driven by one
   `symtrs` command and usable as a Python library.
-- `configs/` — YAML run configurations: one file per model and resolution (88 of them),
+- `configs/` — YAML run configurations: one file per model and resolution (95 of them),
   plus `generate_grid.py`, the table they are generated from. See
   [`configs/README.md`](configs/README.md).
 - `symtrs/legacy/` — the pre-existing super-resolution implementation and its datasets,
-  moved inside the package byte-identical and now driven through `symtrs` as well. See
+  moved inside the package and now driven through `symtrs` as well (the later edits are listed
+  in `symtrs/legacy/README.md`). See
   [Super-resolution](#super-resolution).
 - `train_superresolution.py`, `dataloader/` — thin shims that re-export from
   `symtrs/legacy/`, kept so the documented command and imports keep working.
@@ -611,7 +612,8 @@ training folder: `symtrs` passes it to the script as `--test_lr_root`/`--test_hr
 folds the resulting `test_metrics.json` into `summary.json`, which is what `symtrs tables`
 reads. A run whose test split is missing reports a validation number only, and says so.
 
-Underneath, the trainer is unchanged and can still be called directly:
+Underneath, the trainer can still be called directly (its later edits are listed in
+`symtrs/legacy/README.md`):
 
 ```bash
 python train_superresolution.py \

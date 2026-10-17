@@ -682,6 +682,9 @@ class SuperResModel:
         epochs: int,
         model_kwargs: Optional[Dict[str, object]] = None,
         note: str = "",
+        hr_patch: int = 0,
+        lr_patch: int = 0,
+        eval_hr_window: int = 0,
     ) -> None:
         self.key = key
         self.title = title
@@ -690,6 +693,46 @@ class SuperResModel:
         self.epochs = epochs
         self.model_kwargs = model_kwargs or {}
         self.note = note
+        # Training crop, one of the two. `hr_patch` fixes the region of the TARGET, so the
+        # LR patch is hr_patch / scale; `lr_patch` fixes the number of input pixels (and so
+        # the token count of an attention net) whatever the scale.
+        assert (hr_patch > 0) != (lr_patch > 0), "set exactly one of hr_patch / lr_patch"
+        self.hr_patch = hr_patch
+        self.lr_patch = lr_patch
+
+        # Cap on the evaluation window in TARGET pixels, for a network that runs at the
+        # target size (it refines a bicubic upsample): its memory follows the HR window, so
+        # the fixed LR window would mean a whole 2048 px frame in one pass at x4 / x8.
+        self.eval_hr_window = eval_hr_window
+
+    def eval_tile(self, scale: int) -> int:
+        """`eval.tile_size` for this model at `scale`, in LR pixels (see SR_EVAL_TILE)."""
+        if self.eval_hr_window:
+            return min(SR_EVAL_TILE, self.eval_hr_window // scale)
+        return SR_EVAL_TILE
+
+    def eval_overlap(self, scale: int) -> int:
+        """`eval.tile_overlap`: SR_EVAL_OVERLAP, but never more than a quarter of the window."""
+        return min(SR_EVAL_OVERLAP, self.eval_tile(scale) // 4)
+
+    def patch(self, scale: int) -> int:
+        """`train.patch_size` for this model at `scale`: always in LR pixels."""
+        if self.lr_patch:
+            return self.lr_patch
+        assert self.hr_patch % scale == 0, (self.key, scale)
+        return self.hr_patch // scale
+
+
+#: Evaluation window of every super-resolution row, in LR pixels (`eval.tile_size`). The whole
+#: image is scored (val and test alike) and the metrics are computed on the stitched result;
+#: windows only decide how it is pushed through the network. The training crop is NOT the
+#: window here, unlike depth and segmentation (`eval_tiling`): a 64 px SwinIR window at x1
+#: would be ~1800 windows per frame (minutes per validation pass), and these networks are
+#: convolutional or window-local, so a larger window does not change what they see. 512 LR
+#: pixels is the largest the 12 GB card takes for SwinIR at x1 - and at x4 / x8 the whole LR
+#: frame is <= 512, so those rows are scored in a single pass, tile-free.
+SR_EVAL_TILE = 512
+SR_EVAL_OVERLAP = 64
 
 
 SUPERRES_MODELS: List[SuperResModel] = [
@@ -699,6 +742,7 @@ SUPERRES_MODELS: List[SuperResModel] = [
         batch=16,
         lr=1.0e-4,
         epochs=40,
+        hr_patch=256,
         model_kwargs={"use_y_channel": True},
         note=(
             "Three convolutional layers on a bicubic-upsampled input: the cheapest baseline\n"
@@ -706,9 +750,10 @@ SUPERRES_MODELS: List[SuperResModel] = [
             "recovers before any of the deep models get credit for it.\n"
             "\n"
             "`use_y_channel: true` is SRCNN's own convention: the network sees the luma channel\n"
-            "only and the chroma is carried over from the bicubic upsample. That is how the\n"
-            "published SRCNN numbers are produced, and it also makes this run about a third the\n"
-            "cost of the colour version."
+            "only. The trainer then scores PSNR / SSIM / MSE on the luma channel too - it does not\n"
+            "put the bicubic chroma back, so a Y-channel row is not comparable with an RGB row.\n"
+            "That matches how the published SRCNN numbers are produced, and it also makes this\n"
+            "run about a third the cost of the colour version."
         ),
     ),
     SuperResModel(
@@ -717,6 +762,10 @@ SUPERRES_MODELS: List[SuperResModel] = [
         batch=8,
         lr=1.0e-4,
         epochs=40,
+        hr_patch=256,
+        # Measured on the 12 GB card: a 1024 px target window evaluates (x1, x2), a whole
+        # 2048 px frame runs out of memory (x4, x8 with the default 512 px LR window).
+        eval_hr_window=1024,
         note=(
             "An encoder-decoder that refines the bicubic upsample rather than predicting the\n"
             "high-resolution image from nothing. Same input convention as SRCNN, more capacity,\n"
@@ -730,6 +779,7 @@ SUPERRES_MODELS: List[SuperResModel] = [
         batch=4,
         lr=1.0e-4,
         epochs=60,
+        hr_patch=256,
         model_kwargs={"adv_weight": 1.0e-3},
         note=(
             "The only model in this task with a discriminator, and the only one whose loss is\n"
@@ -750,6 +800,7 @@ SUPERRES_MODELS: List[SuperResModel] = [
         batch=4,
         lr=2.0e-4,
         epochs=40,
+        lr_patch=64,
         model_kwargs={
             "swinir_embed_dim": 96,
             "swinir_depths": [6, 6, 6, 6],
@@ -760,10 +811,12 @@ SUPERRES_MODELS: List[SuperResModel] = [
             "swinir_checkpoint": False,
         },
         note=(
-            "Window-attention transformer: the heaviest SR baseline and, unlike the other\n"
-            "three, one whose cost grows with the *input* size rather than being fixed by the\n"
-            "network. That is what train.patch_size is for - the other three models train on the\n"
-            "whole image.\n"
+            "Window-attention transformer: the heaviest SR baseline, and the one whose cost grows\n"
+            "fastest with the *input* size (tokens, not pixels, set its memory). Every model in\n"
+            "this task trains on random aligned crops (train.patch_size, in LR pixels): the CNNs\n"
+            "on a fixed 256 px region of the target at every scale, SwinIR on a fixed 64 px LR\n"
+            "patch, i.e. a fixed token count - so its target region grows with the scale (64 px\n"
+            "at x1 up to 512 px at x8).\n"
             "\n"
             "The architecture keys in model_kwargs (embed_dim, depths, num_heads, window,\n"
             "mlp_ratio, upsampler) are fixed at build time and have to match the checkpoint, so\n"
@@ -771,7 +824,11 @@ SUPERRES_MODELS: List[SuperResModel] = [
             "defaults. Set `swinir_checkpoint: true` to trade ~30% of the speed for a much\n"
             "smaller activation footprint, which is the lever to reach for if x8 runs out of\n"
             "memory. train.amp is also passed for this model only; the script implements AMP for\n"
-            "SwinIR and for nothing else."
+            "SwinIR and for nothing else.\n"
+            "\n"
+            "The attention masks are precomputed for the training crop, not for a whole frame\n"
+            "(a 2048 px frame needs ~10 GB of them, and they end up in every checkpoint); any\n"
+            "other input size recomputes them on the fly."
         ),
     ),
 ]
@@ -1341,13 +1398,19 @@ def superresolution_yaml(model: SuperResModel, resolution: int) -> str:
         ]
         if model.key == "swinir":
             header += [
-                "This is the one model whose training cost grows with the input size, so",
+                "This is the model whose training cost grows fastest with the input size, so",
                 "train.patch_size matters more as the scale rises: the crop is in LR pixels,",
-                f"so a 64px crop is a {64 * scale}px region of the target. Raise it if memory",
+                f"so a {model.patch(scale)}px crop is a {model.patch(scale) * scale}px region of the target. Raise it if memory",
                 "allows, and set model_kwargs.swinir_checkpoint: true at x8 if it does not.",
                 "",
             ]
     header += [
+        f"Training is on random aligned crops: {model.patch(scale)}px of the LR input and the",
+        f"matching {model.patch(scale) * scale}px of the target. A whole 2048px frame does not fit a 12 GB card for any",
+        "model here. Validation and test score the WHOLE image (val_patch_size: 0), pushed",
+        "through the network in eval.tile_size windows where it does not fit in one pass;",
+        "PSNR / SSIM / MSE are computed per image on the stitched result and averaged.",
+        "",
         "The training code for this task predates the `symtrs` package and now lives inside",
         "it: `symtrs/legacy/superres/train.py` owns the model set, the data loading and the",
         "metrics, launched as `python -m symtrs.legacy.superres.train`. `symtrs` translates",
@@ -1393,13 +1456,16 @@ def superresolution_yaml(model: SuperResModel, resolution: int) -> str:
         "  # weights/best.pt without training at all.",
         '  resume: ""',
     ]
+    kept_fixed = "a fixed 256px target region" if model.hr_patch else "a fixed 64px LR patch (token count)"
+    body += [
+        f"  # LR pixels of the random training crop, every model: {kept_fixed}, so the target",
+        f"  # crop is x{scale} that = {model.patch(scale) * scale}px.",
+        f"  patch_size: {model.patch(scale)}",
+        "  # 0 = the whole image at val and test, never the training crop.",
+        "  val_patch_size: 0",
+    ]
     if model.key == "swinir":
-        body += [
-            "  # LR-space crops, SwinIR only: the other three models train on the whole image.",
-            "  patch_size: 64",
-            "  val_patch_size: 0",
-            "  amp: true",
-        ]
+        body += ["  amp: true"]
     body += [
         "",
         "eval:",
@@ -1409,6 +1475,12 @@ def superresolution_yaml(model: SuperResModel, resolution: int) -> str:
         "  batch_size: 1",
         "  amp: true",
         "  num_visualizations: 4",
+        "  # The whole image is scored in windows of this many LR pixels, blended and stitched;",
+        "  # metrics are computed on the stitched image. Larger than the training crop on purpose",
+        "  # (see SR_EVAL_TILE in configs/generate_grid.py); a frame no larger than the window is",
+        "  # scored in one pass.",
+        f"  tile_size: {model.eval_tile(scale)}",
+        f"  tile_overlap: {model.eval_overlap(scale)}",
     ]
     return _render(header, body)
 
