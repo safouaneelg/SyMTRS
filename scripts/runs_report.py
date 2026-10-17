@@ -51,6 +51,35 @@ PROTOCOL = {
 }
 
 
+def make_redactor(data_root: str, enabled: bool):
+    r"""`text -> text` that hides machine-specific absolute paths.
+
+    The generated RUNS.md is committed to a public repository. The dataset root becomes
+    `<DATA_ROOT>`, the repository checkout `<REPO>`, and any other `X:\Users\<name>` home
+    prefix `<HOME>` (the fallback for paths this script did not anticipate). Both slash
+    styles and the JSON-escaped doubled backslash are matched, case-insensitively.
+    """
+    if not enabled:
+        return lambda text: text
+
+    def variants(path: str) -> list[str]:
+        p = Path(path)
+        return sorted({str(p), p.as_posix(), str(p).replace("\\", "\\\\")}, key=len, reverse=True)
+
+    steps = []
+    if data_root and data_root != "?":
+        steps.append((re.compile("|".join(re.escape(v) for v in variants(data_root)), re.I), "<DATA_ROOT>"))
+    steps.append((re.compile("|".join(re.escape(v) for v in variants(str(REPO))), re.I), "<REPO>"))
+    steps.append((re.compile(r"[A-Za-z]:[\\/]+Users[\\/]+[^\\/\s`\"']+", re.I), "<HOME>"))
+
+    def redact(text: str) -> str:
+        for pattern, repl in steps:
+            text = pattern.sub(repl, text)
+        return text
+
+    return redact
+
+
 def sh(cmd: list[str]) -> str:
     try:
         return subprocess.run(cmd, capture_output=True, text=True, cwd=REPO,
@@ -105,6 +134,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--runs", default="runs/validation")
     ap.add_argument("--out", default="docs/claude/RUNS.md")
+    ap.add_argument("--redact-root", action=argparse.BooleanOptionalAction, default=True,
+                    help="print <DATA_ROOT> / <REPO> instead of absolute paths, in the data "
+                         "line and in the logged commands (default: on; the document is "
+                         "committed to a public repository)")
     args = ap.parse_args()
     runs = REPO / args.runs
     status = status_rows(runs)
@@ -113,6 +146,9 @@ def main() -> int:
     fp = re.search(r"Dataset fingerprint: `(\w+)`", dataset_md.read_text(encoding="utf-8")) \
         if dataset_md.exists() else None
     env = run_env()
+    data_root = next((yaml.safe_load((d / "config.yaml").read_text(encoding="utf-8"))["data"]["root"]
+                      for d in sorted(runs.glob("*")) if (d / "config.yaml").exists()), "?")
+    redact = make_redactor(data_root, args.redact_root)
     L = [
         "# How every model was run",
         "",
@@ -127,7 +163,7 @@ def main() -> int:
         "",
         "## Data",
         "",
-        f"- Root: `{next((yaml.safe_load((d / 'config.yaml').read_text(encoding='utf-8'))['data']['root'] for d in sorted(runs.glob('*')) if (d / 'config.yaml').exists()), '?')}`",
+        f"- Root: `{data_root}`",
         f"- Dataset fingerprint: `{fp.group(1) if fp else '?'}` - per-folder counts, sizes and "
         "fingerprints in [DATASET.md](DATASET.md) (`scripts/dataset_manifest.py`).",
         "- Splits: train for training, val for model selection (best checkpoint), test scored "
@@ -143,7 +179,7 @@ def main() -> int:
         f"- `.venv`: {venv_versions('.venv')}",
         f"- `.venv-zoe` (ZoeDepth, MiDaS Swin2-tiny: timm 0.6.12): {venv_versions('.venv-zoe')}",
         "- Environment set for every run (`scripts/run_queue.py` `run_env`): " + ", ".join(
-            f"`{k}={v if 'cache' not in v else v.replace(str(REPO), '<repo>')}`"
+            f"`{k}={v if 'cache' not in v else v.replace(str(REPO), '<REPO>')}`"
             for k, v in env.items() if k in ("TORCH_HOME", "HF_HOME", "HF_HUB_OFFLINE",
                                               "SYMTRS_CUDA_MEM_FRACTION", "OMP_NUM_THREADS")) + ".",
         "- Batch sizes: the YAMLs' values were tried first and halved on out-of-memory by "
@@ -189,7 +225,7 @@ def main() -> int:
         L += ["```", "", "</details>", ""]
 
     out = REPO / args.out
-    out.write_text("\n".join(L) + "\n", encoding="utf-8")
+    out.write_text(redact("\n".join(L)) + "\n", encoding="utf-8")
     print(f"{sum(len(v) for v in by_task.values())} runs -> {out}")
     return 0
 

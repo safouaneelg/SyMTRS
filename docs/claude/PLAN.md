@@ -194,12 +194,12 @@ Mon rôle :
 ### Risques
 - **VRAM** : Unreal ouvert = OOM. Les modèles ViT-L à 2048 demandent batch 1, AMP et du tiling. DeepLab demande batch ≥ 2.
 - **Blackwell sm_120** : il faut torch cu128. Les extensions CUDA compilées des dépôts tiers ne seront pas disponibles sans nvcc. Uformer et Restormer sont en PyTorch pur ; il faudra vérifier ShadowFormer (pas d'extension a priori). Si besoin : `pip install` des wheels ou un patch.
-- **Windows** : symlinks du staging (mode Développeur, ou repli hardlink/copie), `num_workers` avec spawn, chemins contenant des espaces (`Unreal Projects`).
+- **Windows** : symlinks du staging (mode Développeur, ou repli hardlink/copie), `num_workers` avec spawn, chemins contenant des espaces (le dossier du projet Unreal, `<UNREAL_PROJECT>`).
 - **Dataset minuscule** (96 images) et 2 époques : les chiffres valident seulement la chaîne de bout en bout. Ils seront marqués « validation run, preview dataset, 2 epochs » dans `RESULTS.md` et ne seront jamais présentés comme résultats, conformément à AGENTS.md.
 - **Dépendances anciennes** des dépôts ombre : ShadowFormer et Uformer épinglent d'anciens timm/torch. On isole dans une venv dédiée si le conflit est réel.
 - **Masque d'ombre dérivé** : le seuil influence ShadowFormer et les métriques par zone. Seuil documenté et test de sensibilité dans `SUGGESTIONS.md`.
 - **Le dataset va changer** (passage à 20k transforms) : tout passe par le data-root et la config, rien n'est codé en dur.
-- **Écriture interdite** dans `Unreal Projects` : le staging et les caches vont uniquement dans `runs/` du repo.
+- **Écriture interdite** dans `<UNREAL_PROJECT>` : le staging et les caches vont uniquement dans `runs/` du repo.
 
 ## Fichiers critiques
 - `symtrs/data/io.py`, `splits.py`, `semantic_dataset.py`, `exr.py`, `symtrs/config.py`

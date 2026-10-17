@@ -66,7 +66,7 @@ dataset preview (144 transforms, 96/24/24). Pas de convergence recherchée ; auc
   exacte, config résolue, env, versions, batch, budget, métriques test par run).
 - 2026-10-16 19:55 : commit local `2843b46` sur `features` (tout le travail jusqu'ici). Smoke tests
   11/91 faits. **Pour reprendre après extinction** :
-  `.venv\Scripts\python.exe -u scripts\smoke_all.py --data-root "C:\Users\bapti\Documents\Unreal Projects\SyMTRS\Saved\DatasetCaptures"`
+  `.venv\Scripts\python.exe -u scripts\smoke_all.py --data-root "<DATA_ROOT>"`
   (saute les configs déjà `ok` dans `runs/smoke/smoke.tsv`).
 - 2026-10-16 : **décision utilisateur** : shadow removal en fine-tuning depuis les poids publiés (ShadowFormer ISTD+, Restormer real_denoising, Uformer-B SIDD), inscrit dans `scripts/smoke_all.py` (SHADOW_INIT → `--set shadow.init_weights=...` dans la file).
 - 2026-10-17 03:45 : PC en veille ~20:00→03:39 pendant le smoke (7,6 h perdues ; da3_large_2048 affiché 460 min). Ajout `keep_awake()` (SetThreadExecutionState) dans run_queue/smoke_all ; garder le capot ouvert. 39/91 smoke faits (33 ok, 6 FAIL : DA3 1024 OOM patch 0, Depth Pro OOM, BEiT-L drop_path/timm). 3 agents Sonnet : DA3+BEiT, Depth Pro 12 GB, audit plausibilité métriques.
@@ -81,10 +81,10 @@ dataset preview (144 transforms, 96/24/24). Pas de convergence recherchée ; auc
 - 2026-10-17 04:10 : protocole d'évaluation corrigé (agent ; 581 tests) ; Depth Pro fine-tunable (freeze jamais appliqué → corrigé, 7,9 GiB). Objectif optionnel 3 (translation ombre⇄sans ombre pix2pix/CycleGAN via le front-end domain) lancé (agent). Restant : conventions profondeur (agent), re-smoke complet, file de nuit, RESULTS/RUNS, PR.
 
 ## Checklist PR (à faire avant la PR, dépôt PUBLIC safouaneelg/SyMTRS)
-- [x] `gh auth status` : compte baptiste-lucas, droit push OK ; local `features` en avance sur `origin/features`.
-- [ ] Retirer les chemins personnels des fichiers commités (`C:\Users\bapti\...`, `Unreal Projects`) :
+- [x] `gh auth status` : compte GitHub de l'utilisateur, droit push OK ; local `features` en avance sur `origin/features`.
+- [x] Chemins personnels retirés des fichiers commités (chemins absolus de la machine, dossier du projet Unreal) :
       DATASET.md / RUNS.md → `<DATA_ROOT>` ; `scripts/run_queue.ps1` → paramètre/env `SYMTRS_DATA_ROOT` ;
-      PLAN.md / PROGRESS.md → chemins relatifs. Vérifier `git grep -i "Users\bapti\|Unreal Projects"`.
+      PLAN.md / PROGRESS.md → placeholders `<DATA_ROOT>`, `<REPO>`, `<UNREAL_PROJECT>`. `scripts/dataset_manifest.py` et `scripts/runs_report.py` redactent par défaut (`--redact-root`).
 - [ ] Email d'auteur des commits : demander à l'utilisateur (email perso public vs noreply GitHub).
 - [ ] Aucun .pt/.pth/log/donnée/`.cache`/`checkpoints`/`runs` suivi ; `third_party/*/` ignoré.
 - [ ] Suite de tests verte, `generate_grid.py --check`, RESULTS.md + RUNS.md à jour.
@@ -101,3 +101,7 @@ dataset preview (144 transforms, 96/24/24). Pas de convergence recherchée ; auc
   variable, matching affine des tuiles fragile, prédictions ≤0 ignorées, FID asymétrique, smoke qui
   change le batch effectif, init shadow hétérogène. 3 agents Sonnet de correction (trainer / métriques+
   tuilage / domain+shadow+smoke). La passe 2 du smoke continue (valide pour plomberie et batch).
+- 2026-10-17 05:25 : corrections de la revue commitées (`52d07ba`, 654 tests ; tests du scheduler
+  vérifiés en échec sur l'ancien code). Passe 2 arrêtée (code intermédiaire, archivée
+  `runs/smoke_pass2_partial/`). **Passe 3 propre** lancée sur le code final (95 configs) →
+  `logs/smoke_all_pass3_*.log`, horodatage début/fin dans `logs/smoke_pass3_start.txt`.
