@@ -68,3 +68,50 @@ Capture log (`capture_log.txt`, outside the splits): `=== Capture finished: 144/
 | `semantic_lr/x4` | 24 | 0 | `seg_day_512_loc010_rot045deg_h00_x+057749_y-028421_z+018530.png` | 512x512 PNG 8-bit gray | `3e4eddf3c6d6f445` |
 | `semantic_lr/x8` | 24 | 0 | `seg_day_256_loc010_rot045deg_h00_x+057749_y-028421_z+018530.png` | 256x256 PNG 8-bit gray | `df1417d318b910d3` |
 
+
+## Depth range and camera altitude (checked 2026-10-17)
+
+Measured by hand on the preview dataset; not produced by `scripts/dataset_manifest.py`, so
+re-add this section if that script regenerates the file.
+
+**Format.** The depth EXR is planar scene depth (distance along the optical axis, not along the
+ray) in centimetres, with the same convention in `train/`, `val/` and `test/`
+(`data.depth_scale: 0.01` gives metres). The format is fine for the depth task.
+
+**Floor of the depth range per location and height.** "Floor" is the 99th percentile of depth,
+which in a nadir view is the ground:
+
+| split | location | h00 | h01 | h02 | h03 |
+|---|---|---:|---:|---:|---:|
+| train / val | all locations except below | 70 m | 100 m | 130 m | 160 m |
+| test | loc010 | 184.8 m | 214.8 m | 244.8 m | 274.8 m |
+| test | loc011 | 152 m | 182 m | 212 m | 242 m |
+
+Exceptions in train/val: loc000 is +22 m and loc002 +9 m above those values (the camera
+sat above a higher first hit there).
+
+**Cause.** The capture actor sets the camera altitude above the first `ECC_Visibility` hit found
+under the location, plus a base height (`Source/CitySampleEditor/DatasetCapture/SyMTRSDatasetCaptureActor.cpp`,
+lines ~1153-1191 in the Unreal project). The altitude is therefore relative to the first surface
+hit (for example a roof), not to the ground. At loc010 and loc011 the location
+centre is a skyscraper roof (centre depth 70.0 m, class building), so the camera is 70 m above
+the roof and the street is 152-185 m away at h00. The file names record it (`z+018530` at loc010,
+`z+015249` at loc011). Foliage does not block the trace: a centre pixel on green is at ~30 m
+and the floor is still 70 m.
+
+**Consequence.** Test depths reach ~275 m; train depths stop at ~182 m. The test split is harder
+for a capture reason, not because of the scenes: a large part of the metric-depth test error
+comes from predicting outside the training range. Val/test gaps for depth must not be read as
+model quality alone.
+
+### FOV
+
+The dataset carries no camera intrinsics. The capture actor's default is `FieldOfView = 60`
+(`SyMTRSDatasetCaptureActor.h:97`, `EditAnywhere`, so it can differ per instance in the level);
+the package assumes 60 deg horizontal (`data.camera_hfov_deg`).
+
+Estimate from the data: 838 car blobs in `train/` (segmentation class car; blob length by PCA,
+median depth of the blob) give a horizontal FOV of 54 / 59 / 63 deg for assumed car lengths of
+4.2 / 4.6 / 5.0 m (IQR about +-3.5 deg); from a 1.85 m width, 55 deg. That is consistent with 60
+and rules out 45, 75 and 90, but it is not a proof of exactly 60. Reading the value off the
+actor instance in the editor is the authoritative check and is still to do.

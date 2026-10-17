@@ -900,7 +900,7 @@ class ShadowModel:
 
 #: Optimiser settings are each paper's own shadow / restoration recipe (AdamW, Charbonnier
 #: loss, cosine decay). `patch` is the training crop and, because these networks are not
-#: trained above it, also the inference tile. The epoch budget is the same for all three so
+#: trained above it, also the inference tile. The epoch budget is the same for all four so
 #: the comparison is not decided by who got longer; one epoch is one random crop from each
 #: of the 96 training images (24 iterations at batch 4).
 SHADOW_MODELS: List[ShadowModel] = [
@@ -916,12 +916,12 @@ SHADOW_MODELS: List[ShadowModel] = [
         warmup_epochs=3,
         tile_overlap=64,
         note=(
-            "ShadowFormer is the only one of the three that is shadow-aware: it takes a shadow\n"
-            "mask as a second input. The dataset has none, so the mask is derived at staging from\n"
-            "the rgb_day / rgb_noshadow pair (see `shadow:` below); the model is therefore given a\n"
-            "mask no real-world deployment would have unless a detector supplied it, and the\n"
-            "other two models are not. Read the comparison with that in mind. 320 px and a\n"
-            "window of 10 are upstream's own settings."
+            "ShadowFormer is one of the two shadow-aware models here (with ShadowMaskFormer): it\n"
+            "takes a shadow mask as a second input. The dataset has none, so the mask is derived\n"
+            "at staging from the rgb_day / rgb_noshadow pair (see `shadow:` below); the model is\n"
+            "therefore given a mask no real-world deployment would have unless a detector\n"
+            "supplied it, and Restormer and Uformer are not. Read the comparison with that in\n"
+            "mind. 320 px and a window of 10 are upstream's own settings."
         ),
     ),
     ShadowModel(
@@ -958,6 +958,31 @@ SHADOW_MODELS: List[ShadowModel] = [
             "Uformer-B, the configuration of Uformer's own shadow-removal experiments (windowed\n"
             "attention with the multi-scale modulator), at its default 256 px crop. Like\n"
             "Restormer it sees the shadowed image only."
+        ),
+    ),
+    ShadowModel(
+        "shadowmaskformer",
+        "ShadowMaskFormer",
+        "lizhh268/ShadowMaskFormer",
+        patch=256,
+        batch=4,
+        lr=2.0e-4,
+        weight_decay=0.02,
+        min_lr_ratio=0.005,
+        warmup_epochs=3,
+        tile_overlap=64,
+        note=(
+            "ShadowMaskFormer-b (IEEE TAI 2025, 2.28 M parameters, about a fifth of ShadowFormer's\n"
+            "size): the light, shadow-aware model. Like ShadowFormer it takes the derived shadow\n"
+            "mask as a second input, so the same caveat applies. It is written for [-1, 1] images\n"
+            "and masks; the shared worker converts at the network boundary. NO RELEASED WEIGHTS:\n"
+            "the authors publish none, so this model is always trained from scratch\n"
+            "(shadow.init_weights stays empty), while ShadowFormer starts from ISTD+ weights. Its\n"
+            "comparison with ShadowFormer is therefore not like-for-like: a gap mixes the\n"
+            "architecture with the initialisation. The recipe is upstream's (AdamW, lr 2e-4,\n"
+            "weight decay 0.02, cosine to 1e-6) with the shared Charbonnier loss; upstream uses\n"
+            "batch 1 and L1, this grid keeps the shared batch 4 and loss. The upstream repository\n"
+            "carries no licence, so it is fetched, never committed."
         ),
     ),
 ]
@@ -1501,7 +1526,7 @@ def shadow_yaml(model: ShadowModel) -> str:
         "revision in third_party/PINS.md by `python scripts/fetch_third_party.py` (the clones are",
         "not committed). SyMTRS stages the data, runs one shared training loop and one shared",
         "tiled inference around the upstream class, and scores the PNGs it writes with",
-        "symtrs/metrics/shadow.py - the same numbers for all three models:",
+        "symtrs/metrics/shadow.py - the same numbers for all four models:",
         "PSNR, SSIM and LAB error on all pixels, in the shadow region and outside it.",
         "",
         "Native resolution only: rgb_noshadow has no downsampled twin. The training budget is",

@@ -4,18 +4,18 @@
 #     symtrs train configs/shadow_removal/shadowformer.yaml --data-root /data/SyMTRS --set shadow.iterations=500
 #     symtrs eval  configs/shadow_removal/shadowformer.yaml --data-root /data/SyMTRS --eval-split test
 #
-# ShadowFormer is the only one of the three that is shadow-aware: it takes a shadow
-# mask as a second input. The dataset has none, so the mask is derived at staging from
-# the rgb_day / rgb_noshadow pair (see `shadow:` below); the model is therefore given a
-# mask no real-world deployment would have unless a detector supplied it, and the
-# other two models are not. Read the comparison with that in mind. 320 px and a
-# window of 10 are upstream's own settings.
+# ShadowFormer is one of the two shadow-aware models here (with ShadowMaskFormer): it
+# takes a shadow mask as a second input. The dataset has none, so the mask is derived
+# at staging from the rgb_day / rgb_noshadow pair (see `shadow:` below); the model is
+# therefore given a mask no real-world deployment would have unless a detector
+# supplied it, and Restormer and Uformer are not. Read the comparison with that in
+# mind. 320 px and a window of 10 are upstream's own settings.
 #
 # This is not a SyMTRS model. The network class is upstream guolanqing/ShadowFormer, cloned at the
 # revision in third_party/PINS.md by `python scripts/fetch_third_party.py` (the clones are
 # not committed). SyMTRS stages the data, runs one shared training loop and one shared
 # tiled inference around the upstream class, and scores the PNGs it writes with
-# symtrs/metrics/shadow.py - the same numbers for all three models:
+# symtrs/metrics/shadow.py - the same numbers for all four models:
 # PSNR, SSIM and LAB error on all pixels, in the shadow region and outside it.
 #
 # Native resolution only: rgb_noshadow has no downsampled twin. The training budget is

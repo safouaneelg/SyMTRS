@@ -298,6 +298,7 @@ def print_shadow_commands(cfg: RunConfig) -> None:
 
     print("[symtrs] dry run - nothing will be staged or trained")
     check_config(cfg, "finetune")
+    cfg = cfg.anchored()  # what the real run hands the worker: absolute paths
     config_path = cfg.resolved_out_dir / "config.yaml"
     print(f"[symtrs] cwd: {arch_for(cfg.model).repo_path}")
     for phase, splits in (("train", ""), ("predict", f"{cfg.data.val_split},{cfg.data.test_split}")):

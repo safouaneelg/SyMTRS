@@ -220,13 +220,19 @@ def compute_kid(
     num_subsets: int = 0,
     subset_size: int = 100,
     seed: int = 0,
-) -> Dict[str, float]:
+) -> Dict[str, Optional[float]]:
     """Kernel Inception Distance: an unbiased MMD^2 with a polynomial kernel.
 
     KID is reported instead of FID whenever the validation split is small, because FID's
     covariance estimate is badly biased below a few thousand images while KID is not.
     If `num_subsets > 0` the mean and standard deviation over random subsets are
     returned, which is how the original code reports a confidence interval.
+
+    With `num_subsets=0` (the default, and what the domain runner uses) there is one
+    full-set estimate and no spread was measured, so `kid_std` is `None` and lands in
+    `summary.json` as `null`. It used to be `0.0`, which reads as a measured zero spread
+    ("the estimate is exact") next to an N of 24; a quantity that was never estimated is
+    not zero (AGENTS.md rule 11: what cannot be computed is `null`, never a number).
     """
     if real_features.shape[0] < 2 or fake_features.shape[0] < 2:
         raise ValueError("KID needs at least 2 images per side")
@@ -242,7 +248,7 @@ def compute_kid(
         return float(sum_aa + sum_bb - 2.0 * k_ab.mean())
 
     if not num_subsets:
-        return {"kid": mmd2(real_features, fake_features), "kid_std": 0.0}
+        return {"kid": mmd2(real_features, fake_features), "kid_std": None}
 
     generator = np.random.default_rng(seed)
     values = []
@@ -259,12 +265,12 @@ def distribution_metrics(
     fake_features: np.ndarray,
     with_kid: bool = True,
     num_subsets: int = 0,
-) -> Dict[str, float]:
+) -> Dict[str, Optional[float]]:
     """KID (primary) and FID in one call. KID is skipped below 2 images per side.
 
     The dict lists `kid` first on purpose: it is the number to quote when N is small.
     """
-    results: Dict[str, float] = {}
+    results: Dict[str, Optional[float]] = {}
     if with_kid:
         try:
             results.update(compute_kid(real_features, fake_features, num_subsets=num_subsets))

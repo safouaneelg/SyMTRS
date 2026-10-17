@@ -29,7 +29,7 @@ ds = load_dataset("safouaneelg/SyMTRS")
 - `symtrs/` — the benchmark package: multi-resolution **monocular depth**, **semantic
   segmentation**, **day/night domain adaptation** and **super-resolution**, driven by one
   `symtrs` command and usable as a Python library.
-- `configs/` — YAML run configurations: one file per model and resolution (95 of them),
+- `configs/` — YAML run configurations: one file per model and resolution (96 of them),
   plus `generate_grid.py`, the table they are generated from. See
   [`configs/README.md`](configs/README.md).
 - `symtrs/legacy/` — the pre-existing super-resolution implementation and its datasets,
@@ -349,7 +349,8 @@ configs/
   segmentation/<...>/         <model>_<resolution>.yaml
   domain_adapt/               <model>_<direction>.yaml      (day2night, night2day, shadow2noshadow, noshadow2shadow)
   superresolution/            <model>_x<scale>.yaml
-  generate_grid.py            the tables all 88 files are expanded from
+  shadow_removal/             <model>.yaml                  (4 models, 2048 only)
+  generate_grid.py            the tables all 96 files are expanded from
 ```
 
 `generate_grid.py` is the source of truth: the models, their depth protocol, their memory

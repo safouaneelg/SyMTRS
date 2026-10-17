@@ -80,6 +80,8 @@ VALIDATION_FLAGS = {
 # 500 iterations from scratch leave ShadowFormer far from even the identity mapping (test PSNR
 # ~11 on the dummy), so a from-scratch number would say nothing about the model. All three
 # load fully (274/274, 406/406, 759/759 tensors, see docs/claude/PROGRESS.md).
+# ShadowMaskFormer is deliberately absent: the authors release no weights, so it is always
+# trained from scratch (runs/queue_shadowmaskformer.txt has its line, without init_weights).
 SHADOW_INIT = {
     "shadowformer": ".cache/third_party/ShadowFormer/istd_plus.pth",
     "restormer": ".cache/third_party/Restormer/real_denoising.pth",

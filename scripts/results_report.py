@@ -67,10 +67,15 @@ NOTES = {
                        "control, not super-resolution. For scale: bicubic upsampling scores "
                        "x2 22.9 / x4 20.9 / x8 19.3 dB on this test split.",
     "shadow_removal": "`rgb_day` -> `rgb_noshadow` at 2048. `init` = what the run was "
-                      "initialised from; the three models do NOT start from comparable weights "
-                      "(ShadowFormer: ISTD+ shadow removal; Restormer/Uformer: denoising), so rows "
+                      "initialised from; the models do NOT start from comparable weights "
+                      "(ShadowFormer: ISTD+ shadow removal; Restormer/Uformer: denoising; "
+                      "ShadowMaskFormer: none released, from scratch), so rows "
                       "must not be ranked. SSIM_y is luma-only SSIM (not comparable with "
-                      "published per-channel SSIM). Shadow mask is derived from the pair. The "
+                      "published per-channel SSIM). `MAE LAB` is the ISTD literature's "
+                      "\"RMSE\": the absolute error summed over L, a and b, so it can exceed "
+                      "`RMSE LAB`, which is a true per-channel root mean square. Shadow mask "
+                      "is derived from the pair (and handed to ShadowFormer / ShadowMaskFormer "
+                      "at test time too, as in ISTD; Restormer/Uformer get no mask). The "
                       "`identity` row scores the shadowed input itself: a model removes "
                       "shadows only where it beats that row.",
     "domain_adapt": "CycleGAN / pix2pix train and predict at 256 px. KID / FID compare them "
@@ -141,6 +146,10 @@ def _cell(spec: str, row: Dict[str, Any], summ: Dict[str, Any], cfg: Dict[str, A
     value = _special(spec[1:], row, summ, cfg) if spec.startswith("@") else row.get(spec)
     if value is None or value == "":
         return "n/a"
+    # Summaries written before 2026-10-17 carry `kid_std: 0.0` for the full-set KID, which
+    # drew no subsets: no spread was measured, so it is not a measured zero.
+    if spec == "kid_std" and value == 0:
+        return "n/a"
     # Counts are stored as floats by the metric aggregators; show them as integers.
     if spec in ("n_fake", "n_real", "miou_classes") and isinstance(value, (int, float)):
         return str(int(value))
@@ -181,6 +190,60 @@ def _identity_row(runs_dir: Path, head: Sequence[Tuple[str, str]]) -> List[str]:
     return ["| identity (input as output) | " + " | ".join(cells) + " |"]
 
 
+DOMAIN_IDENTITY_NOTE = (
+    "input (untranslated) vs target; a translator must beat this KID to have done anything"
+)
+
+
+def _domain_identity(runs_dir: Path) -> Dict[str, Any]:
+    """The `scripts/domain_identity_baseline.py` result, or `{}` when it was not scored."""
+    import json
+
+    path = runs_dir / "_baselines" / "domain_identity.json"
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _domain_identity_rows(
+    runs_dir: Path, head: Sequence[Tuple[str, str]], directions: Sequence[str]
+) -> List[str]:
+    """One "do nothing" row per direction: the untranslated input scored like a translator.
+
+    Only the distribution columns exist for it; the paired shadow2noshadow columns stay `-`
+    (the shadow_removal table's identity row has them, at 2048 and not at 256 px).
+    """
+    baseline = _domain_identity(runs_dir).get("directions", {})
+    out = []
+    for direction in directions:
+        entry = baseline.get(direction)
+        if not entry:
+            continue
+        cells = [_cell(spec, entry, {}, {}) if spec in entry else "-" for _, spec in head]
+        out.append(f"| identity (input as output) | {direction} | " + " | ".join(cells) + " |")
+    return out
+
+
+def _domain_noise_floor_note(runs_dir: Path) -> List[str]:
+    floor = _domain_identity(runs_dir).get("noise_floor", {})
+    if not floor:
+        return []
+    parts = ", ".join(
+        f"{role} {_format(v['kid'])} (first vs second half) / {_format(v.get('kid_interleaved'))} "
+        f"(even vs odd)" for role, v in sorted(floor.items())
+    )
+    return [
+        f"*Identity rows: {DOMAIN_IDENTITY_NOTE}.* Noise floor, KID between two halves of the "
+        f"real target test images ({next(iter(floor.values()))['n_first']} vs "
+        f"{next(iter(floor.values()))['n_second']}): {parts}. The test split has two "
+        "locations, so the first/second halves differ by location (an upper bracket for "
+        "same-domain KID); even/odd mixes locations but pairs near-duplicate views (a lower "
+        "bracket). A KID gap smaller than these is not evidence of anything.",
+        "",
+    ]
+
+
 def render(rows: List[Dict[str, Any]], runs_label: str, runs_dir: Path = Path(".")) -> str:
     n_total = len(rows)
     L = [
@@ -201,14 +264,19 @@ def render(rows: List[Dict[str, Any]], runs_label: str, runs_dir: Path = Path(".
         f"fingerprint `{_dataset_fingerprint()}` ([DATASET.md](DATASET.md)).",
         "- **Geographic splits with distribution shift**: the test split is deeper (median depth "
         "~208 m vs ~92 m in train) and class shares differ strongly between splits (val is 63 % "
-        "road). A generalisation gap here is partly a dataset property, not only a model one.",
+        "road). A generalisation gap here is partly a dataset property, not only a model one. "
+        "The depth shift has a capture cause: the camera altitude is set above the first surface "
+        "hit under the location, and both test locations sit on skyscraper roofs, so their "
+        "street is 152-275 m away against 70-182 m in train/val (DATASET.md).",
         "- **FOV**: the capture camera's 60 deg horizontal FOV is an assumption (the Unreal "
-        "actor default); it sets the focal length that DA3-metric (and Depth Pro, `f_px`) use. "
+        "actor default; a car-size estimate over 838 cars gives 54-63 deg, consistent but not a "
+        "proof); it sets the focal length that DA3-metric (and Depth Pro, `f_px`) use. "
         "Zero-shot DA3-metric stays far too small on nadir views at 70-270 m (domain gap, not a "
         "unit bug).",
         "- **Shadow-removal inits are heterogeneous**: ShadowFormer starts from ISTD+ "
         "(shadow-removal weights), Restormer and Uformer from denoising weights (no shadow "
-        "weights released). The rows are not a fair comparison.",
+        "weights released), ShadowMaskFormer from scratch (no weights released). The rows are "
+        "not a fair comparison.",
         "- **Shadow translation (CycleGAN / pix2pix)** trains and predicts at 256 px and is "
         "scored at 2048. **KID is the primary metric over FID** (N=24 samples against "
         "2048-d features: the FID covariance is rank-deficient).",
@@ -227,11 +295,16 @@ def render(rows: List[Dict[str, Any]], runs_label: str, runs_dir: Path = Path(".
             plain = [r for r in items if r.get("direction") != "shadow2noshadow"]
             paired = [r for r in items if r.get("direction") == "shadow2noshadow"]
             if plain:
-                L += _table(plain, COLUMNS[task], ["model", "direction"]) + [""]
+                L += _table(plain, COLUMNS[task], ["model", "direction"])
+                L += _domain_identity_rows(
+                    runs_dir, COLUMNS[task], ["day2night", "night2day", "noshadow2shadow"]) + [""]
             if paired:
                 L += ["### shadow -> no shadow (paired metrics vs `rgb_noshadow`)", "",
                       "Same metric definitions as shadow_removal, for a direct read against it.", ""]
-                L += _table(paired, COLUMNS[task][:3] + PAIRED_COLUMNS, ["model", "direction"]) + [""]
+                L += _table(paired, COLUMNS[task][:3] + PAIRED_COLUMNS, ["model", "direction"])
+                L += _domain_identity_rows(
+                    runs_dir, COLUMNS[task][:3] + PAIRED_COLUMNS, ["shadow2noshadow"]) + [""]
+            L += _domain_noise_floor_note(runs_dir)
         else:
             lead = ["model", "resolution"] if task in ("segmentation", "depth") else ["model"]
             if task == "superresolution":

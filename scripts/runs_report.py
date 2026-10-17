@@ -6,6 +6,11 @@ parameter actually used, after CLI overrides), `summary.json`, the exact command
 from what was executed. Re-run it after the queue finishes (or at any point: it reports
 whatever exists).
 
+A run is never dropped silently. One with a `summary.json` but no `config.yaml` (the
+super-resolution runs made before the front-end wrote it for training) is listed from what it
+recorded, marked with a dagger; a directory with neither file is named on stderr. Directories
+starting with `_` (e.g. `_baselines/`) are not runs and are skipped.
+
     .venv/Scripts/python.exe scripts/runs_report.py [--runs runs/validation] [--out docs/claude/RUNS.md]
 """
 
@@ -116,6 +121,59 @@ def logged_command(stem: str) -> str:
     return "(no log found)"
 
 
+def argv_flags(argv: list) -> dict:
+    """`--flag value` pairs of an argv list; a flag followed by another flag (or nothing) is `True`."""
+    flags: dict = {}
+    items = [str(a) for a in argv]
+    for i, token in enumerate(items):
+        if token.startswith("--"):
+            nxt = items[i + 1] if i + 1 < len(items) else None
+            flags[token[2:]] = nxt if nxt is not None and not nxt.startswith("--") else True
+    return flags
+
+
+def config_from_summary(summ: dict) -> dict:
+    """The settings a run without `config.yaml` recorded, shaped like the config the table reads.
+
+    Only the super-resolution front-end ever left runs in this state (it wrote `config.yaml`
+    when re-scoring but not when training, fixed 2026-10-17). Its `summary.json` holds the
+    task, model, resolution and the exact trainer argv, which is where batch size, learning
+    rate, crop and tile come from. Nothing is invented: a flag the argv does not carry
+    stays absent and prints as `-`.
+    """
+    flags = argv_flags(summ.get("command", []))
+
+    def num(key, cast):
+        try:
+            return cast(flags[key])
+        except (KeyError, ValueError, TypeError):
+            return None
+
+    return {
+        "task": summ["task"],
+        "model": summ.get("model", "?"),
+        "resolution": summ.get("resolution", "?"),
+        "train": {
+            "epochs": summ.get("epochs", num("epochs", int)),
+            "batch_size": num("batch_size", int) or "?",
+            "grad_accum": 1,
+            "lr": num("lr", float) or float("nan"),
+            "patch_size": num("patch_size", int),
+        },
+        "eval": {"tile_size": num("eval_tile_size", int)},
+    }
+
+
+def recorded_command(summ: dict) -> str:
+    """The trainer argv from `summary.json` as one line, repo prefix dropped like `logged_command`."""
+    parts = [f'"{a}"' if " " in str(a) else str(a) for a in summ.get("command", [])]
+    return " ".join(parts).replace(str(REPO) + "\\", "").replace(str(REPO) + "/", "") or "(no command recorded)"
+
+
+NO_CONFIG_NOTE = ("config.yaml not written by the SR front-end before 2026-10-17 fix; "
+                  "settings from summary.json `command`")
+
+
 def status_rows(runs: Path) -> dict:
     rows = {}
     tsv = runs / "status.tsv"
@@ -198,12 +256,21 @@ def main() -> int:
     L.append("")
 
     by_task: dict = {}
-    for d in sorted(p for p in runs.glob("*") if (p / "config.yaml").exists()):
-        cfg = yaml.safe_load((d / "config.yaml").read_text(encoding="utf-8"))
+    for d in sorted(p for p in runs.glob("*") if p.is_dir() and not p.name.startswith("_")):
         summ = {}
         if (d / "summary.json").exists():
             summ = json.loads((d / "summary.json").read_text(encoding="utf-8"))
-        by_task.setdefault(cfg["task"], []).append((d.name, cfg, summ))
+        if (d / "config.yaml").exists():
+            cfg = yaml.safe_load((d / "config.yaml").read_text(encoding="utf-8"))
+            recorded = False
+        elif summ.get("task"):
+            # Never drop a run silently: list it from what it recorded, and say so.
+            cfg, recorded = config_from_summary(summ), True
+        else:
+            print(f"WARNING: {d.name} has neither config.yaml nor a usable summary.json; "
+                  "it is not in the report", file=sys.stderr)
+            continue
+        by_task.setdefault(cfg["task"], []).append((d.name, cfg, summ, recorded))
 
     for task in TASK_ORDER:
         items = by_task.get(task, [])
@@ -212,7 +279,7 @@ def main() -> int:
         L += [f"## {task} ({len(items)} runs)", "",
               "| run | model | res | budget | batch x accum | patch | lr | loss | eval | status | min | test |",
               "|---|---|---:|---|---|---:|---|---|---|---|---:|---|"]
-        for name, cfg, summ in items:
+        for name, cfg, summ, recorded in items:
             t, e, s = cfg["train"], cfg["eval"], cfg.get("shadow", {})
             budget = (f"{s.get('iterations')} it" if task == "shadow_removal" else f"{t['epochs']} ep")
             evals = (f"align={e.get('align') or 'none'}" if task == "depth" else "") + \
@@ -220,13 +287,20 @@ def main() -> int:
             if task == "shadow_removal" and s.get("init_weights"):
                 evals += f" init={Path(s['init_weights']).name}"
             st = status.get(name, ("-", "-", ""))
-            L.append(f"| `{name}` | {cfg['model']} | {cfg['resolution']} | {budget} | "
+            L.append(f"| `{name}`{' †' if recorded else ''} | {cfg['model']} | {cfg['resolution']} | {budget} | "
                      f"{t['batch_size']} x {t.get('grad_accum', 1)} | {t.get('patch_size') or '-'} | "
-                     f"{t['lr']:g} | {t.get('loss') or '-'} | {evals.strip() or '-'} | {st[0]} | {st[1]} | "
+                     f"{t['lr']:.4g} | {t.get('loss') or '-'} | {evals.strip() or '-'} | {st[0]} | {st[1]} | "
                      f"{fmt_metrics(summ.get('test', {}))} |")
+        if any(r for *_, r in items):
+            L += ["", f"† {NO_CONFIG_NOTE}."]
         L += ["", "<details><summary>Exact commands</summary>", "", "```"]
-        L += [logged_command(name) for name, _, _ in items]
-        L += ["```", "", "</details>", ""]
+        L += [logged_command(name) for name, *_ in items]
+        L += ["```"]
+        if any(r for *_, r in items):
+            L += ["", "Trainer argv recorded in `summary.json` (runs marked †):", "", "```"]
+            L += [f"{name}: {recorded_command(summ)}" for name, _, summ, r in items if r]
+            L += ["```"]
+        L += ["", "</details>", ""]
 
     out = REPO / args.out
     out.write_text(redact("\n".join(L)) + "\n", encoding="utf-8")

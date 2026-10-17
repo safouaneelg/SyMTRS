@@ -1,0 +1,72 @@
+# ShadowMaskFormer: remove the shadows from rgb_day, scored against rgb_noshadow (2048).
+#
+#     symtrs train configs/shadow_removal/shadowmaskformer.yaml --data-root /data/SyMTRS
+#     symtrs train configs/shadow_removal/shadowmaskformer.yaml --data-root /data/SyMTRS --set shadow.iterations=500
+#     symtrs eval  configs/shadow_removal/shadowmaskformer.yaml --data-root /data/SyMTRS --eval-split test
+#
+# ShadowMaskFormer-b (IEEE TAI 2025, 2.28 M parameters, about a fifth of ShadowFormer's
+# size): the light, shadow-aware model. Like ShadowFormer it takes the derived shadow
+# mask as a second input, so the same caveat applies. It is written for [-1, 1] images
+# and masks; the shared worker converts at the network boundary. NO RELEASED WEIGHTS:
+# the authors publish none, so this model is always trained from scratch
+# (shadow.init_weights stays empty), while ShadowFormer starts from ISTD+ weights. Its
+# comparison with ShadowFormer is therefore not like-for-like: a gap mixes the
+# architecture with the initialisation. The recipe is upstream's (AdamW, lr 2e-4,
+# weight decay 0.02, cosine to 1e-6) with the shared Charbonnier loss; upstream uses
+# batch 1 and L1, this grid keeps the shared batch 4 and loss. The upstream repository
+# carries no licence, so it is fetched, never committed.
+#
+# This is not a SyMTRS model. The network class is upstream lizhh268/ShadowMaskFormer, cloned at the
+# revision in third_party/PINS.md by `python scripts/fetch_third_party.py` (the clones are
+# not committed). SyMTRS stages the data, runs one shared training loop and one shared
+# tiled inference around the upstream class, and scores the PNGs it writes with
+# symtrs/metrics/shadow.py - the same numbers for all four models:
+# PSNR, SSIM and LAB error on all pixels, in the shadow region and outside it.
+#
+# Native resolution only: rgb_noshadow has no downsampled twin. The training budget is
+# train.epochs, or shadow.iterations when positive (`--set shadow.iterations=500` is a
+# validation-sized run). The weights are trained from scratch unless
+# shadow.init_weights points at an upstream checkpoint.
+#
+
+task: shadow_removal
+model: shadowmaskformer
+resolution: 2048
+seed: 42
+
+data:
+  root: /data/SyMTRS
+  split: train
+  val_split: val
+  test_split: test
+
+train:
+  epochs: 500
+  batch_size: 4
+  lr: 2.0e-4
+  weight_decay: 2.0e-2
+  optim: adamw
+  sched: cosine
+  warmup_epochs: 3
+  min_lr_ratio: 5.0e-3
+  patch_size: 256
+  amp: true
+  log_every: 50
+  device: cuda
+
+eval:
+  # The inference tile is the training patch: none of these networks was trained
+  # above it, and a whole 2048 px image does not fit in 12 GB.
+  tile_size: 256
+  tile_overlap: 64
+  num_visualizations: 4
+
+shadow:
+  # The dataset has no shadow masks; they are derived from the rgb_day / rgb_noshadow
+  # pair (symtrs/metrics/shadow.py). Changing these changes the regional metrics.
+  mask_threshold: 0.1
+  mask_open: 3
+  iterations: 0
+  val_every: 500
+  val_crops: 32
+  init_weights: ""

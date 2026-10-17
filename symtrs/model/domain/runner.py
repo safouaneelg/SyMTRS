@@ -339,6 +339,9 @@ def run_domain_adaptation(cfg, mode: str = "finetune") -> Dict[str, Any]:
             f"resolution {cfg.resolution} from the config."
         )
 
+    # Upstream runs with its own checkout as cwd, and `staging/`, `--checkpoints_dir` and
+    # `--results_dir` are all derived from the run directory: they must be absolute.
+    cfg = cfg.anchored()
     run_dir = cfg.resolved_out_dir
     run_dir.mkdir(parents=True, exist_ok=True)
     cfg.to_yaml(str(run_dir / "config.yaml"))

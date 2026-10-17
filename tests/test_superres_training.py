@@ -85,6 +85,31 @@ def test_a_successful_run_still_writes_summary_json(monkeypatch, layout: Path, t
     assert not (run / "summary_failed.json").exists()
 
 
+def test_a_training_run_writes_config_yaml_and_a_dry_run_does_not(monkeypatch, layout: Path, tmp_path: Path) -> None:
+    """AGENTS.md section 5: every run leaves a resolved `config.yaml`, training included.
+
+    The runner wrote it only when re-scoring, so the 16 super-resolution validation runs had
+    none and `scripts/runs_report.py` (which keys on it) silently dropped them from RUNS.md
+    (80 runs listed instead of 96).
+    """
+    import yaml
+
+    monkeypatch.setattr(runner.subprocess, "run", lambda command: SimpleNamespace(returncode=0))
+
+    dry = tmp_path / "dry"
+    runner.run_super_resolution(_config(layout, dry), dry_run=True)
+    assert not (dry / "config.yaml").exists(), "a dry run must leave nothing behind"
+
+    run = tmp_path / "run"
+    runner.run_super_resolution(_config(layout, run, **{"train.epochs": 3}))
+    recorded = yaml.safe_load((run / "config.yaml").read_text(encoding="utf-8"))
+    assert recorded["task"] == "superresolution"
+    assert recorded["model"] == "srcnn"
+    assert recorded["resolution"] == 512
+    assert recorded["train"]["epochs"] == 3
+    assert Path(recorded["out_dir"]).is_absolute(), "the anchored config is what ran"
+
+
 def test_a_stale_test_metrics_file_is_not_folded_into_a_new_run(monkeypatch, layout: Path, tmp_path: Path) -> None:
     """Exit 0 with nothing scored must not inherit the previous run's number."""
     run = tmp_path / "run"
@@ -487,3 +512,24 @@ def test_scoring_clamps_the_output_to_the_saved_image_range() -> None:
     _, psnr, mse, _ = train.eval_one_epoch(_args(scale=1), _Spy(1), None, [{"lr": lr, "hr": hr}], torch.device("cpu"))
 
     assert mse == pytest.approx(0.0, abs=1e-12), "clamped to 1.0, the overshoot is not an error"
+
+
+def test_runs_report_lists_a_run_that_has_no_config_yaml(tmp_path: Path) -> None:
+    """16 super-resolution runs had no config.yaml and the report dropped them without a word.
+
+    A run with a summary.json is listed from what it recorded (the trainer argv carries batch
+    size, learning rate, crop and tile); it is never invented from nothing.
+    """
+    import runs_report
+
+    summ = {
+        "task": "superresolution", "model": "srcnn", "resolution": 512, "epochs": 2,
+        "command": ["python", "-m", "x", "--batch_size", "16", "--lr", "0.0001",
+                    "--patch_size", "64", "--eval_tile_size", "512", "--use_y_channel"],
+    }
+    cfg = runs_report.config_from_summary(summ)
+    assert (cfg["task"], cfg["model"], cfg["resolution"]) == ("superresolution", "srcnn", 512)
+    assert cfg["train"]["batch_size"] == 16 and cfg["train"]["patch_size"] == 64
+    assert cfg["train"]["lr"] == 0.0001 and cfg["eval"]["tile_size"] == 512
+    assert runs_report.argv_flags(summ["command"])["use_y_channel"] is True
+    assert "2026-10-17" in runs_report.NO_CONFIG_NOTE

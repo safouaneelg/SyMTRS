@@ -104,6 +104,39 @@ def test_kid_leads_and_fid_is_flagged_rank_deficient_for_small_n():
     assert enough["fid_rank_deficient"] == 0.0
 
 
+@requires_numpy
+def test_the_full_set_kid_reports_no_spread_rather_than_a_zero_one():
+    """`num_subsets=0` draws no subsets, so no standard deviation exists. It used to be written
+    as 0.0, which reads as a measured zero spread next to N=24; it must be `None` (`null` in
+    summary.json) and the KID itself must be the same single full-set estimate as before."""
+    import numpy as np
+
+    pytest.importorskip("torch")
+    from symtrs.common.jsonio import dumps
+    from symtrs.metrics import domain
+
+    rng = np.random.default_rng(0)
+    real, fake = rng.normal(size=(24, 64)), rng.normal(size=(24, 64)) + 0.2
+    full = domain.compute_kid(real, fake)
+    assert full["kid_std"] is None
+    assert domain.distribution_metrics(real, fake)["kid_std"] is None
+    assert '"kid_std": null' in dumps(full)
+    # the estimate is untouched: it is the unbiased MMD^2 over all samples
+    assert full["kid"] == domain.compute_kid(real, fake, num_subsets=0)["kid"]
+    # drawing subsets is what produces a spread
+    subsets = domain.compute_kid(real, fake, num_subsets=5, subset_size=12)
+    assert subsets["kid_std"] is not None and subsets["kid_std"] > 0
+
+
+def test_a_legacy_zero_kid_std_is_not_printed_as_a_measurement():
+    """Summaries written before the fix still hold `kid_std: 0.0`; the report shows n/a."""
+    import results_report
+
+    assert results_report._cell("kid_std", {"kid_std": 0.0}, {}, {}) == "n/a"
+    assert results_report._cell("kid_std", {"kid_std": None}, {}, {}) == "n/a"
+    assert results_report._cell("kid_std", {"kid_std": 0.0123}, {}, {}) == "0.0123"
+
+
 def test_the_runner_and_the_metric_module_agree_on_the_primary_metric():
     pytest.importorskip("torch")
     from symtrs.metrics.domain import PRIMARY_METRIC
@@ -167,6 +200,9 @@ def test_every_shadow_model_declares_what_its_released_weights_were_for():
     for key in ("restormer", "uformer"):
         task = ARCHS[key].init_source_task
         assert "denoising" in task and "no shadow-removal weights" in task
+    # ShadowMaskFormer has no weights at all: its row is always a from-scratch row.
+    smf = ARCHS["shadowmaskformer"]
+    assert not smf.released_weights and "trained from scratch" in smf.init_source_task
 
 
 @requires_numpy

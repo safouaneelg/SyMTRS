@@ -376,6 +376,9 @@ def run_super_resolution(cfg: RunConfig, mode: str = "finetune", dry_run: bool =
             f"unknown run mode {mode!r} for super-resolution; expected 'finetune' or 'eval'"
         )
 
+    # The trainer inherits this process's cwd, so a relative run directory happened to
+    # work; anchoring makes it hold by construction, like the other two subprocess tasks.
+    cfg = cfg.anchored()
     eval_only = mode == "eval"
     model = build_from_config(cfg)
     run_dir = cfg.resolved_out_dir
@@ -392,12 +395,17 @@ def run_super_resolution(cfg: RunConfig, mode: str = "finetune", dry_run: bool =
                 f"first: `symtrs train --task superresolution --model {cfg.model} "
                 f"--resolution {cfg.resolution} --data-root {cfg.data.root}`"
             )
-        cfg.to_yaml(str(run_dir / "config.yaml"))
 
     command = model.train_command(cfg, run_dir, eval_only=eval_only)
     if dry_run:
         print("[symtrs] " + " ".join(command))
         return summary_from_run(cfg, run_dir, 0, command, mode=mode)
+
+    # Every run records the resolved config next to its weights (AGENTS.md section 5), for
+    # training as well as for re-scoring. This used to be written in the `eval_only` branch
+    # alone, so a training run left no config.yaml and `scripts/runs_report.py` dropped it.
+    # A dry run writes nothing, like the other tasks' dry runs (they stop before the runner).
+    cfg.to_yaml(str(run_dir / "config.yaml"))
 
     # The trainer rewrites this file when it scores the test split. A stale one from an
     # earlier run in the same directory would otherwise be folded into the summary of a run

@@ -5,8 +5,9 @@ it - `symtrs models`, the dry run, the tests that read the upstream constructor 
 from source - must work without torch or the upstream trees.
 
 The constructor arguments are the ones each paper's own shadow-removal entry point uses
-(ShadowFormer's `utils.get_arch`, Uformer's `Uformer_B`, Restormer's defaults), recorded
-here once so a run and a checkpoint agree on the network. `img_size` is not listed: it is
+(ShadowFormer's `utils.get_arch`, Uformer's `Uformer_B`, Restormer's defaults,
+ShadowMaskFormer's `shadowmaskformer_b()` factory), recorded here once so a run and a
+checkpoint agree on the network. `img_size` is not listed: it is
 the training patch, `train.patch_size`, and is injected by the worker for the classes that
 take it (their shifted-window masks are sized from it).
 """
@@ -29,7 +30,8 @@ class Arch:
     #: Python file that defines the class, relative to the checkout.
     source: str
     cls: str
-    #: ShadowFormer's forward is `net(image, mask)`; the other two see the image only.
+    #: ShadowFormer's and ShadowMaskFormer's forward is `net(image, mask)`; the others see the
+    #: image only.
     takes_mask: bool
     #: Whether the constructor takes `img_size` (the training patch).
     takes_img_size: bool
@@ -39,6 +41,17 @@ class Arch:
     #: the other two start from denoising, which is a different (and for this benchmark
     #: weaker) prior, so a results table must state it beside every row.
     init_source_task: str = ""
+    #: The value range the *network* is written for. The worker keeps images and masks in
+    #: [0, 1] (mask: shadow = 1) and converts at the network boundary only, so that the
+    #: loss, the validation PSNR and the PNG writer are the same code for every model.
+    #: "unit": the network takes and returns [0, 1]. "signed": it takes image and mask in
+    #: [-1, 1] (`x * 2 - 1`, shadow = +1) and returns [-1, 1], unclamped (ShadowMaskFormer's
+    #: own train/test scripts do exactly this, then `.clamp_(-1, 1) * 0.5 + 0.5`).
+    input_range: str = "unit"
+    #: False when the authors published no weights at all: the model is always trained from
+    #: random initialisation (`shadow.init_weights` stays empty), which makes its row not
+    #: like-for-like with a model that starts from a checkpoint.
+    released_weights: bool = True
 
     @property
     def source_path(self) -> Path:
@@ -73,7 +86,37 @@ ARCHS: Dict[str, Arch] = {
         kwargs={"LayerNorm_type": "BiasFree"},
         init_source_task="real image denoising (SIDD); no shadow-removal weights released",
     ),
+    "shadowmaskformer": Arch(
+        "shadowmaskformer", "ShadowMaskFormer", "models/shadowmaskformer.py", "ShadowMaskFormer",
+        takes_mask=True, takes_img_size=False, input_range="signed", released_weights=False,
+        # The "-b" variant, i.e. upstream's `shadowmaskformer_b()` factory and the default of
+        # its train.py (2.28 M parameters). Spelled out instead of calling the factory so the
+        # test that checks every recorded name against the constructor covers it. The network
+        # pads to a multiple of 4 and crops back by itself, so there is no `img_size`.
+        kwargs={
+            "in_chans": 3, "out_chans": 4, "window_size": 10,
+            "embed_dims": [24, 48, 96, 48, 24], "mlp_ratios": [2.0, 4.0, 4.0, 2.0, 2.0],
+            "depths": [16, 16, 14, 8, 8], "num_heads": [2, 4, 6, 1, 1],
+            "attn_ratio": [0.25, 0.5, 0.75, 0, 0], "conv_type": ["DWConv"] * 5,
+        },
+        init_source_task="none: no weights released; trained from scratch",
+    ),
 }
+
+#: The ranges `Arch.input_range` can take.
+INPUT_RANGES = ("unit", "signed")
+
+
+def to_network_range(arch: Arch, image, mask):
+    """Worker range ([0, 1] image, {0, 1} mask) -> what the network was written for."""
+    if arch.input_range == "signed":
+        return image * 2 - 1, mask * 2 - 1
+    return image, mask
+
+
+def from_network_range(arch: Arch, output):
+    """The network's output -> [0, 1] (not clamped: the caller clamps, as it always did)."""
+    return output * 0.5 + 0.5 if arch.input_range == "signed" else output
 
 
 def arch_for(key: str) -> Arch:

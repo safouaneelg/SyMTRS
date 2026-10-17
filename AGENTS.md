@@ -21,7 +21,7 @@ aerial dataset benchmark with five tasks.
 | `depth` | 11 (MiDaS ×5, ZoeDepth ×3, Depth Anything 3 ×2, Depth Pro) | `rgb_day{_lr}` → `depth{_lr}` |
 | `segmentation` | 6 (U-Net, DeepLabV3 ×2, SegFormer ×3) | `rgb_day{_lr}` → `semantic{_lr}` |
 | `domain_adapt` | 2 (CycleGAN, pix2pix) × 4 directions | `rgb_day` ⇄ `rgb_night` (`day2night`, `night2day`) and `rgb_day` ⇄ `rgb_noshadow` (`shadow2noshadow`, `noshadow2shadow`), native only |
-| `shadow_removal` | 3 (ShadowFormer, Restormer, Uformer), 2048 only | `rgb_day` → `rgb_noshadow` |
+| `shadow_removal` | 4 (ShadowFormer, Restormer, Uformer, ShadowMaskFormer), 2048 only | `rgb_day` → `rgb_noshadow` |
 | `superresolution` | 4 (SRCNN, autoencoder, SRGAN, SwinIR) × 4 scales | `rgb_day_lr/xN` → native `rgb_day` |
 
 Two of the five are not trained by this package at all and are driven as subprocesses (shadow
@@ -32,7 +32,7 @@ removal is a third case, below):
   `rgb_night` or `rgb_noshadow`, and the direction only picks `AtoB`/`BtoA`. `shadow2noshadow`
   is also scored like a shadow-removal result (the `shadow_removal` staging, mask and metrics,
   after resampling upstream's 256 px output to the ground-truth size), so it sits beside
-  ShadowFormer / Restormer / Uformer in `symtrs tables`.
+  ShadowFormer / Restormer / Uformer / ShadowMaskFormer in `symtrs tables`.
 - **super-resolution** runs the trainer at `symtrs/legacy/superres/train.py` (launched as
   `python -m symtrs.legacy.superres.train`), which predates the package and was moved
   inside it unchanged in 2026-10-15, then changed on purpose on 2026-10-17 (crops for every
@@ -40,7 +40,7 @@ removal is a third case, below):
   `img_size`) — `symtrs/legacy/README.md`, "Changes after the move", lists every edit. A
   failed trainer run exits non-zero and leaves `summary_failed.json`, never `summary.json`.
 
-**Shadow removal** takes only the network *class* from three upstream checkouts under
+**Shadow removal** takes only the network *class* from four upstream checkouts under
 `third_party/` (pinned in `third_party/PINS.md`, cloned by `python scripts/fetch_third_party.py`,
 gitignored). `symtrs/model/shadow/` stages `rgb_day`/`rgb_noshadow` pairs plus a *derived* shadow
 mask (the dataset has none; `shadow.mask_threshold`/`mask_open`), runs one shared worker loop
@@ -48,7 +48,11 @@ mask (the dataset has none; `shadow.mask_threshold`/`mask_open`), runs one share
 and scores the written PNGs with `symtrs/metrics/shadow.py` (PSNR/SSIM/LAB on all, shadow and
 non-shadow pixels). 2048 only; zero-shot is refused (the released weights are ISTD/SIDD, not
 SyMTRS); `shadow.init_weights` loads an upstream checkpoint. On a 12 GB card Restormer needs
-batch 1 (batch 2 spills).
+batch 1 (batch 2 spills). ShadowMaskFormer (the 2.28 M light model; ShadowFormer is 11.4 M) has
+**no released weights** and no licence file: it is always trained from scratch, so its rows are
+not like-for-like with ShadowFormer's (which starts from ISTD+). It is written for [-1, 1]
+inputs and the worker converts at the network boundary only (`Arch.input_range`, applied in
+`worker.forward`); do not convert anywhere else.
 
 For both, `symtrs` owns exactly three things: the folder mapping, the launch, and folding the
 result into the `summary.json` shape every task writes. Do not reimplement their models in
@@ -125,7 +129,7 @@ changing anything.
    and `data.split` must differ from the evaluation splits. Never carve a validation set out
    of `train/` in code — upstream's loaders will happily do that if you let them (see §7).
 
-7. **`configs/` is generated output.** 95 of the YAML files are written by
+7. **`configs/` is generated output.** 96 of the YAML files are written by
    `configs/generate_grid.py` from one table per task. Change the table and re-run it;
    `python3 configs/generate_grid.py --check` and the test suite both fail if a committed
    file has drifted. `configs/train_sr_x2.yaml` is the one hand-written file (the
@@ -252,7 +256,7 @@ symtrs/
     semantic/          segmentation models
     domain/            the CycleGAN/pix2pix subprocess front-end + vendored-tree check
     superres/          the SR subprocess front-end
-configs/               95 generated YAMLs + generate_grid.py (see configs/README.md)
+configs/               96 generated YAMLs + generate_grid.py (see configs/README.md)
 symtrs/legacy/          the SR implementation and datasets: moved inside, then edited (see its README)
 train_superresolution.py, dataloader/   shims that re-export from symtrs/legacy/
 pytorch-CycleGAN-and-pix2pix/                           vendored upstream, pinned
@@ -338,6 +342,18 @@ subprocess. Add it to §1 of this file and to the table in `configs/README.md`.
   numpy` refuses an EXR rather than returning whatever numpy guessed.
 - **A missing resolution folder is an error, never a fallback.** A silent fallback to a
   coarser level changes what the reported number means.
+- **A relative run directory and a subprocess with another cwd.** Shadow removal and domain
+  adaptation launch with the upstream checkout as cwd (and the shadow worker re-reads
+  `config.yaml` there), so a relative `--out-dir runs/validation/x` made the worker fail on
+  its own `config.yaml` and upstream's `train.py` miss `staging/trainA` (it then falls into its
+  auto-split branch; its relative `--checkpoints_dir`/`--results_dir` would also have been
+  written into the vendored tree). Found by the 2026-10-17 validation queue. The runners now
+  start with `cfg = cfg.anchored()` (`RunConfig.anchored`: `out_dir`, `data.root`,
+  `shadow.init_weights`, `train.resume` resolved against the *caller's* cwd, once, on a copy).
+  Never build a path for a subprocess from `cfg.resolved_out_dir` on an un-anchored config, and
+  never resolve a user-typed path inside a launcher. `tests/test_relative_run_dir.py` covers
+  the three subprocess tasks. Paths inside `upstream_args`/`model_kwargs.extra_args` are
+  passed through verbatim: give them absolute.
 
 ## 8. Testing
 

@@ -3,7 +3,7 @@
 Shadow-removal upstreams disagree about everything on disk (ShadowFormer wants ISTD's
 `train_A/train_B/train_C`, Uformer a `groundtruth/input` pair, Restormer a basicsr YAML),
 and none of them knows the SyMTRS names `rgb_day_2048_<key>.png`. The worker that drives
-all three (see `worker.py`) reads one layout, so this module is the single place that maps
+all four (see `worker.py`) reads one layout, so this module is the single place that maps
 the dataset onto it:
 
     <run_dir>/staging/<split>/input/<key>.png    link to rgb_day_2048_<key>.png

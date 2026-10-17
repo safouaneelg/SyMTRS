@@ -4,13 +4,13 @@
     symtrs train --task shadow_removal --model restormer --data-root /data/SyMTRS \\
                  --epochs 20 --set shadow.iterations=500
 
-Why a worker instead of the upstream `train.py` scripts: all three were written for
+Why a worker instead of the upstream `train.py` scripts: all of them were written for
 256-320 px ISTD crops. They train by epoch over a loader with hard-coded folder names
 (`train_A/B/C`), hard-code CUDA and `DataParallel`, and validate on the *whole* image in
 one forward pass - at 2048 px that does not fit in 12 GB for ShadowFormer or Restormer.
-Driving three different loops and parsers would also give three different notions of
+Driving four different loops and parsers would also give three different notions of
 "best" and of "score". So the worker (`worker.py`) imports only each upstream's network
-class and runs one loop and one tiled inference for all three; the metric code is
+class and runs one loop and one tiled inference for all four; the metric code is
 `symtrs.metrics.shadow`, run here in the parent on the PNGs the worker wrote. The networks
 are not reimplemented: a model whose class is not in the pinned checkout fails with the
 command that fetches it.
@@ -57,10 +57,16 @@ def append_metrics_row(path: Path, row: Dict[str, Any]) -> None:
 
 def describe(key: str) -> str:
     arch = arch_for(key)
-    return (
+    text = (
         f"{key} (shadow_removal): upstream {arch.repo}/{arch.source}:{arch.cls}, "
         "rgb_day -> rgb_noshadow at 2048 (trained on crops, tiled at inference)"
     )
+    if not arch.released_weights:
+        text += (
+            "; no released weights: trained from scratch, so not like-for-like with a model "
+            "that starts from a checkpoint"
+        )
+    return text
 
 
 class ShadowRemoval:
@@ -220,15 +226,14 @@ def run_shadow_removal(
     if problem:
         raise FileNotFoundError(problem)
 
-    run_dir = cfg.resolved_out_dir
-    run_dir.mkdir(parents=True, exist_ok=True)
     # The worker runs with the upstream checkout as its working directory, so every path
-    # it reads from config.yaml or argv must already be absolute.
-    if cfg.shadow.init_weights:
-        cfg.shadow.init_weights = str(Path(cfg.shadow.init_weights).resolve())
+    # it reads from config.yaml or argv must already be absolute (out_dir included: the
+    # worker derives its run directory from the config it reads).
+    cfg = cfg.anchored()
     if checkpoint:
         checkpoint = str(Path(checkpoint).resolve())
-    cfg.data.root = str(Path(cfg.data.root).resolve())
+    run_dir = cfg.resolved_out_dir
+    run_dir.mkdir(parents=True, exist_ok=True)
     config_path = run_dir / "config.yaml"
     cfg.to_yaml(str(config_path))
     print(f"[symtrs] {describe(spec.key)}")
@@ -248,7 +253,7 @@ def run_shadow_removal(
         "epochs": cfg.train.epochs,
         "upstream": {"repo": arch.repo, "class": arch.cls},
         "mask": {"threshold": shadow.mask_threshold, "open": shadow.mask_open},
-        # Comparability: the three models do not start from comparable weights, so every
+        # Comparability: the models do not start from comparable weights, so every
         # result row states what it started from (None = random init).
         "init_weights": shadow.init_weights or None,
         "init_source_task": arch.init_source_task if shadow.init_weights else None,

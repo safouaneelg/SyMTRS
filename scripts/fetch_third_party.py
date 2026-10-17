@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Clone the three shadow-removal upstreams at the revisions pinned in third_party/PINS.md.
+"""Clone the four shadow-removal upstreams at the revisions pinned in third_party/PINS.md.
 
     python scripts/fetch_third_party.py           # clone / checkout / apply third_party/patches/<repo>*.patch
     python scripts/fetch_third_party.py --check   # verify revisions (and patches applied); change nothing

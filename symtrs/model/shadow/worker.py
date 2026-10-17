@@ -9,13 +9,13 @@ must never inherit (AGENTS.md section 7). With the checkout as cwd, `-m` puts it
 It imports the *network class* from the pinned upstream source and nothing else of theirs
 (see `runner.py` for why their training scripts are not used), then:
 
-  --phase train    random-crop training with one loop for all three networks, validation on
+  --phase train    random-crop training with one loop for all the networks, validation on
                    a fixed set of val crops to pick `weights/best.pt`;
   --phase predict  tiled full-image inference of the val/test splits into
                    `<run_dir>/predictions/<split>/<key>.png`, scored by the parent.
 
 Training recipe: Charbonnier loss, AdamW, linear warmup then cosine decay per iteration,
-bf16 autocast, random flips and 90-degree rotations - the recipe the three papers share.
+bf16 autocast, random flips and 90-degree rotations - the recipe the papers share.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ import numpy as np
 import torch
 
 from symtrs.config import RunConfig
-from symtrs.model.shadow.archs import Arch, arch_for
+from symtrs.model.shadow.archs import Arch, arch_for, from_network_range, to_network_range
 from symtrs.model.shadow.runner import append_metrics_row
 from symtrs.model.shadow.staging import staged_keys
 
@@ -65,7 +65,15 @@ def build_network(cfg: RunConfig) -> Tuple[torch.nn.Module, Arch]:
 
 
 def forward(net: torch.nn.Module, arch: Arch, image: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    return net(image, mask) if arch.takes_mask else net(image)
+    """One forward pass: [0, 1] image and {0, 1} mask in, [0, 1] (unclamped) out.
+
+    Everything outside this function - the loss, the validation PSNR, the tiler, the PNG
+    writer - stays in [0, 1]; the networks that are written for [-1, 1] are converted here
+    and nowhere else (`Arch.input_range`).
+    """
+    image, mask = to_network_range(arch, image, mask)
+    output = net(image, mask) if arch.takes_mask else net(image)
+    return from_network_range(arch, output)
 
 
 #: Fraction of the model's tensors an init file must supply. A checkpoint of the wrong
@@ -391,7 +399,7 @@ def predict(cfg: RunConfig, splits: List[str], weights: str) -> None:
 
     def tile_forward(tile: torch.Tensor) -> torch.Tensor:
         # The mask rides along as a fourth channel so the generic tiler can crop it with
-        # the image; only ShadowFormer reads it.
+        # the image; only the mask-aware networks (ShadowFormer, ShadowMaskFormer) read it.
         with amp_context(cfg, device):
             return forward(net, arch, tile[:, :3], tile[:, 3:]).float()
 

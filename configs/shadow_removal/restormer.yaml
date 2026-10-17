@@ -14,7 +14,7 @@
 # revision in third_party/PINS.md by `python scripts/fetch_third_party.py` (the clones are
 # not committed). SyMTRS stages the data, runs one shared training loop and one shared
 # tiled inference around the upstream class, and scores the PNGs it writes with
-# symtrs/metrics/shadow.py - the same numbers for all three models:
+# symtrs/metrics/shadow.py - the same numbers for all four models:
 # PSNR, SSIM and LAB error on all pixels, in the shadow region and outside it.
 #
 # Native resolution only: rgb_noshadow has no downsampled twin. The training budget is

@@ -1,4 +1,4 @@
-"""Shadow removal: ShadowFormer, Restormer and Uformer on `rgb_day` -> `rgb_noshadow`.
+"""Shadow removal: ShadowFormer, Restormer, Uformer and ShadowMaskFormer on `rgb_day` -> `rgb_noshadow`.
 
     symtrs train configs/shadow_removal/restormer.yaml --data-root /data/SyMTRS \
                  --set shadow.iterations=500

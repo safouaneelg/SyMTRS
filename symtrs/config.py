@@ -225,7 +225,7 @@ class EvalConfig:
 class ShadowConfig:
     """Settings that exist only for `shadow_removal`; ignored by every other task."""
 
-    # The dataset has no shadow masks, and ShadowFormer needs one as an input while the
+    # The dataset has no shadow masks, and ShadowFormer / ShadowMaskFormer need one as an input while the
     # shadow / non-shadow metric split needs one for every model. The mask is derived once,
     # at staging, from the pair itself: a pixel is shadow when the shadow-free image is
     # brighter than the shadowed one by more than this fraction of its own luminance,
@@ -314,6 +314,31 @@ class RunConfig:
         if self.out_dir:
             return Path(self.out_dir)
         return Path("runs") / self.task / self.model / str(self.resolution)
+
+    def anchored(self) -> "RunConfig":
+        """A copy whose caller-relative paths are absolute, resolved against *this* process's cwd.
+
+        Why: shadow removal and domain adaptation launch their subprocess with the upstream
+        checkout as cwd (upstream's imports and relative `./checkpoints` need it), and the
+        shadow worker re-reads this config from `config.yaml` there. A relative
+        `--out-dir runs/validation/x` therefore pointed into the upstream tree (or nowhere)
+        and both tasks died at the first path they opened (2026-10-17 validation queue,
+        which passed relative out roots). The paths a user types are relative to *their*
+        shell, so they are fixed once, here, before any subprocess exists - never inside a
+        launcher, where the cwd is already the wrong one. An empty `out_dir` is anchored
+        too: its canonical default (`runs/<task>/<model>/<res>`) is relative as well.
+        """
+        cfg = copy.deepcopy(self)
+        cfg.out_dir = str(self.resolved_out_dir.resolve())
+        for owner, name in (
+            (cfg.data, "root"),
+            (cfg.shadow, "init_weights"),
+            (cfg.train, "resume"),
+        ):
+            value = getattr(owner, name)
+            if value:
+                setattr(owner, name, str(Path(value).resolve()))
+        return cfg
 
     # --------------------------------------------------------------- conversion
 

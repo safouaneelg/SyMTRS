@@ -367,6 +367,17 @@ REGISTRY: Dict[str, ModelSpec] = {
         description="Uformer-B (ZhendongWang6/Uformer), windowed U-shaped transformer. 2048 only.",
         requires=("torch", "timm", "einops"),
     ),
+    "shadowmaskformer": _spec(
+        "shadowmaskformer",
+        "shadow_removal",
+        "symtrs.model.shadow:ShadowRemoval",
+        description=(
+            "ShadowMaskFormer-b (lizhh268/ShadowMaskFormer), 2.28 M-parameter mask-augmented "
+            "transformer; takes the derived shadow mask. No released weights: trained from "
+            "scratch. 2048 only."
+        ),
+        requires=("torch", "timm"),
+    ),
     # ------------------------------------------------------------ super-resolution
     # These four are not built by this package. `symtrs/legacy/superres/models/` owns the
     # architectures and `symtrs/legacy/superres/train.py` owns the training loop; the
