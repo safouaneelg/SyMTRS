@@ -5,6 +5,12 @@ correct way to compute mIoU over a dataset: averaging per-batch IoU weights a ba
 containing a rare class exactly as heavily as one that does not, which is how mIoU
 numbers end up unreproducible. `ConfusionMatrix` exists to make the correct thing
 the easy thing.
+
+Which classes the class-averaged scores (`miou`, `mean_dice`, `mean_acc`) average over is a
+property of the DATA, not of the model: the classes with ground-truth pixels in the evaluated
+split (`supported_classes`). The head may declare more outputs than the data uses - the SyMTRS
+masks never contain class 0 - and a class-averaged score whose denominator moved with whatever
+the model happened to predict would put different models of one table on different scales.
 """
 
 from __future__ import annotations
@@ -63,8 +69,21 @@ class ConfusionMatrix:
     def union(self) -> torch.Tensor:
         return self.matrix.sum(dim=0) + self.matrix.sum(dim=1) - self.intersection()
 
+    def supported_classes(self) -> torch.Tensor:
+        """Boolean mask of the classes with at least one ground-truth pixel.
+
+        Taken from the whole confusion matrix, i.e. the union over the entire evaluated split
+        and never per image, so it is identical for every model scored on that split.
+        """
+        return self.matrix.sum(dim=1) > 0
+
     def per_class_iou(self) -> torch.Tensor:
-        """IoU per class, NaN for classes with no ground truth and no prediction."""
+        """IoU per class, NaN for classes with no ground truth and no prediction.
+
+        A class with no ground truth that the model nevertheless predicts has union > 0 and a
+        real IoU of 0. It is reported (so the false positives are visible, see `fp_pixels_k` in
+        `summary()`) but it is NOT part of any class average: see `supported_classes`.
+        """
         union = self.union()
         iou = self.intersection() / union.clamp_min(EPS)
         iou[union == 0] = float("nan")
@@ -78,24 +97,27 @@ class ConfusionMatrix:
         return dice
 
     def miou(self) -> float:
-        """Mean IoU over classes present in the data.
+        """Mean IoU over the classes that have ground-truth pixels in the evaluated split.
 
-        Classes absent from both prediction and ground truth (union == 0) are excluded
-        rather than counted as zero, which would make the score depend on how many unused
-        classes the label space happens to declare. A class absent from the ground truth
-        that the model nevertheless *predicts* has union > 0, so its IoU is a real 0 and
-        does count: predicting something that is not there is an error.
+        The denominator is a property of the data (`supported_classes`), identical for every
+        model scored on the same split. The previous rule - average every class with a non-empty
+        union - made it depend on the model: class 0 (background) has no ground-truth pixel in
+        any SyMTRS split while the head has an output for it, so a model that predicted a single
+        class-0 pixel got IoU_0 = 0 and its mIoU was divided by 5 instead of 4, a ~20% relative
+        drop for one stray pixel. Predicting a class that is not in the data is still punished -
+        the pixels it steals from the real classes are false negatives there, and `fp_pixels_k`
+        counts them - but it no longer rescales the average.
 
-        On the SyMTRS capture class 0 (background) has no pixel in any split - the masks
-        only hold the grey levels of classes 1-4 - so in practice this is the mean over the
-        classes present, and `miou_classes` in `summary()` says how many that was. A table
-        of mIoUs from runs with different `miou_classes` is not a like-for-like table.
+        `miou_classes` in `summary()` is how many classes this averaged over. A table of mIoUs
+        from different splits (or a different label space) is not a like-for-like table.
         """
-        iou = self.per_class_iou()
-        valid = ~torch.isnan(iou)
-        if not valid.any():
+        return self._mean_over_supported(self.per_class_iou())
+
+    def _mean_over_supported(self, values: torch.Tensor) -> float:
+        supported = self.supported_classes() & ~torch.isnan(values)
+        if not supported.any():
             return 0.0
-        return float(iou[valid].mean())
+        return float(values[supported].mean())
 
     def pixel_accuracy(self) -> float:
         total = self.matrix.sum()
@@ -104,7 +126,7 @@ class ConfusionMatrix:
         return float(self.intersection().sum() / total)
 
     def mean_accuracy(self) -> float:
-        """Mean per-class recall: each class weighted equally regardless of size."""
+        """Mean per-class recall over the supported classes (see `supported_classes`)."""
         per_class_total = self.matrix.sum(dim=1)
         recall = self.intersection() / per_class_total.clamp_min(EPS)
         valid = per_class_total > 0
@@ -113,11 +135,8 @@ class ConfusionMatrix:
         return float(recall[valid].mean())
 
     def mean_dice(self) -> float:
-        dice = self.per_class_dice()
-        valid = ~torch.isnan(dice)
-        if not valid.any():
-            return 0.0
-        return float(dice[valid].mean())
+        """Mean Dice over the supported classes, for the same reason as `miou`."""
+        return self._mean_over_supported(self.per_class_dice())
 
     def frequency_weighted_iou(self) -> float:
         """IoU weighted by class frequency. Penalises errors on common classes more."""
@@ -131,8 +150,8 @@ class ConfusionMatrix:
         return float((weights * iou).sum())
 
     def classes_averaged(self) -> int:
-        """How many classes `miou()` averaged over (those with a non-empty union)."""
-        return int((~torch.isnan(self.per_class_iou())).sum())
+        """How many classes `miou()` averaged over (those with ground-truth pixels)."""
+        return int(self.supported_classes().sum())
 
     def summary(self) -> Dict[str, float]:
         """The canonical metric dict, keys in `SEGMENTATION_METRIC_NAMES` order.
@@ -140,7 +159,13 @@ class ConfusionMatrix:
         A class with an empty union has `iou_<k>` / `dice_<k>` of NaN, written as `null`
         in `summary.json`: "not measurable" is not the same statement as "IoU 0", and a
         0.0 here made a class that does not exist in the data look like a model failure.
-        `miou_classes` is the number of classes `miou` was averaged over.
+        A class with no ground truth that is predicted anyway keeps `iou_<k>` = 0.0 but is not
+        averaged; `fp_pixels_k` (pixels predicted k whose ground truth is another class) shows
+        how much of it there was.
+
+        `miou_classes` is the number of classes the class averages cover, and `support_k` the
+        ground-truth pixel count of each class, so the averaged class ids are `k` with
+        `support_k > 0`. (Kept numeric: this dict goes straight into the metrics CSV.)
         """
         per_class_iou = self.per_class_iou()
         per_class_dice = self.per_class_dice()
@@ -155,6 +180,11 @@ class ConfusionMatrix:
         for index in range(self.num_classes):
             summary[f"iou_{index}"] = float(per_class_iou[index])
             summary[f"dice_{index}"] = float(per_class_dice[index])
+        row_totals = self.matrix.sum(dim=1)
+        false_positives = self.matrix.sum(dim=0) - self.intersection()
+        for index in range(self.num_classes):
+            summary[f"support_{index}"] = float(row_totals[index])
+            summary[f"fp_pixels_{index}"] = float(false_positives[index])
         return summary
 
     def class_names(self) -> List[str]:
@@ -166,18 +196,22 @@ class ConfusionMatrix:
         per_class_iou = self.per_class_iou()
         per_class_dice = self.per_class_dice()
         support = self.matrix.sum(dim=1)
+        false_positives = self.matrix.sum(dim=0) - self.intersection()
 
         lines = [
-            f"{'class':<14}{'IoU':>8}{'Dice':>8}{'pixels':>14}",
-            "-" * 44,
+            f"{'class':<14}{'IoU':>8}{'Dice':>8}{'pixels':>14}{'fp_pixels':>14}",
+            "-" * 58,
         ]
         for index, name in enumerate(names):
             iou = per_class_iou[index].item()
             dice = per_class_dice[index].item()
             iou_text = "n/a" if iou != iou else f"{iou:.4f}"
             dice_text = "n/a" if dice != dice else f"{dice:.4f}"
-            lines.append(f"{name:<14}{iou_text:>8}{dice_text:>8}{int(support[index].item()):>14}")
-        lines.append("-" * 44)
+            lines.append(
+                f"{name:<14}{iou_text:>8}{dice_text:>8}{int(support[index].item()):>14}"
+                f"{int(false_positives[index].item()):>14}"
+            )
+        lines.append("-" * 58)
         summary = self.summary()
         lines.append(
             f"{'mIoU':<14}{summary['miou']:>8.4f}"

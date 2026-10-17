@@ -122,7 +122,7 @@ def test_score_image_perfect_and_regions():
     shadow = np.zeros((48, 48), bool)
     shadow[:24] = True
     perfect = score_image(target.copy(), target, shadow)
-    assert perfect["psnr"] > 100 and perfect["ssim"] == pytest.approx(1.0, abs=1e-4)
+    assert perfect["psnr"] > 100 and perfect["ssim_y"] == pytest.approx(1.0, abs=1e-4)
     assert perfect["rmse_lab"] == pytest.approx(0.0, abs=1e-4)
 
     pred = target.copy()

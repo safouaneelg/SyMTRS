@@ -198,3 +198,145 @@ def test_plan_tiling_counts_the_windows_and_the_overlap_they_cost():
 def test_plan_tiling_for_a_whole_image_pass_is_one_tile():
     plan = plan_tiling(512, 512, 0, 0)
     assert plan["tiles"] == 1 and plan["coverage"] == 1.0
+
+
+# ------------------------------------------------ window matching: robustness and families
+
+from symtrs.engine.tiling import SLOPE_RANGE, fit_overlap, match_mode  # noqa: E402
+
+
+def _textured(size=96, seed=0):
+    generator = torch.Generator().manual_seed(seed)
+    noise = torch.nn.functional.interpolate(
+        torch.rand(1, 1, 12, 12, generator=generator), size=(size, size), mode="bilinear"
+    )
+    return 1.0 + noise  # strictly positive, smooth-ish texture everywhere
+
+
+def _per_window_distortion(field, scales, shifts):
+    """forward_fn that applies a different (scale, shift) on each call, in raster order."""
+    calls = {"n": 0}
+    image = field.expand(1, 3, *field.shape[-2:]).contiguous()
+
+    def forward(tile):
+        n = calls["n"]
+        calls["n"] += 1
+        return tile[:, :1] * scales[n % len(scales)] + shifts[n % len(shifts)]
+
+    return image, forward
+
+
+def _global_affine_error(field, stitched):
+    x = field.flatten()
+    design = torch.stack([x, torch.ones_like(x)], dim=1)
+    solution = torch.linalg.lstsq(design, stitched.flatten().unsqueeze(1)).solution
+    return float((design @ solution - stitched.flatten().unsqueeze(1)).abs().max() / stitched.abs().max())
+
+
+def test_affine_matching_recovers_random_per_window_scale_and_shift():
+    field = _textured()
+    image, forward = _per_window_distortion(field, [1.0, 1.7, 0.6, 2.3], [0.0, 0.4, -0.3])
+    stitched = predict_tiled(image, forward, 48, 24, match="affine")
+    assert _global_affine_error(field, stitched) < 1e-3
+
+    image, forward = _per_window_distortion(field, [1.0, 1.7, 0.6, 2.3], [0.0, 0.4, -0.3])
+    raw = predict_tiled(image, forward, 48, 24)
+    assert _global_affine_error(field, raw) > 0.05, "the distortion must be visible without matching"
+
+
+def test_scale_matching_recovers_scales_and_never_fits_a_shift():
+    """Depth up to a scale: windows differ by a scale only. A fitted shift would be an offset the
+    final scale-only alignment cannot remove, so the mode must return shift == 0 always."""
+    field = _textured()
+    image, forward = _per_window_distortion(field, [1.0, 1.7, 0.6, 2.3], [0.0])
+    stitched = predict_tiled(image, forward, 48, 24, match="scale")
+    scale = (stitched * field).sum() / (field * field).sum()
+    assert float((stitched - scale * field).abs().max() / stitched.abs().max()) < 1e-3, (
+        "a pure scale ambiguity must be removed by a pure scale"
+    )
+    source = torch.rand(400) + 1.0
+    slope, shift, _ = fit_overlap(source, 2.0 * source + 5.0, torch.ones(400), "scale")
+    assert shift == 0.0, "the offset in the reference is NOT absorbed: that is the point"
+
+
+def test_affine_fit_on_a_flat_overlap_is_shift_only_and_counted():
+    source = torch.full((400,), 3.0) + 1e-9 * torch.rand(400)
+    reference = torch.full((400,), 5.0)
+    slope, shift, degraded = fit_overlap(source, reference, torch.ones(400), "affine")
+    assert slope == 1.0 and shift == pytest.approx(2.0, abs=1e-6) and degraded
+
+
+def test_the_flat_threshold_is_relative_to_the_units_of_the_model():
+    """An absolute 1e-12 variance threshold treats a field in 1e-6 units as flat, and one in
+    1e6 units with the same relative texture as textured. Scaling the field must not change it."""
+    base = torch.rand(400) * 0.2 + 1.0
+    for unit in (1e-6, 1.0, 1e6):
+        fit = fit_overlap(base * unit, (2.0 * base + 0.3) * unit, torch.ones(400), "affine")
+        assert fit is not None and not fit[2], unit
+        assert fit[0] == pytest.approx(2.0, rel=1e-3)
+
+
+def test_the_fitted_slope_is_clamped_and_the_clamp_is_counted():
+    source = torch.rand(400)
+    slope, shift, degraded = fit_overlap(source, 50.0 * source, torch.ones(400), "affine")
+    assert slope == SLOPE_RANGE[1] and degraded
+    assert shift == pytest.approx(float((50.0 * source).mean() - SLOPE_RANGE[1] * source.mean()), rel=1e-4)
+
+
+def test_an_anticorrelated_overlap_is_not_flipped():
+    source = torch.rand(400)
+    slope, shift, degraded = fit_overlap(source, -source, torch.ones(400), "affine")
+    assert slope == 1.0 and degraded, "a relative model is monotone in the truth: do not flip"
+
+
+def test_noise_does_not_bias_the_slope_toward_zero():
+    """OLS cov/var shrinks the slope by var_signal / (var_signal + var_noise); the symmetric
+    slope does not."""
+    generator = torch.Generator().manual_seed(1)
+    truth = torch.rand(20000, generator=generator)
+    source = truth + 0.3 * torch.randn(20000, generator=generator)
+    reference = 2.0 * truth + 0.6 * torch.randn(20000, generator=generator)
+    slope, _, _ = fit_overlap(source, reference, torch.ones(20000), "affine")
+    ols = float(((source - source.mean()) * (reference - reference.mean())).mean() / source.var(unbiased=False))
+    assert abs(slope - 2.0) < abs(ols - 2.0)
+
+
+def test_a_flat_half_is_no_worse_than_no_matching_and_does_not_explode():
+    field = _textured().clone()
+    field[..., :, 48:] = 2.0  # flat right half: overlaps there carry no slope information
+    image, forward = _per_window_distortion(field, [1.0, 1.7, 0.6, 2.3], [0.0, 0.4, -0.3])
+    stats = {}
+    matched = predict_tiled(image, forward, 48, 24, match="affine", stats=stats)
+    image, forward = _per_window_distortion(field, [1.0, 1.7, 0.6, 2.3], [0.0, 0.4, -0.3])
+    raw = predict_tiled(image, forward, 48, 24)
+
+    assert torch.isfinite(matched).all()
+    assert _global_affine_error(field, matched) <= _global_affine_error(field, raw) + 1e-6
+    assert float(matched.abs().max()) < 4 * float(raw.abs().max()), "slopes are clamped: no blow-up"
+    assert stats["fallbacks"] > 0 and stats["windows"] == len(tile_grid(96, 96, 48, 24))
+
+
+def test_stats_account_for_every_window():
+    field = _textured()
+    image, forward = _per_window_distortion(field, [1.0, 1.5], [0.0])
+    stats = {}
+    predict_tiled(image, forward, 48, 24, match="affine", stats=stats)
+    assert stats["windows"] == len(tile_grid(96, 96, 48, 24))
+    assert stats["matched"] + stats["unmatched"] == stats["windows"] - 1, "the first window anchors"
+    assert stats["fallbacks"] <= stats["matched"]
+
+
+def test_unknown_match_mode_is_refused():
+    with pytest.raises(ValueError, match="match mode"):
+        predict_tiled(torch.rand(1, 3, 64, 64), lambda t: t[:, :1], 32, 8, match="shift")
+
+
+def test_match_mode_follows_output_space():
+    class Model:
+        def __init__(self, protocol, output_space="depth"):
+            self.protocol, self.output_space = protocol, output_space
+
+    assert match_mode(Model("relative", "disparity")) == "affine"
+    assert match_mode(Model("relative", "depth")) == "scale"
+    assert match_mode(Model("metric", "depth")) == "none"
+    assert match_mode(object()) == "none"

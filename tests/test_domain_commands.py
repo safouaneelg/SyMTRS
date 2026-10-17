@@ -430,7 +430,7 @@ def test_the_paired_scoring_runs_the_shadow_removal_metrics_on_a_resampled_outpu
 
     write(shaded=False)
     perfect = runner.score_shadow_removal(cfg, task, run, task.generated_paths(str(run), "test"))
-    assert perfect["psnr"] > 40 and perfect["ssim"] > 0.99
+    assert perfect["psnr"] > 40 and perfect["ssim_y"] > 0.99
     assert perfect["images"] == 2 and perfect["images_with_shadow"] == 2
     assert "resampled" in capsys.readouterr().out
     # The scorer's own input contract: a full-size PNG per key.

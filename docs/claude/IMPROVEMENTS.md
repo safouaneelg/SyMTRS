@@ -328,3 +328,126 @@ un chiffre : elles changent ce que le chiffre mesure.
   + PSNR 15,7 / SSIM 0,39 / mae_lab 37,4 (chiffres dummy sans sens) ; `cyclegan_noshadow2shadow` termine
   (FID/KID seuls). Lancement réel : `symtrs train configs/domain_adapt/pix2pix_shadow2noshadow.yaml
   --data-root <racine>` (idem `cyclegan_*`), à la suite de la file, mono-GPU, `train.epochs: 40`.
+
+## 2026-10-17 - Comparabilité FID/KID, smoke batch, init des modèles d'ombre (REVIEW_night #6, #7, #8)
+
+- **#6 FID/KID asymétrique corrigé** (`symtrs/metrics/domain.py`, `model/domain/runner.py`). Avant, les
+  images réelles 2048 étaient réduites à 299 sans antialias (aliasées) et les générées 256 agrandies
+  (lisses) : le FID mesurait en partie la netteté. Maintenant : la taille générée est lue dans les fichiers
+  (`generated_image_size`, erreur nommée si tailles mixtes), les réelles sont redimensionnées à cette taille
+  avec antialias (`match_resolution`, `extract_features(resize_to=...)`), puis un seul redimensionnement
+  299 antialiasé identique pour les deux côtés (`inception_preprocess`). **KID devient le chiffre
+  principal** (`PRIMARY_METRIC`, listé avant `fid` dans le dict, `summary["primary_metric"]`, colonnes
+  `symtrs tables` : `kid, kid_std, fid, fid_rank_deficient`) : avec N=24 par split et 2048 dimensions, la
+  covariance du FID est de rang <= N-1, donc biaisée ; le FID reste calculé, avec le drapeau
+  `fid_rank_deficient` et une note (`metric_notes.fid`). Résumé : `feature_resize_h/w`. Les anciens FID ne
+  sont pas comparables aux nouveaux.
+- **#7 `scripts/smoke_all.py`** : diviser le batch par 2 double maintenant `--grad-accum` (depth et
+  segmentation, seules tâches dont la boucle accumule) pour garder batch x accum = batch effectif de la
+  grille ; sinon le batch effectif changeait en silence à LR constant. Pour superres / ombre / domaine
+  (pas d'accumulation) le batch effectif diminue vraiment : la colonne `eff_batch` < `grid_eff_batch` et la
+  ligne de queue (`# eff_batch=... (SHRUNK)`) le disent. `smoke.tsv` : 3 colonnes ajoutées à la fin
+  (`accum`, `eff_batch`, `grid_eff_batch`) ; `load_rows` lit les anciennes lignes à 9 colonnes (accum
+  inconnu = valeur de la config, la ligne de queue n'émet alors pas `--grad-accum`), `load_done` garde son
+  ancienne forme. OOM pendant l'évaluation image entière (batch d'éval = 1) distingué d'un OOM
+  d'entraînement via le traceback (`classify_oom` : frame la plus interne parmi train_one_epoch /
+  _training_step contre evaluate* / validate_crops / predict) : `FAIL ... eval OOM` immédiat au lieu de
+  descendre à 1. Sans traceback -> comportement ancien (on divise). Attention : les lignes `ok` déjà
+  écrites par la passe en cours avec un batch réduit ont tourné à accum inchangé ; elles apparaissent
+  `SHRUNK` dans la queue, à relancer avec `--only` si le batch effectif compte.
+- **#8 Ombre** : `load_matching` lève une `RuntimeError` (fichier + compteurs) si moins de 90 % des tenseurs
+  du modèle sont chargés (avant : 0 tenseur passait en silence, run de fait « from scratch »). Le résumé
+  enregistre `init_weights`, `init_source_task` (ShadowFormer : retrait d'ombre ISTD+ ; Restormer : débruitage
+  réel SIDD ; Uformer : débruitage SIDD, aucun des deux ne publie de poids de retrait d'ombre),
+  `init_tensors{loaded,total}` et `metric_notes.ssim_y`. À écrire dans RESULTS à côté de chaque ligne.
+  **SSIM renommé `ssim_y`** (luma Rec.709 seulement ; ShadowFormer moyenne par canal RGB, donc non
+  comparable aux chiffres publiés) : clés `ssim_y`, `ssim_y_shadow`, `ssim_y_nonshadow` dans
+  `metrics/shadow.py`, `CSV_FIELDS`, `tables` et les tests ; les anciens `summary.json`/`metrics.csv`
+  gardent `ssim`.
+- **Tests** : `tests/test_comparability.py` (15) : antialias (rayures hautes fréquences), taille générée lue
+  et tailles mixtes refusées, KID avant FID et drapeau rang-déficient, note/clé principale cohérentes,
+  `load_matching` (0 et 8/10 tenseurs refusés, plein accepté avec compteurs), source d'init par modèle,
+  `ssim_y`, `halve` (batch effectif conservé), lecture des lignes `smoke.tsv` à 9 et 12 colonnes,
+  attribution train/eval d'un OOM, lecture de `grad_accum`. Suite : 639 verts ; seul échec,
+  `test_eval_robustness.py::test_set_coerces_an_optional_float_that_is_currently_none` (travail concurrent
+  sur `config.py`/`--set`, hors de ce périmètre). `generate_grid.py --check` OK.
+
+## 2026-10-17 - Revue : planning du LR, reprise, poids du test, robustesse (trainer / loop / table / config)
+
+**Change la sémantique des runs depth et segmentation : les runs de validation déjà faits sont à refaire**
+(le LR effectif était faux depuis 76dd299).
+
+- **#1 Planning du LR** (`engine/trainer.py`, `engine/loop.py`) : `build_scheduler` était dimensionné en pas
+  d'optimiseur (`epochs * steps_per_epoch`) mais `scheduler.step()` était appelé une fois par EPOCH : le LR
+  restait sur les premiers pourcents de la rampe de warmup (un run de 2 epochs s'entraînait à 4-8 % du LR
+  configuré, jamais de décroissance cosinus). Le pas du scheduler est maintenant fait dans
+  `train_one_epoch(..., scheduler=)` juste après chaque `optimizer.step()` (y compris le dernier groupe
+  d'accumulation partiel ; un pas sauté par le GradScaler fait quand même avancer le planning). La taille
+  par epoch vient de `optimizer_steps_per_epoch(len(loader), grad_accum)` = plafond (5 batchs, accum 2 = 3
+  pas ; l'ancien `//` en comptait 2). Le warmup est plafonné à la moitié du run (message affiché) : les runs
+  de validation à 2 epochs avec `warmup_epochs: 2` finissaient sinon au pic sans jamais décroître ; tout run
+  avec `warmup_epochs <= epochs/2` est inchangé. L'état du scheduler est sauvé après les pas, avec
+  `scheduler_unit: "optimizer_step"` ; un ancien checkpoint (pas par epoch) n'est pas chargé tel quel mais le
+  scheduler est repositionné à `start_epoch * steps_per_epoch`.
+- **#2 Reprise et poids du test** : `best`, `best_epoch`, `history`, `non_finite_epochs` sont dans le
+  payload de `last.pt`/`best.pt` et restaurés par `--resume` (repli sur `best.pt` voisin et `metrics.csv`
+  pour les anciens checkpoints) : une époque pire après reprise n'écrase plus `best.pt`. La passe de test
+  recharge `weights/best.pt` avant d'évaluer (`summary["test_weights"]` = `best`, `last` si aucune époque
+  finie, `released` en zero-shot) ; comme pour l'ombre, `test` correspond donc à `best`.
+- **#9** : l'ajustement d'alignement de `evaluate_depth` est dans le `try` : une image avec < 2 pixels
+  valides est sautée et comptée (`skipped_images`) au lieu de planter l'évaluation ; `append_csv_row`
+  réécrit l'en-tête avec l'union des clés quand une colonne apparaît plus tard (`val_skipped_images`), les
+  anciennes lignes ont une cellule vide ; `--set data.max_depth=1000` donne un float (type lu dans
+  l'annotation du dataclass pour un champ `Optional` valant None ; `none`/`null` remet à None).
+  La perte `silog` (`model/depth/losses.py`) clampait déjà la variance à 0 : rien à changer ; la métrique
+  `silog` de `metrics/depth.py` (sqrt d'un petit négatif) est laissée à l'agent des métriques.
+- **Tests** : `tests/test_trainer_schedule.py` (vrai `build_scheduler` + vraie `train_one_epoch` sur un
+  petit modèle CPU : pic atteint après le warmup, décroissance jusqu'à `min_lr_ratio`, nb de pas scheduler =
+  nb de pas optimiseur dont le groupe partiel, plafond du warmup, test sur `best` / repli `last`, reprise
+  sans écrasement de `best.pt`, amélioration réelle prise après reprise, position du scheduler restaurée) et
+  `tests/test_eval_robustness.py` (en-tête CSV, coercition `--set`, image à 1 pixel valide).
+
+## 2026-10-17 - Métriques et raccord par tuiles : revue de nuit (points 3, 4, 5, 9)
+
+- **mIoU : dénominateur fixé par les données (point 3).** `ConfusionMatrix.supported_classes()` = classes
+  ayant au moins un pixel de vérité terrain dans la matrice de confusion de tout le split (jamais par image).
+  `miou`, `mean_dice` et `mean_acc` moyennent sur cet ensemble, identique pour tous les modèles d'un même
+  split. Avant, un seul pixel « classe 0 » prédit (0 n'existe dans aucun split, la tête a 5 sorties) donnait
+  IoU_0 = 0 et faisait passer `miou_classes` de 4 à 5, soit environ -20 % relatif pour une erreur d'un pixel.
+  `iou_k` reste NaN/null sans vérité ni prédiction, vaut 0 pour une classe prédite sans vérité (visible), mais
+  n'entre pas dans la moyenne. Nouvelles clés numériques : `support_k` (pixels de vérité) et `fp_pixels_k`
+  (pixels prédits k dont la vérité est une autre classe) ; les identifiants moyennés sont les `k` avec
+  `support_k > 0` (clés numériques, car ce dict part tel quel dans le CSV). `format_report` affiche
+  `fp_pixels`. L'en-tête des 24 configs de segmentation (régénérées, `--check` OK) décrit la nouvelle règle.
+- **Raccord des tuiles par espace de sortie (point 4a).** `tiling.match_mode(model)` : disparité (MiDaS) ->
+  `affine` (échelle + décalage) ; profondeur à une échelle près (DA3 relatif, ZoeD-N noté en relatif) ->
+  `scale` (régression par l'origine, jamais de décalage : l'alignement final `scale` ne saurait l'enlever) ;
+  profondeur métrique et logits -> `none`. Lu sur `protocol` + `output_space` de l'adaptateur (le test
+  parcourt tout le registre). `predict_tiled(match=..., stats=...)` ; `match_affine=True` reste accepté
+  (= `affine`). `forward_native(..., stats=)`.
+- **Robustesse de l'ajustement (4b).** `fit_overlap` remplace `fit_affine` : seuil de variance **relatif**
+  (`var <= 1e-6 * moyenne^2`, indépendant de l'unité), repli « décalage seul » (pente 1) si recouvrement plat,
+  corrélation < 0,5 ou pente non positive (jamais de retournement), pente bornée à [0,25 ; 4] (décalage
+  recalculé sur les moyennes), pente symétrique `std(ref)/std(src)` au lieu de l'OLS (biaisé vers 0 sous
+  bruit). Compteurs `windows/matched/fallbacks/unmatched` ; `evaluate_depth` écrit `tile_match_fallbacks`,
+  `tile_match_unmatched` et `tile_windows` (totaux du split, seulement si le tuilage a eu lieu).
+- **Dérive d'ancrage (4c).** Vérifié : chaque fenêtre est ajustée sur le recouvrement avec le champ déjà
+  assemblé (mélange de Hann de TOUTES les fenêtres posées, pas du seul voisin). L'ancrage reste la première
+  fenêtre (ordre raster) : le repère global est une affine du vrai, ce que l'alignement par image retire.
+  Documenté dans le module ; pas d'optimisation globale.
+- **Prédictions non positives notées, plus supprimées (point 5).** `compute_depth_metrics` remplace toute
+  prédiction <= 0 ou non finie (après alignement) par `min_depth` (défaut `DEFAULT_MIN_DEPTH` = 1e-3 m) au
+  lieu de la retirer du masque, et renvoie `invalid_pred_fraction` (ajouté à `DEPTH_METRIC_NAMES`). Une image
+  entièrement non positive n'est plus « ignorée » (`AllInvalidError`) : elle est mal notée, comme il se doit.
+- **silog (point 9, partie métrique).** Variance bornée à >= 0 avant la racine (cas réel trouvé :
+  -2,2e-16 -> NaN qui rendait l'époque non finie).
+- **Effet sur les chiffres déjà produits.** mIoU : un modèle qui prédisait des pixels classe 0 voit son mIoU
+  remonter (jusqu'à x1,25) ; ceux qui n'en prédisaient pas sont inchangés. Profondeur : les modèles ayant des
+  pixels <= 0 voient RMSE/abs_rel augmenter (avant : optimistes) ; les autres sont inchangés. Raccord : MiDaS
+  2048 en tuiles -> mêmes champs sur textures normales, plus robustes sur zones plates ; DA3 relatif / ZoeD-N
+  ne reçoivent plus de décalage (changement réel pour eux à 2048). Tout run tuilé antérieur est à ré-évaluer.
+- **Tests** : `test_segmentation_metrics.py` (dénominateur identique pour tous les modèles, union sur tout le
+  split, classe fantôme visible), `test_eval_protocol.py` (mode de raccord par espace de sortie, registre
+  complet), `test_tiling.py` (a,b aléatoires par tuile retrouvés, moitié plate sans explosion, pas de décalage
+  en mode `scale`, seuil indépendant de l'unité, pente bornée, non-retournement, biais OLS), `test_depth_metrics.py`
+  (prédiction négative/NaN/inf notée, `invalid_pred_fraction`, silog sans NaN sur un cas à variance -2e-16).

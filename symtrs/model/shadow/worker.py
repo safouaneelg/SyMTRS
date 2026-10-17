@@ -68,15 +68,38 @@ def forward(net: torch.nn.Module, arch: Arch, image: torch.Tensor, mask: torch.T
     return net(image, mask) if arch.takes_mask else net(image)
 
 
-def load_matching(net: torch.nn.Module, path: str) -> None:
-    """Initialise from an upstream checkpoint, keeping only tensors whose name and shape fit."""
+#: Fraction of the model's tensors an init file must supply. A checkpoint of the wrong
+#: architecture (BiasFree vs WithBias Restormer, another `embed_dim`) matches a handful of
+#: shape-compatible tensors by name and used to "succeed", silently starting from scratch
+#: while the summary claimed an initialisation. Below this, the run stops instead.
+MIN_INIT_FRACTION = 0.9
+
+
+def load_matching(
+    net: torch.nn.Module, path: str, min_fraction: float = MIN_INIT_FRACTION
+) -> Tuple[int, int]:
+    """Initialise from an upstream checkpoint, keeping only tensors whose name and shape fit.
+
+    Returns `(loaded, total)` tensor counts. Raises `RuntimeError` naming the file and the
+    counts when fewer than `min_fraction` of the model's tensors were loaded.
+    """
     payload = torch.load(path, map_location="cpu", weights_only=False)
     state = payload.get("model") or payload.get("state_dict") or payload.get("params") or payload
     state = {k.removeprefix("module."): v for k, v in state.items() if hasattr(v, "shape")}
     own = net.state_dict()
     kept = {k: v for k, v in state.items() if k in own and own[k].shape == v.shape}
+    total = len(own)
+    if total == 0 or len(kept) < min_fraction * total:
+        raise RuntimeError(
+            f"{path}: only {len(kept)} of the model's {total} tensors match by name and shape "
+            f"({len(state)} tensors in the file); at least {min_fraction:.0%} are required. "
+            "The file is for another architecture or configuration (see symtrs/model/shadow/"
+            "archs.py for the constructor arguments), or is not a weights file; starting from "
+            "it would be a silent from-scratch run."
+        )
     net.load_state_dict(kept, strict=False)
-    print(f"[symtrs] initialised {len(kept)}/{len(own)} tensors from {path}")
+    print(f"[symtrs] initialised {len(kept)}/{total} tensors from {path}")
+    return len(kept), total
 
 
 # ------------------------------------------------------------------------- data
@@ -227,8 +250,9 @@ def train(cfg: RunConfig) -> None:
     csv_path = run_dir / "metrics.csv"
 
     net, arch = build_network(cfg)
+    init_counts = None
     if cfg.shadow.init_weights:
-        load_matching(net, cfg.shadow.init_weights)
+        init_counts = load_matching(net, cfg.shadow.init_weights)
     net.to(device).train()
     print(f"[symtrs] {arch.repo}.{arch.cls}: {sum(p.numel() for p in net.parameters()) / 1e6:.1f}M parameters")
 
@@ -339,6 +363,8 @@ def train(cfg: RunConfig) -> None:
         "seconds_per_iteration": timed_seconds / max(1, timed_iterations),
         "peak_vram_gb": torch.cuda.max_memory_allocated() / 2**30 if device.type == "cuda" else 0.0,
         "train_seconds": time.time() - train_started,
+        "init_tensors_loaded": init_counts[0] if init_counts else None,
+        "init_tensors_total": init_counts[1] if init_counts else None,
     }
     (run_dir / "train_stats.json").write_text(json.dumps(stats, indent=2), encoding="utf-8")
     print(f"[symtrs] trained: {json.dumps(stats)}")

@@ -26,6 +26,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from symtrs.metrics.shadow import SSIM_NOTE
 from symtrs.model.shadow.archs import arch_for, upstream_missing
 from symtrs.common.jsonio import dumps as json_dumps_safe
 
@@ -36,9 +37,9 @@ WORKER_MODULE = "symtrs.model.shadow.worker"
 #: row would misalign the others.
 CSV_FIELDS = (
     "iteration", "split", "loss", "lr", "seconds", "vram_gb",
-    "psnr", "ssim", "mae_lab", "rmse_lab",
-    "psnr_shadow", "ssim_shadow", "mae_lab_shadow", "rmse_lab_shadow",
-    "psnr_nonshadow", "ssim_nonshadow", "mae_lab_nonshadow", "rmse_lab_nonshadow",
+    "psnr", "ssim_y", "mae_lab", "rmse_lab",
+    "psnr_shadow", "ssim_y_shadow", "mae_lab_shadow", "rmse_lab_shadow",
+    "psnr_nonshadow", "ssim_y_nonshadow", "mae_lab_nonshadow", "rmse_lab_nonshadow",
     "shadow_fraction", "images", "images_with_shadow",
 )
 
@@ -140,7 +141,7 @@ def score_split(cfg, run_dir: Path, split: str) -> Dict[str, float]:
     metrics = aggregate(rows)
     append_metrics_row(run_dir / "metrics.csv", {"iteration": -1, "split": split, **metrics})
     print(
-        f"[symtrs] {split}: psnr={metrics['psnr']:.3f} ssim={metrics['ssim']:.4f} "
+        f"[symtrs] {split}: psnr={metrics['psnr']:.3f} ssim_y={metrics['ssim_y']:.4f} "
         f"mae_lab={metrics['mae_lab']:.3f} | shadow psnr={metrics.get('psnr_shadow', float('nan')):.3f} "
         f"non-shadow psnr={metrics.get('psnr_nonshadow', float('nan')):.3f} ({len(keys)} images)"
     )
@@ -247,6 +248,11 @@ def run_shadow_removal(
         "epochs": cfg.train.epochs,
         "upstream": {"repo": arch.repo, "class": arch.cls},
         "mask": {"threshold": shadow.mask_threshold, "open": shadow.mask_open},
+        # Comparability: the three models do not start from comparable weights, so every
+        # result row states what it started from (None = random init).
+        "init_weights": shadow.init_weights or None,
+        "init_source_task": arch.init_source_task if shadow.init_weights else None,
+        "metric_notes": {"ssim_y": SSIM_NOTE},
     }
 
     if mode == "finetune":
@@ -255,6 +261,10 @@ def run_shadow_removal(
     if stats.is_file():
         summary["train"] = json.loads(stats.read_text(encoding="utf-8"))
         summary["best_epoch"] = summary["train"].get("best_iteration", "")
+        summary["init_tensors"] = {
+            "loaded": summary["train"].get("init_tensors_loaded"),
+            "total": summary["train"].get("init_tensors_total"),
+        }
 
     if not shadow.skip_final_eval:
         _launch(

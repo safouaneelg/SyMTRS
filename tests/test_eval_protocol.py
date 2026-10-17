@@ -233,7 +233,10 @@ def test_absolute_outputs_are_not_matched_by_default():
 
 
 @requires_torch
-def test_forward_native_matches_tiles_only_for_relative_models():
+def test_forward_native_matches_tiles_by_output_space_not_by_protocol_alone():
+    """Disparity (MiDaS) is ambiguous in scale AND shift; depth up to a scale (ZoeD-N, DA3
+    relative) in scale only - a fitted shift there is an offset the final `scale` alignment cannot
+    remove; metric depth and logits are absolute and must never be matched."""
     import torch
 
     import symtrs.engine.tiling as tiling
@@ -243,8 +246,10 @@ def test_forward_native_matches_tiles_only_for_relative_models():
     current = {}
 
     class Stub:
-        def __init__(self, protocol):
+        def __init__(self, protocol, output_space=None):
             self.protocol = protocol
+            if output_space is not None:
+                self.output_space = output_space
 
         def preprocess_image(self, image):
             return image
@@ -254,18 +259,47 @@ def test_forward_native_matches_tiles_only_for_relative_models():
 
     original = tiling.predict_tiled
 
-    def spy(image, fn, size, overlap, match_affine=False):
-        seen[current["protocol"]] = match_affine
-        return original(image, fn, size, overlap, match_affine=match_affine)
+    def spy(image, fn, size, overlap, **kwargs):
+        seen[current["case"]] = kwargs["match"]
+        return original(image, fn, size, overlap, **kwargs)
 
     tiling.predict_tiled = spy
+    cases = {
+        "midas": Stub("relative", "disparity"),
+        "depth_up_to_scale": Stub("relative", "depth"),
+        "metric": Stub("metric", "depth"),
+        "segmentation": Stub(""),
+    }
     try:
-        for protocol in ("relative", "metric", ""):
-            current["protocol"] = protocol
-            loop.forward_native(Stub(protocol), torch.rand(1, 3, 64, 64), tile_size=32, tile_overlap=8)
+        for name, model in cases.items():
+            current["case"] = name
+            loop.forward_native(model, torch.rand(1, 3, 64, 64), tile_size=32, tile_overlap=8)
     finally:
         tiling.predict_tiled = original
-    assert seen == {"relative": True, "metric": False, "": False}
+    assert seen == {
+        "midas": "affine", "depth_up_to_scale": "scale", "metric": "none", "segmentation": "none",
+    }
+
+
+@requires_torch
+def test_real_adapters_expose_the_output_space_match_mode_reads():
+    """`match_mode` reads `protocol` / `output_space` off the adapter. If an adapter stopped
+    exposing them, a disparity model would silently be matched with a shift-free fit."""
+    from symtrs.engine.tiling import match_mode
+    from symtrs.registry import REGISTRY
+
+    for key, spec in REGISTRY.items():
+        if spec.task != "depth":
+            continue
+
+        class FromSpec:
+            protocol = spec.protocol
+            output_space = spec.output_space
+
+        expected = "none" if spec.protocol != "relative" else (
+            "affine" if spec.output_space == "disparity" else "scale"
+        )
+        assert match_mode(FromSpec) == expected, key
 
 
 @requires_torch
@@ -380,8 +414,10 @@ def test_a_class_with_empty_union_is_null_and_excluded_from_miou():
 
 
 @requires_torch
-def test_a_class_predicted_but_absent_from_the_ground_truth_still_counts_as_zero():
-    """Standard behaviour, kept: hallucinating a class is an error."""
+def test_a_class_predicted_but_absent_from_the_ground_truth_is_reported_but_not_averaged():
+    """The mIoU denominator is a property of the data (classes with ground truth in the split),
+    not of the model. Otherwise one stray class-0 pixel moved `miou_classes` from 4 to 5 and cut
+    the mIoU by 20% relative, which made the models of one table incomparable."""
     import torch
 
     from symtrs.metrics.semantic import ConfusionMatrix
@@ -390,10 +426,33 @@ def test_a_class_predicted_but_absent_from_the_ground_truth_still_counts_as_zero
     matrix.update(torch.tensor([[0, 1, 1, 1]]), torch.tensor([[1, 1, 1, 1]]))  # predicts 0 once
 
     summary = matrix.summary()
-    assert summary["iou_0"] == 0.0, "union > 0: a real zero"
+    assert summary["iou_0"] == 0.0, "union > 0: the hallucination is visible per class..."
+    assert summary["fp_pixels_0"] == 1.0 and summary["support_0"] == 0.0
     assert math.isnan(summary["iou_2"]), "class 2 is nowhere"
-    assert summary["miou_classes"] == 2
-    assert summary["miou"] == pytest.approx((0.0 + 3 / 4) / 2)
+    assert summary["miou_classes"] == 1, "...but class 0 has no ground truth, so it is not averaged"
+    assert summary["miou"] == pytest.approx(3 / 4)
+    assert summary["mean_dice"] == pytest.approx(2 * 3 / (4 + 3))
+
+
+@requires_torch
+def test_miou_denominator_is_identical_for_every_model_on_the_same_split():
+    import torch
+
+    from symtrs.metrics.semantic import ConfusionMatrix
+
+    target = torch.tensor([[1, 1, 2, 2, 3, 3, 4, 4]])  # SyMTRS-like: class 0 exists nowhere
+    perfect = ConfusionMatrix(num_classes=5, ignore_index=255)
+    perfect.update(target.clone(), target)
+    stray = ConfusionMatrix(num_classes=5, ignore_index=255)
+    prediction = target.clone()
+    prediction[0, 0] = 0  # one pixel of "background"
+    stray.update(prediction, target)
+
+    assert perfect.summary()["miou_classes"] == stray.summary()["miou_classes"] == 4
+    # Class 1 lost one of two pixels (IoU 1/2); the other three classes are perfect. Dividing by 5
+    # (the old rule) would give 0.7 instead of 0.875 for the same single mistake.
+    assert stray.summary()["miou"] == pytest.approx((0.5 + 1.0 + 1.0 + 1.0) / 4)
+    assert stray.summary()["fp_pixels_0"] == 1.0
 
 
 @requires_torch

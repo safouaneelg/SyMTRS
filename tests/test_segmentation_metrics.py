@@ -197,3 +197,43 @@ def test_six_class_report_names_every_class():
     # Every class was predicted perfectly, so mIoU is 1 and the per-class rows say so.
     assert matrix.miou() == pytest.approx(1.0, abs=1e-9)
     assert "1.0000" in report
+
+
+# ------------------------------------- the class average is a property of the data, not the model
+
+
+def test_class_averages_cover_the_classes_with_ground_truth_whatever_the_model_predicts():
+    """mIoU, mean_dice and mean_acc average over the classes that have ground-truth pixels in the
+    split. Class 0 has none (SyMTRS masks hold classes 1-4) but the head has an output for it; a
+    model that emits one class-0 pixel must not change the denominator, or two models in one
+    table are averaged over different numbers of classes."""
+    target = [1, 1, 2, 2, 3, 3, 4, 4]
+    clean = _built(target, target, num_classes=5)
+    stray = _built([0, 1, 2, 2, 3, 3, 4, 4], target, num_classes=5)
+
+    for matrix in (clean, stray):
+        assert matrix.classes_averaged() == 4
+        assert matrix.supported_classes().tolist() == [False, True, True, True, True]
+    assert clean.miou() == pytest.approx(1.0)
+    assert stray.miou() == pytest.approx((0.5 + 3.0) / 4)  # not divided by 5
+    assert stray.mean_dice() == pytest.approx((2 / 3 + 3.0) / 4)
+    assert stray.mean_accuracy() == pytest.approx((0.5 + 3.0) / 4)
+
+
+def test_the_unsupported_but_predicted_class_stays_visible_per_class():
+    stray = _built([0, 0, 1], [1, 1, 1], num_classes=3)
+    summary = stray.summary()
+    assert summary["iou_0"] == 0.0, "reported, not hidden"
+    assert summary["fp_pixels_0"] == 2.0 and summary["support_0"] == 0.0
+    assert summary["support_1"] == 3.0 and summary["fp_pixels_1"] == 0.0
+    assert summary["miou_classes"] == 1
+    assert summary["miou"] == pytest.approx(1 / 3), "class 1: 1 of 3 pixels found"
+
+
+def test_the_supported_set_is_the_union_over_the_whole_split_not_per_image():
+    """An image that happens to lack class 2 must not remove it from the average."""
+    matrix = ConfusionMatrix(num_classes=3, ignore_index=255)
+    matrix.update(torch.tensor([0, 0]), torch.tensor([0, 0]))  # image 1: only class 0
+    matrix.update(torch.tensor([2, 2]), torch.tensor([2, 2]))  # image 2: only class 2
+    assert matrix.classes_averaged() == 2
+    assert matrix.supported_classes().tolist() == [True, False, True]

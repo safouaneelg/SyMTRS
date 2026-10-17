@@ -14,9 +14,10 @@
 # instead of 255, change data.ignore_index in the config and not the metric - a metric
 # that guesses which pixels to ignore is worse than one that does not.
 #
-# Class 0 (background) has no pixel in any split of the current capture, so its IoU is
-# null and mIoU averages the classes that exist; the result's `miou_classes` says how
-# many. A class absent from the ground truth but predicted still counts, as IoU 0.
+# Class 0 (background) has no pixel in any split of the current capture, so mIoU averages
+# the classes that have ground truth in the evaluated split (the same set for every model);
+# `miou_classes` says how many. A class absent from the ground truth but predicted keeps
+# IoU 0 and its false positives are in `fp_pixels_k`, but it is not averaged.
 #
 # The cheapest segmentation cell: a compact U-Net trained from scratch, with no
 # pretrained encoder at all. That makes it the lower bound in the table - everything

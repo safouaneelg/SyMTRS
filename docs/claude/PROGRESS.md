@@ -89,3 +89,15 @@ dataset preview (144 transforms, 96/24/24). Pas de convergence recherchée ; auc
 - [ ] Aucun .pt/.pth/log/donnée/`.cache`/`checkpoints`/`runs` suivi ; `third_party/*/` ignoré.
 - [ ] Suite de tests verte, `generate_grid.py --check`, RESULTS.md + RUNS.md à jour.
 - [ ] Nouvelle branche depuis `features`, push, PR → `features`, corps de PR prêt ; **confirmation utilisateur avant création**.
+- 2026-10-17 04:50 : **smoke passe 1 terminée** (91 configs : 82 ok, 9 FAIL — tous corrigés depuis).
+  Temps : 9 h 08 de mur (19:42 → 04:50) dont ~7,6 h de veille ; calcul effectif 78 min de jobs
+  (depth ~27 min hors job gonflé par la veille, shadow 27, seg 10, SR 8, domain 7). Archivée dans
+  `runs/smoke_pass1/`. Commit `a7b440d` (corrections audit). **Passe 2 lancée** (95 configs, code
+  corrigé, keep_awake actif) → `logs/smoke_all_pass2_20261017_0450.log`. Revue critique indépendante
+  du diff en parallèle (agent, lecture seule) → `docs/claude/REVIEW_night.md`.
+- 2026-10-17 05:10 : revue indépendante (`docs/claude/REVIEW_night.md`) → **bug majeur préexistant
+  vérifié** : scheduler LR dimensionné en pas mais appelé par époque (2 époques ≈ 4–8 % du LR, pas de
+  décroissance). + resume ne restaure pas `best`, test scoré avec les poids `last`, mIoU dénominateur
+  variable, matching affine des tuiles fragile, prédictions ≤0 ignorées, FID asymétrique, smoke qui
+  change le batch effectif, init shadow hétérogène. 3 agents Sonnet de correction (trainer / métriques+
+  tuilage / domain+shadow+smoke). La passe 2 du smoke continue (valide pour plomberie et batch).

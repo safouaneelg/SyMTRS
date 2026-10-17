@@ -195,20 +195,49 @@ def build_optimizer(model, cfg: RunConfig):
     return torch.optim.SGD(groups, lr=cfg.train.lr, momentum=0.9, nesterov=True)
 
 
+def optimizer_steps_per_epoch(num_batches: int, grad_accum: int) -> int:
+    """How many times `train_one_epoch` calls `optimizer.step()` for a loader of this length.
+
+    A ceiling, not a floor division: the last, partial accumulation group is stepped too
+    (`(step + 1) == len(loader)` in the loop), so 5 batches with `grad_accum=2` are 3 steps.
+    The schedule is sized with this number and stepped next to every `optimizer.step()`, which
+    is what keeps the two in agreement.
+    """
+    accumulation = max(1, int(grad_accum))
+    return max(1, -(-int(num_batches) // accumulation))
+
+
 def build_scheduler(optimizer, cfg: RunConfig, steps_per_epoch: int):
     """Warmup then cosine or polynomial decay, all in *optimiser steps*.
 
-    Scheduling per step rather than per epoch matters once gradient accumulation makes
-    an epoch a few hundred steps: a per-epoch schedule would hold the learning rate
-    flat through the whole warmup window.
-    """
-    total_steps = max(1, cfg.train.epochs * max(1, steps_per_epoch))
-    warmup_steps = max(0, cfg.train.warmup_epochs * max(1, steps_per_epoch))
-    base_lr = cfg.train.lr
-    min_ratio = cfg.train.min_lr_ratio
+    The scheduler must be stepped once per optimiser step (`train_one_epoch(...,
+    scheduler=...)` does it). It used to be stepped once per epoch while sized in steps, so
+    the learning rate sat on the first few percent of the warmup ramp for the whole run.
 
+    `steps_per_epoch` is `optimizer_steps_per_epoch(len(loader), grad_accum)`.
+
+    Warmup is capped at half of the run. `warmup_epochs` is a per-run-length choice made for
+    the full-length config; a short run (the validation queue trains 2 epochs with
+    `warmup_epochs: 2`) would otherwise spend all of it ramping up and end at the peak without
+    ever decaying, which is neither the configured schedule nor a useful short one. Capping
+    keeps "warm up, then decay" true at any length, and leaves every run with
+    `warmup_epochs <= epochs / 2` exactly as configured.
+    """
     if cfg.train.sched == "none":
         return None
+
+    steps_per_epoch = max(1, int(steps_per_epoch))
+    total_steps = max(1, cfg.train.epochs * steps_per_epoch)
+    warmup_steps = max(0, cfg.train.warmup_epochs * steps_per_epoch)
+    if warmup_steps > total_steps // 2:
+        capped = total_steps // 2
+        print(
+            f"[symtrs] train.warmup_epochs={cfg.train.warmup_epochs} is more than half of "
+            f"train.epochs={cfg.train.epochs}; warming up for {capped} of {total_steps} steps "
+            "instead so the schedule still decays"
+        )
+        warmup_steps = capped
+    min_ratio = cfg.train.min_lr_ratio
 
     def factor(step: int) -> float:
         if warmup_steps and step < warmup_steps:
@@ -217,8 +246,6 @@ def build_scheduler(optimizer, cfg: RunConfig, steps_per_epoch: int):
         progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
         progress = min(max(progress, 0.0), 1.0)
         if cfg.train.sched == "cosine":
-            import math
-
             cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
             return min_ratio + (1.0 - min_ratio) * cosine
         exponent = 0.9
@@ -436,23 +463,35 @@ def _run(
             )
 
         optimizer = build_optimizer(model, cfg)
-        steps_per_epoch = max(1, len(train_loader) // max(1, cfg.train.grad_accum))
+        steps_per_epoch = optimizer_steps_per_epoch(len(train_loader), cfg.train.grad_accum)
         scheduler = build_scheduler(optimizer, cfg, steps_per_epoch)
         scaler = make_grad_scaler(resolved, cfg.train.amp)
 
         start_epoch = 0
         if cfg.train.resume:
-            start_epoch = _resume(cfg, model, optimizer, scheduler, run_dir)
+            start_epoch, restored = _resume(
+                cfg, model, optimizer, scheduler, run_dir, steps_per_epoch, monitor
+            )
+            # Without these, the first epoch after a resume starts with `best=None` and
+            # overwrites `best.pt` even when it is worse than the epoch the crash interrupted
+            # (`run_queue.py` resumes on every crash or timeout), and `summary.json` loses
+            # the epochs before it.
+            best = restored["best"]
+            best_epoch = restored["best_epoch"]
+            history = restored["history"]
+            non_finite_epochs = restored["non_finite_epochs"]
             if is_main_process():
-                print(f"[symtrs] resumed from {cfg.train.resume} at epoch {start_epoch}")
+                print(
+                    f"[symtrs] resumed from {cfg.train.resume} at epoch {start_epoch} "
+                    f"(best {monitor}={best} at epoch {best_epoch})"
+                )
 
         for epoch in range(start_epoch, cfg.train.epochs):
             started = time.time()
             train_metrics = train_one_epoch(
-                model, train_loader, optimizer, scaler, cfg, resolved, epoch=epoch
+                model, train_loader, optimizer, scaler, cfg, resolved, epoch=epoch,
+                scheduler=scheduler,
             )
-            if scheduler is not None:
-                scheduler.step()
 
             val_metrics = evaluate(model, val_loader, cfg, resolved)
             lr = float(optimizer.param_groups[0]["lr"])
@@ -470,9 +509,6 @@ def _run(
                 print(f"[symtrs]   train {format_metrics(train_metrics)}")
                 print(f"[symtrs]   val   {format_metrics(val_metrics)}")
 
-                state = _state(model, optimizer, scheduler, epoch, val_metrics)
-                save_run(model, cfg, run_dir, state, "last", val_metrics)
-
                 value = float(val_metrics.get(monitor, float("nan")))
                 if not math.isfinite(value):
                     non_finite_epochs.append(epoch)
@@ -480,9 +516,20 @@ def _run(
                         f"[symtrs]   warning: val {monitor}={value} is not finite; epoch {epoch} "
                         "cannot be the best checkpoint (weights/last.pt is still written)"
                     )
-                if is_improvement(value, best, direction):
+                improved = is_improvement(value, best, direction)
+                if improved:
                     best = value
                     best_epoch = epoch
+
+                # `best` and the history go into the payload *after* this epoch is decided, so
+                # that a resume from either checkpoint knows what it is up against.
+                state = _state(
+                    model, optimizer, scheduler, epoch, val_metrics,
+                    best=best, best_epoch=best_epoch, history=history,
+                    non_finite_epochs=non_finite_epochs,
+                )
+                save_run(model, cfg, run_dir, state, "last", val_metrics)
+                if improved:
                     save_run(model, cfg, run_dir, state, "best", val_metrics)
                     print(f"[symtrs]   new best {monitor}={value:.4f} -> weights/best.pt")
 
@@ -493,6 +540,12 @@ def _run(
 
             barrier()
 
+    # The test pass scores the checkpoint the summary reports as "best", not whatever the
+    # last epoch left in memory: `best` and `test` sit side by side in summary.json, and the
+    # other tasks (shadow removal) score best.pt, so a number from the last-epoch weights
+    # made the protocols differ between tasks. Which weights were scored is recorded rather
+    # than implied.
+    test_weights = _load_test_weights(model, run_dir, mode, best, resolved)
     test_align = ""
     test_metrics = evaluate(
         model, test_loader, cfg, resolved,
@@ -512,6 +565,7 @@ def _run(
         "best": best,
         "best_epoch": best_epoch,
         "epochs": cfg.train.epochs if mode == "finetune" else 0,
+        "test_weights": test_weights,
         "test": test_metrics,
         "history": history,
     }
@@ -528,24 +582,86 @@ def _run(
             print(
                 f"[symtrs] no epoch produced a finite val {monitor}: no weights/best.pt was "
                 "written and \"best\" is null in summary.json. The test numbers above come "
-                "from the last-epoch weights; treat them as a failed run."
+                "from the last-epoch weights (test_weights=\"last\"); treat them as a failed run."
             )
     return summary
 
 
-def _state(model, optimizer, scheduler, epoch: int, metrics: Dict[str, float]) -> Dict[str, Any]:
+def _state(
+    model,
+    optimizer,
+    scheduler,
+    epoch: int,
+    metrics: Dict[str, float],
+    best: Optional[float] = None,
+    best_epoch: int = -1,
+    history: Optional[List[Dict[str, Any]]] = None,
+    non_finite_epochs: Optional[List[int]] = None,
+) -> Dict[str, Any]:
     inner = getattr(model, "module", model)
     return {
         "model": inner.state_dict(),
         "optimizer": optimizer.state_dict() if optimizer is not None else None,
         "scheduler": scheduler.state_dict() if scheduler is not None else None,
+        # The scheduler is stepped per optimiser step. A checkpoint from before that was
+        # stepped per epoch, and its position means something else; `_resume` tells them apart.
+        "scheduler_unit": "optimizer_step",
         "epoch": epoch,
         "metrics": metrics,
+        "best": best,
+        "best_epoch": best_epoch,
+        "history": list(history or []),
+        "non_finite_epochs": list(non_finite_epochs or []),
     }
 
 
-def _resume(cfg: RunConfig, model, optimizer, scheduler, run_dir: Path) -> int:
+def _load_test_weights(model, run_dir: Path, mode: str, best: Optional[float], device) -> str:
+    """Put the weights the test pass should score into `model`; return which they are.
+
+    `"best"` after a training run with a finite best, `"last"` when no epoch had a finite
+    monitor (there is no best.pt then, and the summary says so), `"released"` for zero-shot
+    where nothing was trained. In a distributed run every rank reaches this after the
+    epoch loop's barrier, so best.pt is complete on disk.
+    """
+    if mode != "finetune":
+        return "released"
+    path = run_dir / "weights" / "best.pt"
+    if best is None or not path.is_file():
+        return "last"
+    payload = load_checkpoint(str(path), map_location="cpu")
+    inner = getattr(model, "module", model)
+    inner.load_state_dict(payload["model"])
+    inner.to(device)
+    return "best"
+
+
+def _fast_forward_scheduler(scheduler, steps: int) -> None:
+    """Put a `LambdaLR` at `steps` optimiser steps without replaying them one by one."""
+    scheduler.last_epoch = steps
+    for group, base, lambda_ in zip(
+        scheduler.optimizer.param_groups, scheduler.base_lrs, scheduler.lr_lambdas
+    ):
+        group["lr"] = base * lambda_(steps)
+    scheduler._last_lr = [group["lr"] for group in scheduler.optimizer.param_groups]
+
+
+def _resume(
+    cfg: RunConfig,
+    model,
+    optimizer,
+    scheduler,
+    run_dir: Path,
+    steps_per_epoch: int,
+    monitor: str,
+):
+    """Restore a run from a checkpoint. Returns `(start_epoch, restored_run_state)`.
+
+    The run state is `best`, `best_epoch`, `history` and `non_finite_epochs`, taken from the
+    checkpoint. Checkpoints written before they were stored fall back to what is on disk
+    beside them: `best.pt`'s own metrics for the best value, `metrics.csv` for the history.
+    """
     from symtrs.common.checkpoint import resolve_checkpoint_path
+    from symtrs.common.table import read_csv_rows, row_as_floats
 
     path = resolve_checkpoint_path(cfg.train.resume)
     if path is None:
@@ -560,9 +676,42 @@ def _resume(cfg: RunConfig, model, optimizer, scheduler, run_dir: Path) -> int:
         )
     if payload.get("optimizer") and optimizer is not None:
         optimizer.load_state_dict(payload["optimizer"])
-    if payload.get("scheduler") and scheduler is not None:
-        scheduler.load_state_dict(payload["scheduler"])
-    return int(payload.get("epoch", 0)) + 1
+    start_epoch = int(payload.get("epoch", 0)) + 1
+    if scheduler is not None:
+        if payload.get("scheduler") and payload.get("scheduler_unit") == "optimizer_step":
+            scheduler.load_state_dict(payload["scheduler"])
+        else:
+            # A per-epoch position (or none) is meaningless to a per-step schedule: loading
+            # it would restart the warmup. Recompute where the run would be instead.
+            _fast_forward_scheduler(scheduler, start_epoch * steps_per_epoch)
+
+    best = payload.get("best")
+    best_epoch = payload.get("best_epoch", -1)
+    if "best" not in payload:
+        best, best_epoch = None, -1
+        best_path = Path(path).with_name("best.pt")
+        if best_path.is_file():
+            best_payload = load_checkpoint(str(best_path), map_location="cpu")
+            value = (best_payload.get("metrics") or {}).get(monitor)
+            if isinstance(value, (int, float)) and math.isfinite(value):
+                best, best_epoch = float(value), int(best_payload.get("epoch", -1))
+    history = payload.get("history")
+    if history is None:
+        history = [
+            row_as_floats(row)
+            for row in read_csv_rows(str(run_dir / "metrics.csv"))
+            if row.get("epoch", "") not in ("", "-1")
+        ]
+    # Resuming from an earlier checkpoint than the last one written drops the later epochs:
+    # they are about to be trained again.
+    history = [row for row in history if float(row.get("epoch", -1)) < start_epoch]
+    non_finite = [e for e in payload.get("non_finite_epochs", []) if e < start_epoch]
+    return start_epoch, {
+        "best": best if best is None or math.isfinite(best) else None,
+        "best_epoch": int(best_epoch),
+        "history": history,
+        "non_finite_epochs": non_finite,
+    }
 
 
 def _save_previews(model, loader, cfg: RunConfig, device, run_dir: Path, epoch: int) -> None:
@@ -715,6 +864,7 @@ __all__ = [
     "checkpoint_metadata",
     "evaluate_run",
     "is_improvement",
+    "optimizer_steps_per_epoch",
     "prepare_run_dir",
     "resolve_monitor",
     "run",

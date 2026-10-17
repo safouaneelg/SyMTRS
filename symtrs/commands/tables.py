@@ -28,15 +28,17 @@ COLUMN_ORDER = {
     # The paired columns exist only on `shadow2noshadow` rows (see
     # `symtrs.model.domain.runner.SHADOW_REMOVAL_DIRECTIONS`) and are the shadow_removal
     # columns under the same names, so the two tasks line up in one table.
-    "domain_adapt": ("fid", "kid", "kid_std") + (
-        "psnr", "ssim", "mae_lab", "rmse_lab",
-        "psnr_shadow", "ssim_shadow", "mae_lab_shadow", "rmse_lab_shadow",
-        "psnr_nonshadow", "ssim_nonshadow", "mae_lab_nonshadow", "rmse_lab_nonshadow",
+    # KID first: it is the primary distribution metric (FID's covariance is rank-deficient at
+    # the split sizes used; see symtrs.metrics.domain).
+    "domain_adapt": ("kid", "kid_std", "fid", "fid_rank_deficient") + (
+        "psnr", "ssim_y", "mae_lab", "rmse_lab",
+        "psnr_shadow", "ssim_y_shadow", "mae_lab_shadow", "rmse_lab_shadow",
+        "psnr_nonshadow", "ssim_y_nonshadow", "mae_lab_nonshadow", "rmse_lab_nonshadow",
     ),
     "shadow_removal": (
-        "psnr", "ssim", "mae_lab", "rmse_lab",
-        "psnr_shadow", "ssim_shadow", "mae_lab_shadow", "rmse_lab_shadow",
-        "psnr_nonshadow", "ssim_nonshadow", "mae_lab_nonshadow", "rmse_lab_nonshadow",
+        "psnr", "ssim_y", "mae_lab", "rmse_lab",
+        "psnr_shadow", "ssim_y_shadow", "mae_lab_shadow", "rmse_lab_shadow",
+        "psnr_nonshadow", "ssim_y_nonshadow", "mae_lab_nonshadow", "rmse_lab_nonshadow",
     ),
 }
 

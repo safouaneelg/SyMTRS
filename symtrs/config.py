@@ -423,7 +423,46 @@ def _set_dotted(obj: Any, dotted: str, value: Any) -> None:
         return
     if not hasattr(target, leaf):
         raise ConfigError(f"unknown config key {dotted!r}")
-    setattr(target, leaf, _coerce(getattr(target, leaf), value, dotted))
+    current = getattr(target, leaf)
+    optional = _optional_hint(target, leaf)
+    if optional is not _NOT_OPTIONAL and isinstance(value, str) and value.strip().lower() in {"none", "null"}:
+        # `None`/`null` unset an Optional field again, e.g. `--set data.max_depth=none`.
+        setattr(target, leaf, None)
+        return
+    if current is None:
+        # Nothing to read a type from: `data.max_depth` is `Optional[float] = None`, so
+        # `--set data.max_depth=1000` used to be stored as the string "1000" and only failed
+        # later, in `validate()`, as a `TypeError` comparing a str with 0. The dataclass
+        # annotation is the type.
+        if optional in (bool, int, float, str):
+            # Reuse the typed branches of `_coerce` by handing it a prototype of that type.
+            setattr(target, leaf, _coerce(optional(), value, dotted))
+        else:
+            setattr(target, leaf, _coerce_unknown(value))
+        return
+    setattr(target, leaf, _coerce(current, value, dotted))
+
+
+_NOT_OPTIONAL = object()
+
+
+def _optional_hint(target: Any, leaf: str) -> Any:
+    """The declared type inside `Optional[X]` for a dataclass field, or `_NOT_OPTIONAL`.
+
+    A field annotated as a plain type returns `_NOT_OPTIONAL`; `Optional[X]` returns `X`
+    (or `None` when it is not a single plain member). Annotations are strings here
+    (`from __future__ import annotations`), hence `get_type_hints`.
+    """
+    import typing
+
+    try:
+        hint = typing.get_type_hints(type(target)).get(leaf)
+    except Exception:  # noqa: BLE001 - an unresolvable annotation just means "not Optional"
+        return _NOT_OPTIONAL
+    if typing.get_origin(hint) is not typing.Union or type(None) not in typing.get_args(hint):
+        return _NOT_OPTIONAL
+    members = [arg for arg in typing.get_args(hint) if arg is not type(None)]
+    return members[0] if len(members) == 1 else None
 
 
 def _coerce_unknown(value: Any) -> Any:

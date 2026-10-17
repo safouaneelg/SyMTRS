@@ -20,6 +20,11 @@ Protocol (ISTD, as in the ShadowFormer / ST-CGAN papers), with two documented di
     zeroes the other region and scores the whole image, which inflates regional PSNR/SSIM
     with a large block of identical black pixels; the numbers here are therefore lower and
     not comparable with a published regional PSNR/SSIM, only with each other.
+  * SSIM is computed on the **luma channel only** (Rec. 709 Y of the 8-bit sRGB values), hence
+    the key `ssim_y`. ShadowFormer's `test.py` scores SSIM per RGB channel and averages, which
+    gives a different number; `ssim_y` must not be set beside a published SSIM. The name, not
+    a footnote, carries the difference so a table cannot drop it. `SSIM_NOTE` is copied into
+    every shadow summary for the same reason.
 """
 
 from __future__ import annotations
@@ -34,7 +39,13 @@ import numpy as np
 LUMA = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
 
 REGIONS = ("all", "shadow", "nonshadow")
-METRICS = ("psnr", "ssim", "mae_lab", "rmse_lab")
+
+#: Written into summary.json beside the metrics (see `symtrs.model.shadow.runner`).
+SSIM_NOTE = (
+    "ssim_y is SSIM on Rec.709 luma only (Gaussian 11x11, sigma 1.5, valid region); published "
+    "ShadowFormer/ISTD tables average SSIM over the RGB channels, so the two are not comparable"
+)
+METRICS = ("psnr", "ssim_y", "mae_lab", "rmse_lab")
 
 
 def luminance(image: np.ndarray) -> np.ndarray:
@@ -190,7 +201,7 @@ def score_image(
                 result[name + suffix] = None
             continue
         result["psnr" + suffix] = float(10 * np.log10(1.0 / max(float(mse), 1e-12)))
-        result["ssim" + suffix] = float(ssim_value)
+        result["ssim_y" + suffix] = float(ssim_value)
         result["mae_lab" + suffix] = float(mae)
         result["rmse_lab" + suffix] = float(np.sqrt(mse_lab))
     result["shadow_fraction"] = float(shadow.mean())
@@ -218,6 +229,7 @@ def aggregate(rows: Iterable[Dict[str, Optional[float]]]) -> Dict[str, float]:
 __all__ = [
     "METRICS",
     "REGIONS",
+    "SSIM_NOTE",
     "aggregate",
     "crop_mask",
     "derive_mask",

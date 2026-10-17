@@ -34,6 +34,11 @@ class Arch:
     #: Whether the constructor takes `img_size` (the training patch).
     takes_img_size: bool
     kwargs: Mapping[str, Any] = field(default_factory=dict)
+    #: What the authors' *released* weights were trained for, i.e. what `shadow.init_weights`
+    #: starts from when it points at them. Only ShadowFormer ships shadow-removal weights;
+    #: the other two start from denoising, which is a different (and for this benchmark
+    #: weaker) prior, so a results table must state it beside every row.
+    init_source_task: str = ""
 
     @property
     def source_path(self) -> Path:
@@ -49,6 +54,7 @@ ARCHS: Dict[str, Arch] = {
         "shadowformer", "ShadowFormer", "model.py", "ShadowFormer",
         takes_mask=True, takes_img_size=True,
         kwargs={"embed_dim": 32, "win_size": 10, "token_projection": "linear", "token_mlp": "leff"},
+        init_source_task="shadow removal (ISTD+)",
     ),
     "uformer": Arch(
         "uformer", "Uformer", "model.py", "Uformer",
@@ -57,6 +63,7 @@ ARCHS: Dict[str, Arch] = {
             "embed_dim": 32, "win_size": 8, "token_projection": "linear", "token_mlp": "leff",
             "depths": [1, 2, 8, 8, 2, 8, 8, 2, 1], "modulator": True,
         },
+        init_source_task="denoising (SIDD); no shadow-removal weights released",
     ),
     "restormer": Arch(
         "restormer", "Restormer", "basicsr/models/archs/restormer_arch.py", "Restormer",
@@ -64,6 +71,7 @@ ARCHS: Dict[str, Arch] = {
         # BiasFree is the real_denoising release's setting (the class default is WithBias):
         # it is what lets shadow.init_weights load all 494 tensors instead of 406.
         kwargs={"LayerNorm_type": "BiasFree"},
+        init_source_task="real image denoising (SIDD); no shadow-removal weights released",
     ),
 }
 

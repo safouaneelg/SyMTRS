@@ -24,8 +24,9 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
+from symtrs.metrics.shadow import SSIM_NOTE
 from symtrs.model.domain import upstream as upstream_module
 from symtrs.common.jsonio import dumps as json_dumps_safe
 
@@ -47,6 +48,14 @@ PAIRED_SCORING_NOTE = (
     "to the rgb_noshadow ground-truth size; upstream generates at its own working size "
     "(test.py: load_size = crop_size = 256 unless extra_args change it), so detail finer "
     "than that is lost before scoring and is counted against the model"
+)
+
+#: Why `kid` is the number to quote (see symtrs.metrics.domain).
+PRIMARY_METRIC = "kid"
+FID_NOTE = (
+    "fid is kept for reference only: with fewer images than Inception's 2048 feature "
+    "dimensions its covariance is rank-deficient and FID is biased; kid is unbiased. Real "
+    "images are antialias-resized to the generated size before the shared 299 resize."
 )
 
 #: Which upstream model class and dataset mode each SyMTRS model key uses.
@@ -350,8 +359,11 @@ def run_domain_adaptation(cfg, mode: str = "finetune") -> Dict[str, Any]:
         raise ValueError(f"unknown domain-adaptation mode {mode!r}; expected finetune or score")
 
     summary["test"] = evaluate_adaptation(cfg, task, run_dir)
+    summary["primary_metric"] = PRIMARY_METRIC
+    summary["metric_notes"] = {"fid": FID_NOTE}
     if task.direction in SHADOW_REMOVAL_DIRECTIONS:
         summary["paired_scoring"] = PAIRED_SCORING_NOTE
+        summary["metric_notes"]["ssim_y"] = SSIM_NOTE
     (run_dir / "summary.json").write_text(json_dumps_safe(summary, indent=2), encoding="utf-8")
     return summary
 
@@ -393,15 +405,24 @@ def evaluate_adaptation(cfg, task: "DomainAdaptation", run_dir: Path) -> Dict[st
 
     from symtrs.metrics.domain import distribution_metrics, extract_features
 
+    # Both sides must reach Inception through the same path (see symtrs.metrics.domain): the
+    # real frames are native 2048 px, the generated ones whatever upstream wrote, so the real
+    # side is first antialias-resized to the generated size, read from the files themselves.
+    generated_size = generated_image_size(generated)
     real_features = extract_features(
-        _folder_loader(_image_paths(real_directory), cfg.eval.batch_size, cfg.data.num_workers)
+        _folder_loader(_image_paths(real_directory), cfg.eval.batch_size, cfg.data.num_workers),
+        resize_to=generated_size,
     )
     fake_features = extract_features(
         _folder_loader(generated, cfg.eval.batch_size, cfg.data.num_workers)
     )
     metrics = distribution_metrics(real_features, fake_features)
-    print(f"[symtrs] fid={metrics['fid']:.2f} kid={metrics.get('kid', float('nan')):.5f} "
-          f"(real={metrics['n_real']:.0f}, generated={metrics['n_fake']:.0f})")
+    metrics["feature_resize_h"] = float(generated_size[0])
+    metrics["feature_resize_w"] = float(generated_size[1])
+    print(f"[symtrs] kid={metrics.get('kid', float('nan')):.5f} (primary) "
+          f"fid={metrics['fid']:.2f} (rank-deficient below 2049 images) "
+          f"(real={metrics['n_real']:.0f}, generated={metrics['n_fake']:.0f}, "
+          f"both at {generated_size[0]}x{generated_size[1]} before Inception)")
 
     if task.direction in SHADOW_REMOVAL_DIRECTIONS:
         metrics.update(score_shadow_removal(cfg, task, run_dir, generated))
@@ -463,6 +484,29 @@ def score_shadow_removal(
     return score_split(cfg, Path(run_dir), split)
 
 
+def generated_image_size(paths: List[Path]) -> Tuple[int, int]:
+    """`(height, width)` of the generated images, read from the first file.
+
+    Upstream's test output size depends on its options (256 by default), so it is read
+    rather than assumed. Differing sizes would mean the feature set mixes resolutions, which
+    is the asymmetry this exists to remove, so that raises instead of averaging over it.
+    """
+    from PIL import Image
+
+    sizes = set()
+    for path in paths:
+        with Image.open(path) as image:
+            sizes.add((image.height, image.width))
+        if len(sizes) > 1:
+            raise RuntimeError(
+                f"generated images do not share a size ({sorted(sizes)} seen so far, e.g. "
+                f"{path.name}); FID/KID need one resolution on the generated side"
+            )
+    if not sizes:
+        raise RuntimeError("no generated images to read a size from")
+    return next(iter(sizes))
+
+
 #: Suffixes the metric code will read. Kept next to the readers so a new format cannot
 #: be half-added: an image the loader skips is an image silently missing from a score.
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp")
@@ -517,6 +561,7 @@ __all__ = [
     "UPSTREAM_MODELS",
     "device_env",
     "evaluate_adaptation",
+    "generated_image_size",
     "run_domain_adaptation",
     "score_shadow_removal",
 ]

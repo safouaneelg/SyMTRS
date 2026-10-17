@@ -17,19 +17,34 @@ Three details make the stitching honest:
     no context beyond it, so down-weighting it there removes the visible seams a flat
     average leaves behind.
 
-A third matters for *relative* depth only. A relative model (MiDaS disparity, DA3 relative
-depth) fixes its output only up to an unknown scale and shift **per forward pass**, so two
-neighbouring windows disagree about the same pixels by an affine map and a plain blend of
-them is neither tile's answer. `predict_tiled(..., match_affine=True)` fits that map on
-the overlap with what is already stitched and applies it to the new window before it is
-blended. The per-image alignment that scores a relative model is still done once, on the
-finished full-image field, by the caller; this only makes the field one consistent surface.
-Metric depth and logits are absolute, and must NOT be matched - it would only add noise.
+A third matters for *relative* depth only. A relative model fixes its output only up to an
+unknown map **per forward pass**, so two neighbouring windows disagree about the same pixels and a
+plain blend of them is neither tile's answer. Which map depends on the output space
+(`symtrs.registry.depth_pairing`), and the matching has to be the same family or it injects the very
+error the final per-image alignment cannot remove:
+
+  * disparity (MiDaS: `s / z + t`) is ambiguous in scale AND shift -> `match="affine"`;
+  * depth up to a scale (ZoeD-N scored relative, DA3 relative) is ambiguous in scale only ->
+    `match="scale"`. A fitted shift there would add an offset that the final `scale` alignment
+    (no shift) cannot remove;
+  * metric depth and logits are absolute -> `match="none"`; matching them would only add noise.
+
+`match_mode(model)` derives the mode from the model's `protocol` and `output_space`. Each window is
+fitted against the overlap with the stitched field so far, i.e. with the Hann-weighted blend of ALL
+windows already placed (not only its left/top neighbour), so a single bad neighbour is averaged out
+rather than inherited. The raster order still anchors the global frame on the first window; that
+frame is one global affine map of the truth, which is exactly what the per-image alignment that
+scores the model removes. The per-image alignment is still done once, on the finished full-image
+field, by the caller; this only makes the field one consistent surface.
+
+A fit is only as good as the texture in the overlap. On a flat overlap the slope is noise, so the
+fit degrades in steps (see `fit_overlap`) and every degradation is counted in the `stats` dict, which
+`evaluate_depth` writes into the metrics as `tile_match_fallbacks`.
 """
 
 from __future__ import annotations
 
-from typing import Callable, List, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -86,33 +101,98 @@ def _resize(prediction: torch.Tensor, size: Sequence[int]) -> torch.Tensor:
     return F.interpolate(prediction.float(), size=tuple(size), mode="bilinear", align_corners=False)
 
 
-#: Fewest already-stitched pixels a window must share before an affine fit is trusted.
+#: Fewest already-stitched pixels a window must share before a fit is trusted.
 _MIN_MATCH_PIXELS = 256
 
+#: Matching modes. "none" is the default and what absolute outputs (metric depth, logits) get.
+MATCH_MODES = ("none", "affine", "scale")
 
-def fit_affine(source: torch.Tensor, reference: torch.Tensor, weight: torch.Tensor):
-    """Weighted least squares `a * source + b ~ reference`; `None` if it is not trustworthy.
+#: A window may not be rescaled by more than this factor relative to the stitched field. Real
+#: per-forward scale differences between overlapping windows of one scene are a few tens of percent;
+#: a fitted slope outside this band is the fit failing, not the model disagreeing with itself.
+SLOPE_RANGE = (0.25, 4.0)
 
-    Untrustworthy means too few shared pixels, a flat source (nothing to fit a slope to), or
-    a non-positive slope. A relative model's output is monotone in the true quantity, so a
-    negative slope means the overlap is noise or the windows saw different content, and
-    flipping the new window to agree with it would be wrong.
+#: The overlap counts as flat when its variance is below this fraction of its squared mean. Relative
+#: so that it does not depend on the unit of the model (disparity in 1/m or in arbitrary units).
+_FLAT_RELATIVE_VARIANCE = 1e-6
+
+#: Below this correlation between the window and the stitched field the overlap does not show the
+#: same structure (different content at the border, or noise), and a slope fitted to it is noise.
+_MIN_CORRELATION = 0.5
+
+
+def match_mode(model) -> str:
+    """Which window matching a model's output needs: "affine", "scale" or "none".
+
+    Keyed on the OUTPUT SPACE, not on `protocol == "relative"` alone: a relative model that emits
+    depth up to a scale must not have a shift fitted (nothing downstream can remove it), while one
+    that emits disparity needs both. Segmentation models and metric depth have no ambiguity.
     """
+    if getattr(model, "protocol", "") != "relative":
+        return "none"
+    return "affine" if getattr(model, "output_space", "depth") == "disparity" else "scale"
+
+
+def fit_overlap(
+    source: torch.Tensor, reference: torch.Tensor, weight: torch.Tensor, mode: str = "affine"
+) -> Optional[Tuple[float, float, bool]]:
+    """Map `source` onto `reference` over their shared pixels: `(slope, shift, degraded)`.
+
+    `None` means no trustworthy fit exists at all (too few pixels, non-finite sums, or no signal)
+    and the window is left on its own scale. Otherwise the fit is returned, and `degraded` says
+    whether it had to fall back from the full estimate:
+
+      affine (disparity)
+        full:      the symmetric (reduced-major-axis) slope `std(ref) / std(src)` and the shift
+                   that matches the weighted means. OLS `cov / var` would be biased toward 0 when
+                   the window is noisy, which flattens every later window onto a too-small scale;
+                   the symmetric slope does not care which side carries the noise.
+        fallback:  shift-only (slope 1) when the overlap is flat (relative variance threshold),
+                   or uncorrelated with the field (`_MIN_CORRELATION`, which also covers a
+                   non-positive slope: a relative model is monotone in the truth, so a flip is a
+                   failed fit). A slope outside `SLOPE_RANGE` is clamped, the shift re-derived
+                   from the means.
+      scale (depth up to a scale)
+        full:      the weighted least-squares slope through the origin, `sum(w s r) / sum(w s s)`.
+                   On a flat overlap this is the ratio of means, i.e. the scale is kept even when
+                   there is no texture; it is clamped to `SLOPE_RANGE`. There is never a shift.
+    """
+    if mode not in ("affine", "scale"):
+        raise ValueError(f"unknown matching mode {mode!r}; expected 'affine' or 'scale'")
     if source.numel() < _MIN_MATCH_PIXELS:
         return None
+    source, reference, weight = source.double(), reference.double(), weight.double()
     total = weight.sum()
     if not torch.isfinite(total) or total <= 0:
         return None
-    mean_source = (weight * source).sum() / total
-    mean_reference = (weight * reference).sum() / total
-    variance = (weight * (source - mean_source) ** 2).sum() / total
-    if not torch.isfinite(variance) or variance <= 1e-12:
+
+    low, high = SLOPE_RANGE
+    if mode == "scale":
+        energy = (weight * source * source).sum()
+        if not torch.isfinite(energy) or energy <= 0:
+            return None
+        slope = float((weight * source * reference).sum() / energy)
+        if not (slope == slope) or slope <= 0:
+            return None
+        clamped = min(max(slope, low), high)
+        return clamped, 0.0, clamped != slope
+
+    mean_source = float((weight * source).sum() / total)
+    mean_reference = float((weight * reference).sum() / total)
+    variance = float((weight * (source - mean_source) ** 2).sum() / total)
+    variance_ref = float((weight * (reference - mean_reference) ** 2).sum() / total)
+    if not (variance == variance and variance_ref == variance_ref) or variance == float("inf"):
         return None
-    covariance = (weight * (source - mean_source) * (reference - mean_reference)).sum() / total
-    slope = covariance / variance
-    if not torch.isfinite(slope) or slope <= 0:
-        return None
-    return float(slope), float(mean_reference - slope * mean_source)
+    flat = variance <= _FLAT_RELATIVE_VARIANCE * mean_source ** 2 + 1e-24
+    if flat or variance_ref <= 0:
+        return 1.0, mean_reference - mean_source, True
+    covariance = float((weight * (source - mean_source) * (reference - mean_reference)).sum() / total)
+    correlation = covariance / (variance * variance_ref) ** 0.5
+    if not correlation >= _MIN_CORRELATION:
+        return 1.0, mean_reference - mean_source, True
+    slope = (variance_ref / variance) ** 0.5
+    clamped = min(max(slope, low), high)
+    return clamped, mean_reference - clamped * mean_source, clamped != slope
 
 
 @torch.no_grad()
@@ -122,6 +202,8 @@ def predict_tiled(
     tile_size: int,
     overlap: int = 128,
     match_affine: bool = False,
+    match: str = "none",
+    stats: Optional[Dict[str, int]] = None,
 ) -> torch.Tensor:
     """Run `forward_fn` over overlapping windows and stitch the results.
 
@@ -134,8 +216,12 @@ def predict_tiled(
             before blending.
         tile_size: window side, in input pixels.
         overlap: how much neighbouring windows share. Must be shorter than `tile_size`.
-        match_affine: bring each window onto the scale and shift of the windows already
-            stitched (see the module docstring). For relative depth only.
+        match_affine: legacy spelling of `match="affine"`.
+        match: "none", "affine" or "scale": bring each window onto the field already stitched
+            (see the module docstring and `match_mode`). Relative depth only.
+        stats: if given, incremented in place with `windows` (windows placed), `matched` (fitted
+            at all), `fallbacks` (fitted, but degraded: flat/uncorrelated overlap, clamped slope)
+            and `unmatched` (overlap too small or degenerate: left on its own scale).
 
     Returns:
         `[B, K, H, W]` in whatever space `forward_fn` produces.
@@ -144,6 +230,14 @@ def predict_tiled(
         image = image.unsqueeze(0)
     if tile_size <= 0:
         raise ValueError("tile_size must be positive; use forward_at_size for whole-image inference")
+    if match_affine and match == "none":
+        match = "affine"
+    if match not in MATCH_MODES:
+        raise ValueError(f"unknown match mode {match!r}; expected one of {MATCH_MODES}")
+    if stats is None:
+        stats = {}
+    for key in ("windows", "matched", "fallbacks", "unmatched"):
+        stats.setdefault(key, 0)
 
     height, width = image.shape[-2:]
     outputs = []
@@ -169,16 +263,21 @@ def predict_tiled(
                 )
 
             window = hann_window(tile_h, tile_w, device=prediction.device, dtype=prediction.dtype)
-            if match_affine and prediction.shape[1] == 1:
+            stats["windows"] += 1
+            if match != "none" and prediction.shape[1] == 1:
                 region = (..., slice(top, top + tile_h), slice(left, left + tile_w))
                 seen = weights[region]
                 shared = (seen > 0)[0, 0]
                 if bool(shared.any()):
                     reference = (accumulator[region] / seen.clamp_min(1e-6))[0, 0][shared]
-                    fit = fit_affine(
-                        prediction[0, 0][shared], reference, (seen[0, 0] * window)[shared]
+                    fit = fit_overlap(
+                        prediction[0, 0][shared], reference, (seen[0, 0] * window)[shared], match
                     )
-                    if fit is not None:
+                    if fit is None:
+                        stats["unmatched"] += 1
+                    else:
+                        stats["matched"] += 1
+                        stats["fallbacks"] += int(fit[2])
                         prediction = prediction * fit[0] + fit[1]
             accumulator[..., top : top + tile_h, left : left + tile_w] += prediction * window
             weights[..., top : top + tile_h, left : left + tile_w] += window
@@ -202,4 +301,15 @@ def plan_tiling(height: int, width: int, tile_size: int, overlap: int) -> dict:
     }
 
 
-__all__ = ["Box", "fit_affine", "hann_window", "plan_tiling", "predict_tiled", "tile_grid", "tile_positions"]
+__all__ = [
+    "Box",
+    "MATCH_MODES",
+    "SLOPE_RANGE",
+    "fit_overlap",
+    "hann_window",
+    "match_mode",
+    "plan_tiling",
+    "predict_tiled",
+    "tile_grid",
+    "tile_positions",
+]

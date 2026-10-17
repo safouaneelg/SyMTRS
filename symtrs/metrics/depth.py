@@ -37,9 +37,20 @@ DISPARITY_ALIGNMENTS = ("scale_shift_disparity",)
 #: config, i.e. the same cut-off that defines which ground-truth pixels are valid.
 DEFAULT_MAX_DEPTH = 1000.0
 
+#: Depth, in metres, that a prediction which is not a depth (zero, negative, NaN, inf after the
+#: alignment) is scored as. Dropping such pixels from the mask - what this module used to do - made
+#: RMSE and abs_rel optimistic for exactly the models that fail there; scoring them at a tiny
+#: positive depth makes them count as the large errors they are (abs_rel ~ 1, d1 = 0) while keeping
+#: the log-based metrics finite. 1 mm is below any depth the dataset can hold.
+DEFAULT_MIN_DEPTH = 1e-3
+
 #: Canonical metric order. Anything that logs or tabulates depth uses this order, so
-#: CSV columns and result tables stay stable.
-DEPTH_METRIC_NAMES = ("rmse", "mae", "abs_rel", "sq_rel", "d1", "d2", "d3", "silog")
+#: CSV columns and result tables stay stable. `invalid_pred_fraction` is a diagnostic, not a
+#: score: the share of valid ground-truth pixels whose prediction was not a positive finite depth
+#: (and was therefore scored at `min_depth`). Near 0 for a healthy model.
+DEPTH_METRIC_NAMES = (
+    "rmse", "mae", "abs_rel", "sq_rel", "d1", "d2", "d3", "silog", "invalid_pred_fraction",
+)
 
 EPS = 1e-8
 
@@ -161,6 +172,7 @@ def compute_depth_metrics(
     mask: Optional[torch.Tensor] = None,
     align: str = "none",
     max_depth: Optional[float] = None,
+    min_depth: Optional[float] = None,
 ) -> Dict[str, float]:
     """Depth metrics over the valid pixels of a batch.
 
@@ -173,6 +185,8 @@ def compute_depth_metrics(
         align: one of `ALIGNMENTS`, applied before the metrics.
         max_depth: ceiling for depth recovered from disparity (see `DEFAULT_MAX_DEPTH`);
             ignored by the other alignments.
+        min_depth: metres a non-positive or non-finite prediction is scored as
+            (`DEFAULT_MIN_DEPTH`). Such pixels are never dropped; see `invalid_pred_fraction`.
 
     Returns a dict with the keys in `DEPTH_METRIC_NAMES`:
         rmse, mae        - metres, the interpretable ones for a metric benchmark.
@@ -180,6 +194,9 @@ def compute_depth_metrics(
         d1, d2, d3       - fraction within 1.25, 1.25^2, 1.25^3.
         silog            - scale-invariant log RMSE, in percent. Comparable to the
                            MiDaS/ZoeDepth tables.
+        invalid_pred_fraction
+                         - fraction of valid-GT pixels whose prediction (after alignment) was
+                           <= 0 or non-finite. These are SCORED at `min_depth`, not dropped.
     """
     if pred.shape != target.shape:
         raise ValueError(
@@ -219,12 +236,15 @@ def compute_depth_metrics(
                 )
         pred = aligned
 
-    # A relative model can emit non-positive depth after alignment; those predictions
-    # are wrong, and log-based metrics must not see them as valid.
-    finite_pred = torch.isfinite(pred) & (pred > 0)
-    mask = mask & finite_pred
-    if mask.sum() == 0:
-        raise AllInvalidError("every valid pixel had a non-positive prediction")
+    # A model can emit non-positive or non-finite depth (a metric head's ReLU, an aligned
+    # disparity crossing zero, an fp16 overflow). The log-based metrics cannot see such values, but
+    # DROPPING them from the mask - as was done before - rewards the model for being wrong exactly
+    # where it is wrong. They are scored at `min_depth` instead, so the error counts, and the share
+    # is reported so a table can show that a number comes from a model that does this.
+    floor = float(min_depth if min_depth else DEFAULT_MIN_DEPTH)
+    invalid = ~(torch.isfinite(pred) & (pred > 0))
+    invalid_fraction = float((invalid & mask).sum()) / float(mask.sum())
+    pred = torch.where(invalid, torch.full_like(pred, floor), pred)
 
     p = pred[mask].double()
     t = target[mask].double()
@@ -241,7 +261,10 @@ def compute_depth_metrics(
     d3 = (ratio < 1.25 ** 3).double().mean()
 
     log_difference = torch.log(p) - torch.log(t)
-    silog = torch.sqrt((log_difference ** 2).mean() - (log_difference.mean() ** 2)) * 100.0
+    # E[x^2] - E[x]^2 is a variance and cannot be negative, but in floating point it can come out
+    # as -1e-17 for a near-constant log error (a perfect or perfectly-scaled prediction), and the
+    # sqrt of that is NaN, which makes the whole epoch non-finite. Clamp the variance at 0.
+    silog = torch.sqrt(((log_difference ** 2).mean() - (log_difference.mean() ** 2)).clamp_min(0.0)) * 100.0
 
     return {
         "rmse": float(rmse),
@@ -252,6 +275,7 @@ def compute_depth_metrics(
         "d2": float(d2),
         "d3": float(d3),
         "silog": float(silog),
+        "invalid_pred_fraction": invalid_fraction,
     }
 
 
