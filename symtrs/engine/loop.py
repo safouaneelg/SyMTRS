@@ -23,14 +23,16 @@ except ImportError:  # pragma: no cover - torch 1.x
     from torch.cuda.amp import GradScaler, autocast as _autocast
 
 
-def autocast_context(device: torch.device, enabled: bool):
+def autocast_context(device: torch.device, enabled: bool, dtype: str = "float16"):
     """Mixed precision, but only where it is actually supported.
 
     `enabled=False` on CPU keeps one code path: the caller never has to branch on the
-    device, and nothing silently runs fp16 on a CPU tensor.
+    device, and nothing silently runs fp16 on a CPU tensor. `dtype` is the config's
+    `amp_dtype` ("float16" or "bfloat16", see `symtrs.config.AMP_DTYPES`).
     """
     device_type = "cuda" if device.type == "cuda" else "cpu"
-    return _autocast(device_type=device_type, enabled=bool(enabled) and device.type == "cuda")
+    return _autocast(device_type=device_type, enabled=bool(enabled) and device.type == "cuda",
+                     dtype=getattr(torch, dtype))
 
 
 def make_grad_scaler(device: torch.device, enabled: bool) -> GradScaler:
@@ -267,7 +269,7 @@ class Trainee:
         print the same step number once per micro-batch.
         """
         cfg = self.cfg
-        with autocast_context(device, cfg.train.amp):
+        with autocast_context(device, cfg.train.amp, cfg.train.amp_dtype):
             loss, components = _training_step(self.model, batch, device, cfg.task)
             # Divide before backward so the accumulated gradient is a mean over the
             # accumulation window rather than a sum that grows with it.
@@ -474,7 +476,7 @@ def evaluate_depth(
         ground_truth = batch["depth"].to(device, non_blocking=True)
         valid = batch["valid"].to(device, non_blocking=True)
 
-        with autocast_context(device, cfg.eval.amp):
+        with autocast_context(device, cfg.eval.amp, cfg.eval.amp_dtype):
             prediction = forward_native(
                 model, image, cfg.eval.tile_size, cfg.eval.tile_overlap, stats=tile_stats,
                 tile_batch=cfg.eval.tile_batch,
@@ -574,7 +576,7 @@ def evaluate_segmentation(
         image = batch["image"].to(device, non_blocking=True)
         mask = batch["mask"].to(device, non_blocking=True)
 
-        with autocast_context(device, cfg.eval.amp):
+        with autocast_context(device, cfg.eval.amp, cfg.eval.amp_dtype):
             logits = forward_native(
                 model, image, cfg.eval.tile_size, cfg.eval.tile_overlap,
                 tile_batch=cfg.eval.tile_batch,

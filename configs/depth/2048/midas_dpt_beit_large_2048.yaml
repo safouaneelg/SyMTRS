@@ -17,6 +17,10 @@
 # lr is 5e-5 for the same reason as DPT-Large's 1e-4: at 5e-6 the frozen-encoder head
 # did not learn on the overfit check (train loss 0.47 -> 0.45, val rmse flat at 8.0);
 # at 5e-5 it fits (0.47 -> 0.24, val rmse 7.2 -> 5.1).
+# Autocast runs in bfloat16, not float16: in the 2026-10-22 2048 run this model
+# overflowed float16 a few hundred steps in and then skipped most batches as
+# non-finite (BEiT-Large 4536, Swin-V2 2538), because a skipped batch leaves the
+# weights where they overflow. bfloat16 has float32's range at float16's cost.
 #
 # The other three cells of this row are the same file at 1024, 512 and 256, in the
 # sibling folders. `symtrs sweep --task depth --models midas_dpt_beit_large` walks them.
@@ -58,6 +62,7 @@ train:
   # 0 = the whole image at val and test, whatever patch_size is (see eval.tile_size).
   val_patch_size: 0
   amp: true
+  amp_dtype: bfloat16  # see the header
   gpus: 1
   grad_clip: 1.0
   grad_accum: 8
@@ -75,6 +80,7 @@ eval:
   metrics: [rmse, mae, abs_rel, sq_rel, d1, d2, d3, silog]
   batch_size: 1
   amp: true
+  amp_dtype: bfloat16
   # The whole 2048px image is scored (val and test alike), in 384px windows
   # with 96px overlap: the size this row trained on, so the network sees the same
   # field of view at evaluation. Never a crop - every pixel is covered and the result is

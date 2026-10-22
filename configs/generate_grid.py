@@ -120,6 +120,7 @@ class DepthModel:
         model_kwargs: Optional[Dict[str, object]] = None,
         space: str = "depth",  # "depth" | "disparity": what the raw output means
         needs_camera: bool = False,
+        amp_dtype: str = "float16",
     ) -> None:
         self.key = key
         self.title = title
@@ -133,6 +134,7 @@ class DepthModel:
         self.freeze = freeze
         self.note = note
         self.model_kwargs = model_kwargs or {}
+        self.amp_dtype = amp_dtype
 
     @property
     def align(self) -> str:
@@ -233,11 +235,17 @@ DEPTH_MODELS: List[DepthModel] = [
         grad_accum=1,
         space="disparity",
         patch={2048: 384, 1024: 0},
+        amp_dtype="bfloat16",
         note=(
             "SwinV2-Tiny with the DPT head. Window attention rather than global attention, so\n"
             "it is the MiDaS variant whose cost grows most gently with resolution - which is\n"
             "why it is worth running the 2048 cell of this one even if you skip the others.\n"
             "Still relative-depth, disparity output: align: scale_shift_disparity, ssi loss."
+            "\n"
+            "Autocast runs in bfloat16, not float16: in the 2026-10-22 2048 run this model\n"
+            "overflowed float16 a few hundred steps in and then skipped most batches as\n"
+            "non-finite (BEiT-Large 4536, Swin-V2 2538), because a skipped batch leaves the\n"
+            "weights where they overflow. bfloat16 has float32's range at float16's cost."
         ),
     ),
     DepthModel(
@@ -250,6 +258,7 @@ DEPTH_MODELS: List[DepthModel] = [
         space="disparity",
         patch={2048: 384, 1024: 512},
         freeze="encoder",
+        amp_dtype="bfloat16",
         note=(
             "The largest MiDaS variant, and the widest memory budget in the grid: batch 1 with\n"
             "8 accumulation steps at 2048. The encoder is frozen for the same reason as\n"
@@ -262,6 +271,11 @@ DEPTH_MODELS: List[DepthModel] = [
             "lr is 5e-5 for the same reason as DPT-Large's 1e-4: at 5e-6 the frozen-encoder head\n"
             "did not learn on the overfit check (train loss 0.47 -> 0.45, val rmse flat at 8.0);\n"
             "at 5e-5 it fits (0.47 -> 0.24, val rmse 7.2 -> 5.1)."
+            "\n"
+            "Autocast runs in bfloat16, not float16: in the 2026-10-22 2048 run this model\n"
+            "overflowed float16 a few hundred steps in and then skipped most batches as\n"
+            "non-finite (BEiT-Large 4536, Swin-V2 2538), because a skipped batch leaves the\n"
+            "weights where they overflow. bfloat16 has float32's range at float16's cost."
         ),
     ),
     DepthModel(
@@ -1030,6 +1044,10 @@ def depth_yaml(model: DepthModel, resolution: int) -> str:
         "  # 0 = the whole image at val and test, whatever patch_size is (see eval.tile_size).",
         "  val_patch_size: 0",
         "  amp: true",
+    ]
+    if model.amp_dtype != "float16":
+        body += [f"  amp_dtype: {model.amp_dtype}  # see the header"]
+    body += [
         "  gpus: 1",
         "  grad_clip: 1.0",
         f"  grad_accum: {model.grad_accum}",
@@ -1054,6 +1072,8 @@ def depth_yaml(model: DepthModel, resolution: int) -> str:
         "  batch_size: 1",
         "  amp: true",
     ]
+    if model.amp_dtype != "float16":
+        body += [f"  amp_dtype: {model.amp_dtype}"]
     tile, overlap = eval_tiling(patch, resolution)
     body += _eval_tiling_comment(patch, resolution, model.protocol == "relative")
     body += [

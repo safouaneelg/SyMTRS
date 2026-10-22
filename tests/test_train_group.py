@@ -500,3 +500,29 @@ def test_members_must_agree_on_the_validation_subset(tmp_path):
     b = _cfg(tmp_path, "b")
     b.train.val_subset = 300
     assert any(c.startswith("train.val_subset differs") for c in trainer.group_conflicts([a, b]))
+
+
+def test_an_unknown_precision_is_refused():
+    cfg = _cfg(Path("."), "a")
+    cfg.train.amp_dtype = "fp16"
+    with pytest.raises(ConfigError, match="train.amp_dtype"):
+        cfg.validate()
+
+
+def test_a_training_step_autocasts_in_the_configured_dtype(tmp_path, monkeypatch):
+    """The setting has to reach autocast, not only the config: float16 is the default and
+    MiDaS BEiT/Swin-V2 overflowed it."""
+    seen = []
+    original = loop.autocast_context
+
+    def recording(device, enabled, dtype="float16"):
+        seen.append(dtype)
+        return original(device, enabled, dtype)
+
+    monkeypatch.setattr(loop, "autocast_context", recording)
+    cfg = _cfg(tmp_path, "a")
+    cfg.train.amp_dtype = "bfloat16"
+    model = _TinySeg()
+    trainee = loop.Trainee(model, torch.optim.SGD(model.parameters(), lr=1e-2), None, cfg)
+    loop.train_one_epoch_many([trainee], _loader(1), torch.device("cpu"))
+    assert seen == ["bfloat16"]

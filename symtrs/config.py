@@ -42,6 +42,10 @@ class ConfigError(ValueError):
     """Raised when a configuration is internally inconsistent or unknown."""
 
 
+#: The autocast types `train.amp_dtype` / `eval.amp_dtype` accept.
+AMP_DTYPES = ("float16", "bfloat16")
+
+
 def focal_px_for_resolution(resolution: int, hfov_deg: float) -> float:
     """Focal length in pixels of a square image `resolution` pixels wide.
 
@@ -167,6 +171,11 @@ class TrainConfig:
     val_patch_size: int = 0
 
     amp: bool = True
+    # The autocast type when `amp` is on: "float16" (default) or "bfloat16". bfloat16 has
+    # float32's range; MiDaS BEiT-Large and Swin-V2 overflowed float16 a few hundred steps
+    # into the 2048 run (4536 and 2538 batches skipped as non-finite), and a skipped batch
+    # leaves the weights where they overflow, so it never recovers.
+    amp_dtype: str = "float16"
     gpus: int = 1
     grad_clip: float = 0.0
     grad_accum: int = 1
@@ -189,6 +198,8 @@ class TrainConfig:
             raise ConfigError("train.batch_size must be at least 1")
         if self.val_every < 1:
             raise ConfigError("train.val_every must be at least 1 (1 = every epoch)")
+        if self.amp_dtype not in AMP_DTYPES:
+            raise ConfigError(f"train.amp_dtype must be one of {AMP_DTYPES}; got {self.amp_dtype!r}")
         if self.val_subset < 0:
             raise ConfigError("train.val_subset must be 0 (the whole val split) or positive")
         if self.lr <= 0:
@@ -222,6 +233,9 @@ class EvalConfig:
     metrics: List[str] = field(default_factory=list)  # [] -> task defaults
     batch_size: int = 1
     amp: bool = True
+    # As `train.amp_dtype`, for validation and test: a model that overflows float16 in training
+    # overflows it when scored too.
+    amp_dtype: str = "float16"
     # Sliding-window inference for images that do not fit at full resolution.
     tile_size: int = 0  # 0 = whole image in one forward pass
     tile_overlap: int = 128
@@ -237,6 +251,8 @@ class EvalConfig:
     def validate(self) -> None:
         if self.batch_size < 1:
             raise ConfigError("eval.batch_size must be at least 1")
+        if self.amp_dtype not in AMP_DTYPES:
+            raise ConfigError(f"eval.amp_dtype must be one of {AMP_DTYPES}; got {self.amp_dtype!r}")
         if self.tile_size < 0:
             raise ConfigError("eval.tile_size must be >= 0")
         if self.tile_size and self.tile_overlap >= self.tile_size:
