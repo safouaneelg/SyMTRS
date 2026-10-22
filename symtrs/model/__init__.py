@@ -8,8 +8,8 @@ The common case is two lines:
     depth = model.predict("scene.png")
 
 Adapter classes are re-exported lazily through `__getattr__`. Importing them eagerly
-would mean that a missing optional dependency - `timm` for SegFormer, `transformers`
-for Depth Anything 3, `depth_pro` for Depth Pro - breaks `import symtrs.model` for
+would mean that a missing optional dependency - `timm` for MiDaS, `transformers`
+for SegFormer, `depth_anything_3` for Depth Anything 3 - breaks `import symtrs.model` for
 everyone, including the people who only want MiDaS.
 """
 
@@ -26,9 +26,7 @@ _LAZY = {
     "ALIGNMENT_NOTES": "symtrs.model.depth",
     "MiDaSAdapter": "symtrs.model.depth",
     "MIDAS_MODELS": "symtrs.model.depth",
-    "ZoeDepthAdapter": "symtrs.model.depth",
     "DepthAnything3Adapter": "symtrs.model.depth",
-    "DepthProAdapter": "symtrs.model.depth",
     "DeepLabV3Segmentation": "symtrs.model.semantic",
     "SegFormerSegmentation": "symtrs.model.semantic",
     "UNetSegmentation": "symtrs.model.semantic",
@@ -62,7 +60,6 @@ def __dir__():
 __all__ = [
     "ALIGNMENT_NOTES",
     "DepthAdapter",
-    "DepthProAdapter",
     "DepthTarget",
     "DepthAnything3Adapter",
     "DeepLabV3Segmentation",
@@ -72,7 +69,6 @@ __all__ = [
     "SymTRSModel",
     "TaskModel",
     "UNetSegmentation",
-    "ZoeDepthAdapter",
     "apply_freeze_policy",
     "autoloader",
     "build_from_config",

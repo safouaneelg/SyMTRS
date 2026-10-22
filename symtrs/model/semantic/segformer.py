@@ -20,8 +20,8 @@ is "Unknown model" in every release, 0.6.12 and 1.0.x alike), so an earlier vers
 adapter could not build at all. `nvidia/mit-*` are the official MiT weights, and they load
 in `SegformerModel` without any key remapping. `transformers` is imported lazily, here,
 so the registry and `symtrs doctor` work without it. This also means SegFormer no longer
-constrains the timm version, which is what lets ZoeDepth keep its own timm==0.6.12
-environment (AGENTS.md ground rule 10).
+constrains the timm version, which is what lets the MiDaS Swin-V2 / BEiT models keep their
+own timm==0.6.12 environment (AGENTS.md ground rule 10).
 """
 
 from __future__ import annotations

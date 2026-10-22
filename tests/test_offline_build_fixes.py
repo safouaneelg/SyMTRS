@@ -133,7 +133,7 @@ def test_beit_large_is_listed_with_the_timm_pinned_models_and_the_smoke_runner_a
         sys.path.remove(str(ROOT / "scripts"))
 
     assert "midas_dpt_beit_large" in TIMM_PINNED_KEYS
-    assert set(smoke_all.ZOE_VENV_MODELS) == set(TIMM_PINNED_KEYS)
+    assert set(smoke_all.TIMM_0612_MODELS) == set(TIMM_PINNED_KEYS)
 
 
 @requires_torch

@@ -29,7 +29,7 @@ ds = load_dataset("safouaneelg/SyMTRS")
 - `symtrs/` — the benchmark package: multi-resolution **monocular depth**, **semantic
   segmentation**, **day/night domain adaptation** and **super-resolution**, driven by one
   `symtrs` command and usable as a Python library.
-- `configs/` — YAML run configurations: one file per model and resolution (96 of them),
+- `configs/` — YAML run configurations: one file per model and resolution (80 of them),
   plus `generate_grid.py`, the table they are generated from. See
   [`configs/README.md`](configs/README.md).
 - `symtrs/legacy/` — the pre-existing super-resolution implementation and its datasets,
@@ -52,16 +52,15 @@ pip install --upgrade pip
 pip install -e .
 ```
 
-The core install covers depth with MiDaS and ZoeDepth, segmentation with U-Net and
+The core install covers depth with MiDaS, segmentation with U-Net and
 torchvision DeepLabV3, and the CLI. Everything else is an extra:
 
 | Extra | Installs | Needed for |
 | --- | --- | --- |
 | `exr` | `OpenEXR` | reading the 2048px `.exr` depth maps |
 | `cv2` | `opencv-python-headless` | the other EXR backend, and fast image IO |
-| `timm` | `timm` | **MiDaS, ZoeDepth and SegFormer** — see below |
+| `timm` | `timm` | **MiDaS** — see below |
 | `da3` | `transformers` | Depth Anything 3 |
-| `depthpro` | `depth-pro` (git) | Apple Depth Pro |
 | `adapt` | `dominate`, `wandb` | **domain adaptation** — upstream imports both at start-up |
 | `dev` | `pytest` | the test suite |
 
@@ -79,29 +78,26 @@ command rather than upstream's traceback.
 
 ### timm is needed by more than SegFormer
 
-It is worth reading before a model grid starts downloading weights. The MiDaS and
-ZoeDepth checkpoints are loaded through `torch.hub`, and that repository's `hubconf.py`
+It is worth reading before a model grid starts downloading weights. The MiDaS
+checkpoints are loaded through `torch.hub`, and that repository's `hubconf.py`
 reaches `import timm` via `midas.blocks` → `backbones.beit`. The upstream `hubconf.py`
 declares only `dependencies = ["torch"]`, so nothing warns you — the load simply fails.
 `symtrs doctor` reports it correctly, which is why the registry entries list `timm`.
 
-Second, and more awkward: **ZoeDepth and MiDaS Swin-V2 need their own environment.**
+Second, and more awkward: **MiDaS Swin-V2 and BEiT-Large need their own environment.**
 
-- ZoeDepth's checkpoint and its vendored MiDaS backbone were built against
-  `timm==0.6.12`, the version pinned in ZoeDepth's own `environment.yml`. That is the
-  version it was verified to work on. Under `timm==0.9.16` and `1.0.30` the released
-  weights no longer load cleanly and the forward pass then raises
-  `AttributeError: 'Block' object has no attribute 'drop_path'`.
-- `midas_dpt_swin2_tiny` is the same story: on timm 1.0.30 its state_dict reports
+- `midas_dpt_swin2_tiny`: on timm 1.0.30 its state_dict reports
   `pretrained.model.layers.3.downsample.reduction.weight` missing; on 0.6.12 it loads.
-- `midas_dpt_beit_large` is the same story as ZoeDepth: MiDaS patches timm's BEiT
-  `Block.forward` with a copy that calls `self.drop_path`, which timm >= 0.9 split into
-  `drop_path1` / `drop_path2`. The adapter refuses at build time and names `.venv-zoe`.
+- `midas_dpt_beit_large`: MiDaS patches timm's BEiT `Block.forward` with a copy that calls
+  `self.drop_path`, which timm >= 0.9 split into `drop_path1` / `drop_path2`, so the forward
+  raises `AttributeError: 'Block' object has no attribute 'drop_path'`. The adapter refuses
+  at build time and names `.venv-zoe` (the environment's name is left from ZoeDepth, which
+  was dropped from the benchmark).
 - SegFormer is *not* part of this: timm has never shipped MiT, so the encoder comes from
   `transformers` (`pip install -e '.[segformer]'`) and works on any timm.
 
 The other MiDaS models work on both. `symtrs doctor` prints a warning naming whichever side
-of this you are currently on. Practically: one environment for ZoeDepth + MiDaS Swin-V2
+of this you are currently on. Practically: one environment for MiDaS Swin-V2 + BEiT-Large
 (timm 0.6.12, Python 3.10), a second for everything else.
 
 ## Dataset layout
@@ -194,8 +190,8 @@ Each model declares a **protocol**, which decides the loss and what "alignment" 
 - `metric` — the network predicts metres. Scored with `berhu`, alignment `none`.
 - `relative` — the network predicts something known only up to an affine map. MiDaS emits
   disparity `s/z + t`: scored with a per-image scale-and-shift fit in disparity space against
-  `1/ground truth` (`scale_shift_disparity`), trained with `ssi`. ZoeDepth-N and Depth Anything 3
-  emit depth up to a scale: `scale` alignment, `silog`. See AGENTS.md rule 3.
+  `1/ground truth` (`scale_shift_disparity`), trained with `ssi`. Depth Anything 3 relative
+  emits depth up to a scale: `scale` alignment, `silog`. See AGENTS.md rule 3.
 
 | Key | Protocol | Align | Notes |
 | --- | --- | --- | --- |
@@ -204,12 +200,8 @@ Each model declares a **protocol**, which decides the loss and what "alignment" 
 | `midas_dpt_large` | relative | scale_shift_disparity | 384px |
 | `midas_dpt_swin2_tiny` | relative | scale_shift_disparity | 256px |
 | `midas_dpt_beit_large` | relative | scale_shift_disparity | 384px, largest MiDaS variant |
-| `zoedepth_n` | relative | scale | NYU-metric head scored as relative depth; run in bf16 (NaN in fp16) |
-| `zoedepth_k` | metric | none | KITTI metric; bounded bins, `model_kwargs.max_depth` (80 = released weights) |
-| `zoedepth_nk` | metric | none | NYU + KITTI heads, learned domain router |
 | `da3_large` | relative | scale | Depth Anything 3 Large |
 | `da3_metric_large` | metric | none | Depth Anything 3, metric head; needs `data.camera_hfov_deg` (60 deg, confirmed by the dataset owner) |
-| `depth_pro` | metric | none | Apple Depth Pro, 1536px, ~1.9GB of weights |
 
 Depth metrics: `rmse`, `mae`, `abs_rel`, `sq_rel`, `d1`, `d2`, `d3`, `silog`.
 
@@ -320,7 +312,7 @@ symtrs tables --task segmentation --format markdown
 ```bash
 symtrs doctor                                   # dependencies and versions
 symtrs doctor --data-root /data/SyMTRS         # also the dataset layout
-symtrs doctor --model zoedepth_k --build --smoke   # download, build, one forward pass
+symtrs doctor --model da3_metric_large --build --smoke   # download, build, one forward pass
 ```
 
 `--smoke` is the important one. Several of these models come from `torch.hub` entry points
@@ -350,7 +342,7 @@ configs/
   domain_adapt/               <model>_<direction>.yaml      (day2night, night2day, shadow2noshadow, noshadow2shadow)
   superresolution/            <model>_x<scale>.yaml
   shadow_removal/             <model>.yaml                  (4 models, 2048 only)
-  generate_grid.py            the tables all 96 files are expanded from
+  generate_grid.py            the tables all 80 files are expanded from
 ```
 
 `generate_grid.py` is the source of truth: the models, their depth protocol, their memory
@@ -671,8 +663,6 @@ from symtrs.legacy.dataloader import SuperResDataset, DomainAdaptDataset, DepthD
 - Depth in the `.exr` files is metric. If a file is found to store millimetres rather than
   metres, median depth above 3000 is a symptom and `--depth-scale 0.01` is the fix;
   `symtrs doctor --data-root` prints this check for the first file it finds.
-- ZoeDepth-N is scored as `relative` (it is an NYU-metric model, but indoor metres do not
-  transfer), and its head predicts depth rather than disparity, so it is aligned in depth space. The checkpoint records the unit it was trained in.
 - CUDA is used when present. Everything also runs on CPU, slowly; `--device cpu` forces it.
 - `symtrs train_sr_x2.yaml` and `symtrs train configs/train_sr_x2.yaml` are the same run.
 - `pytorch-CycleGAN-and-pix2pix/` is vendored in full at a pinned revision

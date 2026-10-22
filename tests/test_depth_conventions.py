@@ -7,9 +7,6 @@ plausible-looking but meaningless number:
     remove the shift (silog 41-111 against ~27 for a constant plane).
   * Depth Anything 3 metric with `focal_px` unset returns canonical depth, not metres
     (abs_rel 0.91-0.96, d1 = 0).
-  * ZoeD-N produced NaN under float16 autocast (training loss non-finite, no valid score).
-  * ZoeD-K's bin head is bounded, and the hub built it with 10 m instead of the 80 m it was
-    trained with.
 
 Each test states the mistake it prevents, so removing the guard fails here instead of
 quietly changing a table.
@@ -277,7 +274,7 @@ def test_only_models_that_need_the_camera_get_a_focal_length():
     from symtrs.model.wrapper import _fill_camera_kwargs
 
     assert get_spec("da3_metric_large").focal_kwarg == "focal_px"
-    for key in ("da3_large", "midas_small", "zoedepth_k", "depth_pro"):
+    for key in ("da3_large", "midas_small"):
         cfg = RunConfig(task="depth", model=key, resolution=1024)
         _fill_camera_kwargs(cfg)
         assert cfg.model_kwargs == {}, key
@@ -302,75 +299,3 @@ def test_da3_metric_scales_canonical_depth_by_focal_over_300():
     assert CANONICAL_FOCAL == 300.0
     assert _adapter(None).forward(image).mean().item() == pytest.approx(1.0)
     assert _adapter(1773.6).forward(image).mean().item() == pytest.approx(1773.6 / 300.0)
-
-
-# ------------------------------------------------------------------------- ZoeDepth
-
-
-def test_zoedepth_k_default_range_is_the_one_the_weights_were_trained_with():
-    from symtrs.model.depth.zoedepth import ZOED_K_TRAINED_MAX_DEPTH
-
-    assert ZOED_K_TRAINED_MAX_DEPTH == 80.0
-    assert get_spec("zoedepth_k").default_kwargs["max_depth"] == ZOED_K_TRAINED_MAX_DEPTH
-    assert "max_depth" not in get_spec("zoedepth_nk").default_kwargs
-
-
-@pytest.mark.parametrize("variant", ["N", "NK"])
-def test_a_depth_ceiling_is_refused_where_the_head_is_unbounded(variant):
-    """ZoeD-N and ZoeD-NK use softplus bin centres, for which `max_depth` is documented
-    'not used' upstream. Accepting the key would suggest a cap that does not exist."""
-    from symtrs.model.depth.zoedepth import ZoeDepthAdapter
-
-    with pytest.raises(ValueError, match="no effect"):
-        ZoeDepthAdapter(variant=variant, max_depth=300.0)
-
-
-def test_zoedepth_k_rejects_a_non_positive_ceiling_before_touching_the_network():
-    from symtrs.model.depth.zoedepth import ZoeDepthAdapter
-
-    with pytest.raises(ValueError, match="positive"):
-        ZoeDepthAdapter(variant="K", max_depth=0.0)
-
-
-def test_only_zoed_n_is_kept_out_of_float16():
-    """Measured: fp16 autocast turned ~10% of ZoeD-N's output into NaN; K and NK were finite.
-    bf16 has fp32's range, and fp32 is the fallback on a GPU without it."""
-    from symtrs.model.depth import zoedepth
-
-    assert zoedepth._FP16_UNSAFE_VARIANTS == frozenset({"N"})
-
-
-def test_the_precision_guard_leaves_cpu_and_the_other_variants_alone():
-    import contextlib
-
-    from symtrs.model.depth.zoedepth import ZoeDepthAdapter
-
-    adapter = ZoeDepthAdapter.__new__(ZoeDepthAdapter)
-    torch.nn.Module.__init__(adapter)
-    cpu_image = torch.zeros(1, 3, 8, 8)
-    for variant in ("N", "K", "NK"):
-        adapter.variant = variant
-        assert isinstance(adapter._safe_precision(cpu_image), contextlib.nullcontext)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
-def test_zoed_n_runs_in_bfloat16_inside_a_float16_autocast_on_cuda():
-    from symtrs.model.depth.zoedepth import ZoeDepthAdapter
-
-    seen = {}
-
-    class _Spy(torch.nn.Module):
-        def forward(self, x, **kwargs):
-            seen["dtype"] = torch.get_autocast_dtype("cuda")
-            return {"metric_depth": torch.ones(x.shape[0], 1, 4, 4, device=x.device)}
-
-    adapter = ZoeDepthAdapter.__new__(ZoeDepthAdapter)
-    torch.nn.Module.__init__(adapter)
-    adapter.variant, adapter.model, adapter._domain_kwarg, adapter.domain_id = "N", _Spy(), None, 0
-    adapter.key = "zoedepth_n"
-    image = torch.zeros(1, 3, 8, 8, device="cuda")
-    with torch.autocast("cuda", dtype=torch.float16):
-        out = adapter.forward(image)
-    if torch.cuda.is_bf16_supported():
-        assert seen["dtype"] == torch.bfloat16
-    assert out.dtype == torch.float32

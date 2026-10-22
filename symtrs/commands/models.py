@@ -29,7 +29,7 @@ def _run(args: argparse.Namespace) -> int:
 
     print(describe_registry(args.task, specs=specs))
     print()
-    print("install one with:  pip install -e '.[timm]'   (or 'da3', 'depthpro', 'exr', 'cv2')")
+    print("install one with:  pip install -e '.[timm]'   (or 'da3', 'exr', 'cv2')")
     print("check an install:   symtrs doctor")
     return 0
 

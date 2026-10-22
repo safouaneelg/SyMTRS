@@ -50,7 +50,7 @@ def reported_errors() -> tuple:
             FileNotFoundError,
             NotADirectoryError,
             # A missing extra is a setup problem, not a bug in this package. Every adapter
-            # that needs timm, torchvision, transformers or depth-pro raises an ImportError
+            # that needs timm, torchvision, transformers or depth_anything_3 raises an ImportError
             # naming the package and the pip command, and reporting that as an unexpected
             # internal error sends the reader to the wrong place - which is exactly the
             # wrong move on a fresh cloud GPU box, where several extras are missing at once.
@@ -64,14 +64,14 @@ examples:
   symtrs models
   symtrs make-dummy --out /tmp/SyMTRS_dummy --size 256
   symtrs doctor --data-root /data/SyMTRS
-  symtrs train --task depth --model zoedepth_k --resolution 2048 --data-root /data/SyMTRS
+  symtrs train --task depth --model da3_metric_large --resolution 2048 --data-root /data/SyMTRS
   symtrs train configs/depth_midas_dpt_hybrid_1024.yaml
   symtrs sweep --task segmentation --data-root /data/SyMTRS --execute
   symtrs tables runs/ --task depth --format markdown
 
 python:
   from symtrs.model import autoloader
-  model = autoloader("runs/depth/zoedepth_k/2048/weights/best.pt")
+  model = autoloader("runs/depth/da3_metric_large/2048/weights/best.pt")
   depth = model.predict("scene.png")
 
 run `symtrs <command> --help` for the flags of one command.

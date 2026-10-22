@@ -336,7 +336,7 @@ def print_superresolution_command(cfg: RunConfig) -> None:
 def print_preflight(cfg: RunConfig) -> None:
     """What a run would do, before any weights are downloaded or GPU is touched.
 
-    Deliberately does not build the model: constructing a MiDaS or Depth Pro checkpoint
+    Deliberately does not build the model: constructing a MiDaS or DA3 checkpoint
     downloads hundreds of megabytes, and the point of a dry run is to find out that the
     dataset path is wrong *without* that.
     """

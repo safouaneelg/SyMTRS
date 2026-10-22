@@ -239,7 +239,7 @@ def main() -> int:
         f"- GPU: {sh(['nvidia-smi', '--query-gpu=name,memory.total,driver_version', '--format=csv,noheader'])}"
         " (driver CUDA sysmem fallback disabled).",
         f"- `.venv`: {venv_versions('.venv')}",
-        f"- `.venv-zoe` (ZoeDepth, MiDaS Swin2-tiny: timm 0.6.12): {venv_versions('.venv-zoe')}",
+        f"- `.venv-zoe` (MiDaS Swin2-tiny and BEiT-Large: timm 0.6.12): {venv_versions('.venv-zoe')}",
         "- Environment set for every run (`scripts/run_queue.py` `run_env`): " + ", ".join(
             f"`{k}={v if 'cache' not in v else v.replace(str(REPO), '<REPO>')}`"
             for k, v in env.items() if k in ("TORCH_HOME", "HF_HOME", "HF_HUB_OFFLINE",

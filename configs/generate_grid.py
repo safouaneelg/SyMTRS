@@ -205,7 +205,7 @@ DEPTH_MODELS: List[DepthModel] = [
         "MiDaS DPT-Large",
         "relative",
         batch={2048: 2, 1024: 4, 512: 8, 256: 16},
-        lr=1.0e-5,
+        lr=1.0e-4,
         grad_accum=4,
         space="disparity",
         patch={2048: 384, 1024: 512},
@@ -216,7 +216,12 @@ DEPTH_MODELS: List[DepthModel] = [
             "big encoders in this pack share - the ViT was pretrained on a billion images and\n"
             "20 epochs on a few thousand aerial tiles will not improve it, while the DPT head\n"
             "is what has to adapt to a nadir view. Set `freeze: \"\"` if you want to fine-tune\n"
-            "the whole thing; expect to lower train.lr if you do."
+            "the whole thing; expect to lower train.lr if you do.\n"
+            "\n"
+            "lr is 1e-4, not the 1e-5 the full-network MiDaS rows use: with only the head\n"
+            "trainable, 1e-5 barely moved it (scripts/overfit_check.py, 2026-10-22: train loss\n"
+            "0.58 -> 0.48, val rmse 9.8 -> 8.9 over 120 steps on 32 images it trains on), while\n"
+            "1e-4 fits them (0.58 -> 0.17, val rmse 5.0 -> 3.4)."
         ),
     ),
     DepthModel(
@@ -240,7 +245,7 @@ DEPTH_MODELS: List[DepthModel] = [
         "MiDaS DPT-BEiT-Large",
         "relative",
         batch={2048: 1, 1024: 2, 512: 4, 256: 8},
-        lr=5.0e-6,
+        lr=5.0e-5,
         grad_accum=8,
         space="disparity",
         patch={2048: 384, 1024: 512},
@@ -252,89 +257,12 @@ DEPTH_MODELS: List[DepthModel] = [
             "likely to change usefully in 20 epochs.\n"
             "\n"
             "If the accumulate-then-step arithmetic is not obvious: batch_size x grad_accum is\n"
-            "the effective batch, so this runs the same 8-image step as the hybrid does."
-        ),
-    ),
-    DepthModel(
-        "zoedepth_n",
-        "ZoeDepth-N",
-        "relative",
-        batch={2048: 2, 1024: 4, 512: 8, 256: 16},
-        lr=5.0e-6,
-        grad_accum=4,
-        patch={2048: 512, 1024: 0},
-        freeze="encoder",
-        note=(
-            "ZoeDepth-N (ZoeD_M12_N) is a metric model - fine-tuned on NYU-Depth-v2, indoor,\n"
-            "0-10 m - that this benchmark scores as relative depth: its indoor metres do not\n"
-            "transfer to a camera 70-270 m up, so it gets align: scale and the SILog loss.\n"
-            "Swapping this config's model to zoedepth_k changes both of those, which is the\n"
-            "whole reason the depth adapters carry a `protocol` attribute. Its output is DEPTH\n"
-            "(not disparity), so the alignment is a scale in depth space.\n"
+            "the effective batch, so this runs the same 8-image step as the hybrid does.\n"
             "\n"
-            "Float16 is not safe for this head: under fp16 autocast ~10% of the output pixels\n"
-            "were NaN on the RTX 5070 Ti (training loss non-finite from step 1, every evaluated\n"
-            "prediction non-positive); fp32 and bfloat16 agree to 3 digits and are finite. The\n"
-            "adapter therefore runs this model in bfloat16 (fp32 on a GPU without it) inside\n"
-            "any CUDA autocast, so amp: true stays as it is in every other file.\n"
-            "\n"
-            "ZoeDepth resizes its input to a 384px minimum side internally, so a 2048px crop\n"
-            "costs memory it does not spend on detail; 512 is the crop that reaches the network\n"
-            "at the scale it was trained for. The encoder is frozen because that resize is the\n"
-            "part that already works."
+            "lr is 5e-5 for the same reason as DPT-Large's 1e-4: at 5e-6 the frozen-encoder head\n"
+            "did not learn on the overfit check (train loss 0.47 -> 0.45, val rmse flat at 8.0);\n"
+            "at 5e-5 it fits (0.47 -> 0.24, val rmse 7.2 -> 5.1)."
         ),
-    ),
-    DepthModel(
-        "zoedepth_k",
-        "ZoeDepth-K",
-        "metric",
-        batch={2048: 2, 1024: 4, 512: 8, 256: 16},
-        lr=5.0e-6,
-        grad_accum=4,
-        patch={2048: 512, 1024: 0},
-        freeze="encoder",
-        note=(
-            "The *metric* baseline: it predicts metres directly and needs no alignment, so\n"
-            "eval.align is none and the BErHu loss is used. Compare it against a relative model\n"
-            "only after checking that both were scored under their own protocol.\n"
-            "\n"
-            "Its output has a ceiling: ZoeD_K's bin centres are bounded to [min_depth, max_depth],\n"
-            "so it can never predict deeper than max_depth. The released weights were trained at\n"
-            "80 m (KITTI) - and the torch.hub entry point builds the head with 10 m unless told\n"
-            "otherwise, which the adapter corrects: its default is 80, the faithful zero-shot\n"
-            "setting. This dataset's scenes reach ~280 m (test median ~208 m), so every depth\n"
-            "pixel beyond 80 m is out of reach and a zero-shot abs_rel near 1 says nothing about\n"
-            "the model. model_kwargs.max_depth: 300 stretches the same pretrained bin layout\n"
-            "over 0-300 m (the parameters keep their shapes, so the weights load unchanged) as a\n"
-            "starting point for the fine-tune; it is a range choice, not a calibration, and a\n"
-            "zero-shot run should drop the key (or pass 80) to keep the released behaviour.\n"
-            "ZoeD-N and ZoeD-NK have softplus (unbounded) heads, so they have no such ceiling.\n"
-            "\n"
-            "This is the cell most sensitive to data.depth_scale: the real EXRs store CENTIMETRES\n"
-            "(hence 0.01), and a model predicting metres scored against unconverted values is\n"
-            "wrong by a constant factor, which looks like a broken model.\n"
-            "Check `symtrs inspect` reports the same unit for the native and the _lr depth\n"
-            "folders before reading a single number from this file."
-        ),
-        model_kwargs={"max_depth": 300.0},
-    ),
-    DepthModel(
-        "zoedepth_nk",
-        "ZoeDepth-NK",
-        "metric",
-        batch={2048: 2, 1024: 4, 512: 8, 256: 16},
-        lr=5.0e-6,
-        grad_accum=4,
-        patch={2048: 512, 1024: 0},
-        freeze="encoder",
-        note=(
-            "Metric, like ZoeDepth-K, with an extra domain classifier on the encoder features.\n"
-            "The classifier is what `model_kwargs.domain_id` selects: it tells the model which\n"
-            "of its training domains the input resembles, and it is the one knob here that has\n"
-            "no correct answer in advance. Leave it unset and the model uses its own head; set\n"
-            "it only if you are deliberately testing the domain conditioning."
-        ),
-        model_kwargs={"domain_id": None},
     ),
     DepthModel(
         "da3_large",
@@ -389,52 +317,6 @@ DEPTH_MODELS: List[DepthModel] = [
             "with another FOV must set data.camera_hfov_deg."
         ),
         needs_camera=True,
-    ),
-    DepthModel(
-        "depth_pro",
-        "Apple Depth Pro",
-        "metric",
-        # Batch 1 and no crop at EVERY resolution, because the network's cost depends on
-        # neither: `infer` resizes whatever it is given to 1536x1536 (the patch encoder's
-        # 384px position embedding x4 is fixed by the architecture and forward() asserts
-        # it), so a 512px crop costs the same as the whole frame, shows the model less of
-        # the scene, and is upsampled 3x where evaluation downsamples. The batch does scale
-        # the memory: measured on an RTX 5070 Ti Laptop (12GB), one step at batch 1 peaks
-        # at ~7.9GiB with the encoder frozen and amp on; batch 2 would not fit.
-        batch={2048: 1, 1024: 1, 512: 1, 256: 1},
-        lr=5.0e-6,
-        grad_accum=8,
-        patch={},
-        freeze="encoder",
-        note=(
-            "Metric depth from Apple: ~1.9GB of weights, a ViT-L encoder that wants a 1536px\n"
-            "input, and the heaviest forward pass in the pack. The encoder is frozen for that\n"
-            "reason - 300M+ parameters, and the head is what adapts to a new sensor.\n"
-            "\n"
-            "Memory, measured (RTX 5070 Ti Laptop, 12GB, amp on, one training step): ~7.9GiB\n"
-            "at batch 1 with the encoder frozen (3.6GiB of weights, the rest decoder\n"
-            "activations), against an out-of-memory above 11GiB without it. That is why this\n"
-            "model is batch 1 and uncropped at every resolution: `infer` resizes any input to\n"
-            "1536x1536 before the 35 overlapping 384px ViT-L passes, and that size is fixed by\n"
-            "the architecture (forward() asserts it), so neither a crop nor a smaller\n"
-            "resolution makes the step cheaper. Scoring the native 2048 frame in one pass\n"
-            "peaks at ~5.7GiB. Without `train.freeze: encoder` it does not fit on 12GB.\n"
-            "\n"
-            "The one thing about this model that is not plug-and-play for aerial imagery is the\n"
-            "focal length, and it is worth getting right before a long run:\n"
-            "\n"
-            "  * With `f_px: null` (the default below) Depth Pro estimates the field of view\n"
-            "    with its own head. That head was trained on internet photography, so a nadir\n"
-            "    aerial frame can be given a plausible-looking but wrong FOV - and because the\n"
-            "    model predicts metres, a wrong FOV is a wrong *scale* over the whole scene.\n"
-            "    Depth ordering looks perfect and RMSE is bad.\n"
-            "  * Set `f_px` to the SyMTRS camera's true focal length in pixels and the metric\n"
-            "    prediction is anchored. That is the honest way to run this baseline.\n"
-            "\n"
-            "Depth Pro windows its own inference internally at 1536px, so scoring at 2048 in\n"
-            "one pass does not mean the model saw 2048 pixels at once."
-        ),
-        model_kwargs={"f_px": None},
     ),
 ]
 
@@ -1132,7 +1014,8 @@ def depth_yaml(model: DepthModel, resolution: int) -> str:
             f"  patch_size: {patch}",
         ]
     elif resolution == 2048:
-        # Only reachable by a model whose cost does not depend on the crop (Depth Pro).
+        # Only reachable by a model whose cost does not depend on the crop (Depth Pro was the
+        # one; it was dropped on 2026-10-22, so no current row takes this branch).
         body += [
             "  # No crop: this network resizes its input to a fixed size, so a crop would cost",
             "  # the same and show it less. The memory posture is in the header above.",

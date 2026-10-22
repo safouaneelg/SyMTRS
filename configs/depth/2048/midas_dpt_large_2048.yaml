@@ -13,6 +13,11 @@
 # is what has to adapt to a nadir view. Set `freeze: ""` if you want to fine-tune
 # the whole thing; expect to lower train.lr if you do.
 #
+# lr is 1e-4, not the 1e-5 the full-network MiDaS rows use: with only the head
+# trainable, 1e-5 barely moved it (scripts/overfit_check.py, 2026-10-22: train loss
+# 0.58 -> 0.48, val rmse 9.8 -> 8.9 over 120 steps on 32 images it trains on), while
+# 1e-4 fits them (0.58 -> 0.17, val rmse 5.0 -> 3.4).
+#
 # The other three cells of this row are the same file at 1024, 512 and 256, in the
 # sibling folders. `symtrs sweep --task depth --models midas_dpt_large` walks them.
 #
@@ -40,7 +45,7 @@ data:
 train:
   epochs: 20
   batch_size: 2
-  lr: 1.0e-5
+  lr: 1.0e-4
   weight_decay: 0.01
   optim: adamw
   sched: cosine

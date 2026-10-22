@@ -270,7 +270,7 @@ def render(rows: List[Dict[str, Any]], runs_label: str, runs_dir: Path = Path(".
         "street is 152-275 m away against 70-182 m in train/val (DATASET.md).",
         "- **FOV**: the capture camera's horizontal FOV is 60 deg, confirmed by the dataset "
         "owner on 2026-10-17 (a car-size estimate over 838 cars, 54-63 deg, agrees); it sets "
-        "the focal length that DA3-metric (and Depth Pro, `f_px`) use. "
+        "the focal length that DA3-metric uses. "
         "Zero-shot DA3-metric stays far too small on nadir views at 70-270 m (domain gap, not a "
         "unit bug).",
         "- **Shadow-removal inits are heterogeneous**: ShadowFormer starts from ISTD+ "

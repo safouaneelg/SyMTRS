@@ -1,12 +1,12 @@
 """One compatibility shim for checkpoints loaded out of `torch.hub`.
 
-Both MiDaS and ZoeDepth are loaded by calling an entry point in someone else's repository,
+MiDaS is loaded by calling an entry point in someone else's repository,
 and that entry point does the `load_state_dict` itself. So when a released checkpoint no
 longer loads, there is no call site of ours to fix - the failure surfaces from inside
 `torch.hub`, naming neither the cause nor a way out.
 
-The case handled here is specific and provable. MiDaS's DPT-BEiT backbones and every ZoeDepth
-variant store `relative_position_index` in their released weights. It is not a learned
+The case handled here is specific and provable. MiDaS's DPT-BEiT backbones
+store `relative_position_index` in their released weights. It is not a learned
 parameter: it is an index table derived purely from the window size, and recent timm registers
 it with `persistent=False`, which keeps it out of `state_dict()` - so a strict load rejects the
 checkpoint's copy as an unexpected key. Recomputing it, which is what the freshly built model

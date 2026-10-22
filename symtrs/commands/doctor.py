@@ -2,7 +2,7 @@
 
     symtrs doctor                          # environment and dependency report
     symtrs doctor --data-root /data/SyMTRS # also checks the dataset layout
-    symtrs doctor --model zoedepth_k --build --smoke
+    symtrs doctor --model da3_metric_large --build --smoke
 
 The last form is the important one. Several of these models are loaded through
 `torch.hub` entrypoints whose exact return type cannot be checked without downloading
@@ -37,11 +37,11 @@ OPTIONAL = {
     "Imath": ("OpenEXR's own dependency", "exr"),
     "cv2": ("EXR fallback reader, and fast image IO", "cv2"),
     "imageio": ("EXR fallback reader", "imageio"),
-    # timm is listed once, for every family that needs it. The MiDaS and ZoeDepth
-    # checkpoints come from torch.hub, whose `hubconf.py` reaches `import timm` through
+    # timm is listed once, for every family that needs it. The MiDaS checkpoints come
+    # from torch.hub, whose `hubconf.py` reaches `import timm` through
     # `midas.blocks` -> `backbones.beit` - so it is a load-time requirement of the published
     # weights, not only of our own SegFormer encoders.
-    "timm": ("MiDaS and ZoeDepth", "timm"),
+    "timm": ("MiDaS", "timm"),
     # SegFormer's MiT encoder comes from transformers: timm has never shipped MiT.
     "transformers": ("SegFormer encoders", "segformer"),
     # DA3 checkpoints are `depth_anything_3` object graphs, not transformers models. The
@@ -51,12 +51,22 @@ OPTIONAL = {
     "omegaconf": ("Depth Anything 3 config", "da3"),
     "addict": ("Depth Anything 3 outputs", "da3"),
     "safetensors": ("Depth Anything 3 weights", "da3"),
-    "depth_pro": ("Apple Depth Pro", "depthpro"),
     # The vendored CycleGAN/pix2pix `train.py` imports both at module level (through
     # `util/visualizer.py`), before it parses an option, so a domain-adaptation run
     # cannot start without them even though the SyMTRS wrapper itself never imports them.
     "dominate": ("domain adaptation (upstream HTML visualiser)", "adapt"),
     "wandb": ("domain adaptation (upstream logging import)", "adapt"),
+    # Same story as adapt: these are the vendored shadow networks' imports, not ours.
+    # ShadowFormer's model.py does `import scipy.misc` and every transformer class imports
+    # `einops`, both at module level, so `build_network` fails before training starts.
+    "scipy": ("shadow removal (upstream ShadowFormer import)", "shadow"),
+    "einops": ("shadow removal (upstream transformer imports)", "shadow"),
+    # ShadowFormer's `model.py` does `import utils` (never used by the network, but run), and
+    # upstream's `utils` package imports these three at module level; a Linux environment
+    # built from the extra without them failed the first two ShadowFormer runs.
+    "natsort": ("shadow removal (upstream ShadowFormer utils import)", "shadow"),
+    "skimage": ("shadow removal (upstream ShadowFormer utils import)", "shadow"),
+    "h5py": ("shadow removal (upstream ShadowFormer utils import)", "shadow"),
 }
 
 
@@ -123,25 +133,19 @@ def _installed(module: str) -> bool:
         return False
 
 
-#: ZoeDepth's own `environment.yml` pins this, and it is the version its released weights and
-#: vendored backbone were built against. Measured: `ZoeD_N` builds, runs and predicts under
-#: 0.6.12; under 0.9.16 and 1.0.30 the checkpoint's `relative_position_index` buffers are no
-#: longer persisted and the forward then raises `AttributeError: 'Block' object has no
-#: attribute 'drop_path'`. The MiDaS v3.1 Swin-V2 checkpoint is from the same era: under
-#: timm 1.0.30 it fails with `Missing key(s) ... pretrained.model.layers.3.downsample.
-#: reduction.weight` because timm moved the Swin-V2 patch-merging between stages; under 0.6.12
-#: it loads. MiDaS DPT-BEiT-Large fails the way ZoeDepth does: its `backbones/beit.py` patches
-#: timm's `Block.forward` with a copy that calls `self.drop_path`, which timm >= 0.9 split into
-#: `drop_path1` / `drop_path2`, so it builds and then raises the `AttributeError` above at the
-#: first forward. (SegFormer used to be the other half of this conflict; its encoder now comes
-#: from transformers, so only these models pin timm.)
-_ZOEDEPTH_TIM_PIN = "0.6.12"
+#: The timm the MiDaS v3.1 checkpoints were built against. The Swin-V2 checkpoint fails under
+#: timm 1.0.30 with `Missing key(s) ... pretrained.model.layers.3.downsample.reduction.weight`,
+#: because timm moved the Swin-V2 patch-merging between stages; under 0.6.12 it loads. MiDaS
+#: DPT-BEiT-Large's `backbones/beit.py` patches timm's `Block.forward` with a copy that calls
+#: `self.drop_path`, which timm >= 0.9 split into `drop_path1` / `drop_path2`, so it builds and
+#: then raises `AttributeError: 'Block' object has no attribute 'drop_path'` at the first
+#: forward. (ZoeDepth pinned the same version for the same BEiT core; it was dropped from the
+#: benchmark on 2026-10-22. SegFormer's encoder comes from transformers, so it does not pin.)
+_TIMM_PIN = "0.6.12"
 
-#: Registry keys that must run in the timm==0.6.12 environment (`.venv-zoe`).
+#: Registry keys that must run in the timm==0.6.12 environment (`.venv-zoe`, a name kept from
+#: when ZoeDepth was its first user).
 TIMM_PINNED_KEYS = (
-    "zoedepth_n",
-    "zoedepth_k",
-    "zoedepth_nk",
     "midas_dpt_swin2_tiny",
     "midas_dpt_beit_large",
 )
@@ -160,12 +164,12 @@ def _timm_notes() -> List[str]:
     except Exception:  # noqa: BLE001 - a broken timm is reported by the table above
         return notes
 
-    if version != _ZOEDEPTH_TIM_PIN:
+    if version != _TIMM_PIN:
         notes.append(
             f"timm {version} is installed, but {', '.join(TIMM_PINNED_KEYS)} need "
-            f"timm=={_ZOEDEPTH_TIM_PIN} (ZoeDepth's own environment.yml pin; MiDaS "
-            "Swin-V2's checkpoint layout; MiDaS BEiT's patched Block.forward). They are verified working there and verified "
-            "failing on 0.9.16 and 1.0.30; run them from the second environment."
+            f"timm=={_TIMM_PIN} (MiDaS Swin-V2's checkpoint layout; MiDaS BEiT's patched "
+            "Block.forward). They are verified working there and verified failing on 0.9.16 "
+            "and 1.0.30; run them from the second environment (.venv-zoe)."
         )
     return notes
 

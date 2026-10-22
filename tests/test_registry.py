@@ -171,11 +171,10 @@ def test_aliases_resolve_to_their_key_and_never_shadow_another():
 
 
 def test_a_metric_and_a_relative_model_both_exist_per_family_where_it_matters():
-    """The run matrix needs a metric and a relative baseline. ZoeDepth and DA3 each ship
-    one of each, and losing one of them silently narrows the comparison."""
+    """The run matrix needs a metric and a relative baseline. DA3 ships one of each, and
+    losing one of them silently narrows the comparison."""
     keys = set(REGISTRY)
-    assert {"zoedepth_n", "zoedepth_k"} <= keys  # relative and metric, same family
-    assert {"da3_large", "da3_metric_large"} <= keys
+    assert {"da3_large", "da3_metric_large"} <= keys  # relative and metric, same family
 
 
 # ----------------------------------------------------------------------- lookups
@@ -184,9 +183,9 @@ def test_a_metric_and_a_relative_model_both_exist_per_family_where_it_matters():
 def test_unknown_model_suggests_the_closest_key():
     """A typo costs a lookup, not a documentation read."""
     with pytest.raises(RegistryError) as info:
-        get_spec("zoedpth_k")
+        get_spec("da3_metrc_large")
     message = str(info.value)
-    assert "zoedepth_k" in message
+    assert "da3_metric_large" in message
     assert "symtrs models" in message
 
 

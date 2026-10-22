@@ -7,12 +7,12 @@ the evaluation protocol, and `symtrs train <file>` executes exactly that.
 ```
 configs/
   train_sr_x2.yaml            quick-start: the whole path, in one file
-  depth/<2048|1024|512|256>/  <model>_<resolution>.yaml   11 models x 4 resolutions
+  depth/<2048|1024|512|256>/  <model>_<resolution>.yaml   7 models x 4 resolutions
   segmentation/<...>/         <model>_<resolution>.yaml    6 models x 4 resolutions
   domain_adapt/               <model>_<direction>.yaml     2 models x 4 directions
   superresolution/            <model>_x<scale>.yaml        4 models x 4 scales
   shadow_removal/             <model>.yaml                 4 models, 2048 only
-  generate_grid.py            the tables these 96 files are expanded from
+  generate_grid.py            the tables these 80 files are expanded from
 ```
 
 ```bash
@@ -48,7 +48,7 @@ control row - LR and HR are the same native folder - and not super-resolution.
 ## Regenerating
 
 `generate_grid.py` holds the model tables (protocol, loss, batch size, memory posture, the
-prose) and writes all 96 files. Change a shared hyper-parameter there rather than in 44
+prose) and writes all 80 files. Change a shared hyper-parameter there rather than in 44
 placeholders, then:
 
 ```bash

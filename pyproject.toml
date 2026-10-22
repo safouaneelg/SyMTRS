@@ -29,20 +29,26 @@ cv2 = ["opencv-python-headless"]
 # pycolmap for 3D export that the adapter never imports. Install it with
 # `pip install --no-deps depth-anything-3==0.1.1` (see symtrs/model/depth/da3.py).
 da3 = ["omegaconf", "addict", "safetensors", "huggingface_hub"]
-# Needed only for the Depth Pro adapter.
-depthpro = ["depth-pro @ git+https://github.com/apple/ml-depth-pro.git"]
 # Needed only by the domain-adaptation task, and needed to *start* it: the vendored
 # upstream `train.py` and `test.py` both reach `util/visualizer.py`, which imports these
 # two at module level before any option is parsed, so their absence is not a missing
 # feature - it is a run that cannot begin. `symtrs doctor` reports them.
 adapt = ["dominate", "wandb"]
-# timm is needed by more than the SegFormer encoders: the MiDaS and ZoeDepth checkpoints are
+# Needed only by the shadow-removal task, for the same reason as `adapt`: these are not
+# `symtrs` requirements, they are the vendored networks'. ShadowFormer's `model.py` does
+# `import scipy.misc` at module level and all three transformer classes import `einops`,
+# so without them `build_network` fails before a run can start. ShadowFormer's `model.py`
+# also does `import utils` (unused by the network, but executed), and that package imports
+# `natsort`, `skimage` and `h5py` at module level. Do not let an installer upgrade numpy
+# while adding these (see AGENTS.md ground rule 9): pin numpy==1.26.4 in the same command.
+shadow = ["scipy", "einops", "natsort", "scikit-image", "h5py"]
+# timm is needed by more than the SegFormer encoders: the MiDaS checkpoints are
 # loaded through torch.hub, and that repo's `hubconf.py` imports `midas.blocks`, which
 # imports `backbones.beit`, which does `import timm` at module level. So it is required to
 # load those weights at all, not just to use our own encoders.
 timm = ["timm"]
 # SegFormer's MiT encoder comes from `transformers` (timm has never shipped MiT). This extra
-# used to be an alias of `timm`; MiDaS/ZoeDepth still need the `timm` extra on its own.
+# used to be an alias of `timm`; MiDaS still needs the `timm` extra on its own.
 segformer = ["transformers"]
 dev = ["pytest"]
 

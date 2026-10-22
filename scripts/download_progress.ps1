@@ -1,9 +1,9 @@
 # Live progress of the pre-downloads started by scripts\prefetch_all.ps1. Ctrl+C to quit
 # (closing this window does NOT stop the downloads; they run in their own processes).
 # The weights percentage compares the size on disk (.cache + checkpoints) with an ESTIMATED
-# total of ~14 GB (MiDaS x5, ZoeDepth x3, DA3 x2, Depth Pro, SegFormer, DeepLab, Inception,
+# total of ~10 GB (MiDaS x5, DA3 x2, SegFormer, DeepLab, Inception,
 # shadow repos), so it is approximate and may end a little above or below 100 %.
-param([double]$WeightsGB = 14, [int]$Every = 3)
+param([double]$WeightsGB = 10, [int]$Every = 3)
 $repo = Split-Path -Parent $PSScriptRoot
 
 function SizeGB($paths) {
@@ -45,12 +45,12 @@ while ($true) {
     $rate = [math]::Round(($net - $prevNet) / 1MB / [math]::Max(0.1, ($now - $prevT).TotalSeconds), 1)
     $prevNet = $net; $prevT = $now
     $mainLog = LastLog "prefetch_main_*.log"
-    $zoeLog = LastLog "install_zoe_*.log"
+    $zoeLog = LastLog "install_timm06_*.log"
     $zoeVenv = SizeGB @((Join-Path $repo ".venv-zoe"))
 
     if (Has $mainLog "PREFETCH_MAIN_DONE") { $mainState = "done" } else { $mainState = "downloading" }
-    if (Has $zoeLog "PREFETCH_ZOE_DONE") { $zoeState = "done (venv + weights)" }
-    elseif (Has $zoeLog "ZOE_OK") { $zoeState = "venv OK, downloading ZoeDepth weights" }
+    if (Has $zoeLog "PREFETCH_TIMM06_DONE") { $zoeState = "done (venv + weights)" }
+    elseif (Has $zoeLog "TIMM06_OK") { $zoeState = "venv OK, downloading MiDaS Swin-V2 / BEiT weights" }
     elseif ($zoeVenv -gt 0.2) { $zoeState = "installing packages into .venv-zoe ($zoeVenv GB)" }
     else { $zoeState = "downloading packages (torch cu128 ~3 GB)" }
 
@@ -62,9 +62,9 @@ while ($true) {
     ""
     "Main weights   : $mainState"
     "  log> " + (Tail1 $mainLog)
-    "ZoeDepth       : $zoeState"
+    "timm 0.6.12 env: $zoeState"
     "  log> " + (Tail1 $zoeLog)
-    if ((Has $mainLog "PREFETCH_MAIN_DONE") -and (Has $zoeLog "PREFETCH_ZOE_DONE")) {
+    if ((Has $mainLog "PREFETCH_MAIN_DONE") -and (Has $zoeLog "PREFETCH_TIMM06_DONE")) {
         ""; "ALL DOWNLOADS FINISHED - you can close this window."
     }
     Start-Sleep -Seconds $Every

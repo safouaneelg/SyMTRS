@@ -243,7 +243,7 @@ def test_a_checkpoint_passed_to_model_is_read_as_a_checkpoint(capsys):
 def test_a_registry_key_is_left_alone(capsys):
     from symtrs.commands._common import redirect_checkpoint_flag
 
-    for key in ("midas_dpt_hybrid", "zoedepth_k", "segformer_b2", "unet_small"):
+    for key in ("midas_dpt_hybrid", "da3_metric_large", "segformer_b2", "unet_small"):
         args = _namespace(model=key, checkpoint="")
         redirect_checkpoint_flag(args)
         assert args.model == key, key

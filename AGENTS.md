@@ -18,7 +18,7 @@ aerial dataset benchmark with five tasks.
 
 | Task | Registry models | Input → target |
 | --- | --- | --- |
-| `depth` | 11 (MiDaS ×5, ZoeDepth ×3, Depth Anything 3 ×2, Depth Pro) | `rgb_day{_lr}` → `depth{_lr}` |
+| `depth` | 7 (MiDaS ×5, Depth Anything 3 ×2) | `rgb_day{_lr}` → `depth{_lr}` |
 | `segmentation` | 6 (U-Net, DeepLabV3 ×2, SegFormer ×3) | `rgb_day{_lr}` → `semantic{_lr}` |
 | `domain_adapt` | 2 (CycleGAN, pix2pix) × 4 directions | `rgb_day` ⇄ `rgb_night` (`day2night`, `night2day`) and `rgb_day` ⇄ `rgb_noshadow` (`shadow2noshadow`, `noshadow2shadow`), native only |
 | `shadow_removal` | 4 (ShadowFormer, Restormer, Uformer, ShadowMaskFormer), 2048 only | `rgb_day` → `rgb_noshadow` |
@@ -88,8 +88,8 @@ changing anything.
 
    | protocol | raw output | loss | `eval.align` | models |
    | --- | --- | --- | --- | --- |
-   | `metric` | metres | `berhu` | `none` | ZoeD-K/NK, DA3 metric, Depth Pro |
-   | `relative` | depth up to a scale | `silog` | `scale` | ZoeD-N, DA3 relative |
+   | `metric` | metres | `berhu` | `none` | DA3 metric |
+   | `relative` | depth up to a scale | `silog` | `scale` | DA3 relative |
    | `relative` | **disparity** `s/z + t` | `ssi` | `scale_shift_disparity` | MiDaS x5 |
 
    `scale_shift_disparity` is the MiDaS protocol: scale **and shift** are fitted per image by
@@ -113,12 +113,14 @@ changing anything.
    the capture camera's horizontal FOV is always 60 deg for the SyMTRS capture (a car-size
    estimate over 838 cars, 54-63 deg, agrees). The actor property (`FieldOfView = 60.f`) is
    editable per instance and the dataset does not store it, so a future capture with another
-   FOV must set `data.camera_hfov_deg`. *ZoeD-K* has a bounded bin head: it cannot predict deeper than
-   `model_kwargs.max_depth` (80 m = what the released weights were trained with; the torch.hub
-   entry point wrongly builds 10). The generated fine-tuning configs use 300 to cover the data
-   (scenes reach ~280 m); a zero-shot run should keep the default. ZoeD-N/NK heads are
-   unbounded and refuse the key. ZoeD-N is kept out of float16 inside the adapter (it
-   produced NaN under fp16 autocast).
+   FOV must set `data.camera_hfov_deg`.
+
+   Two families were dropped on 2026-10-22 (adapters, configs and tests removed; `git log` has
+   them). ZoeDepth (N/K/NK): its released configs froze the whole MiDaS core (`train_midas:
+   false`, forward under `set_grad_enabled(False)`), and even with the core released it did not
+   learn usefully on `scripts/overfit_check.py`. Depth Pro: even given the true focal length
+   its zero-shot scale was ~16x short on SyMTRS, and only full fine-tuning (952 M parameters,
+   ~3 h per 512px epoch) closed the gap.
 
 4. **Five segmentation classes, `ignore_index: 255`.** Background, building, green, road,
    car (`data.num_classes: 5`); the masks store `class_id * data.label_step` (63) as 8-bit
@@ -135,7 +137,7 @@ changing anything.
    and `data.split` must differ from the evaluation splits. Never carve a validation set out
    of `train/` in code — upstream's loaders will happily do that if you let them (see §7).
 
-7. **`configs/` is generated output.** 96 of the YAML files are written by
+7. **`configs/` is generated output.** 80 of the YAML files are written by
    `configs/generate_grid.py` from one table per task. Change the table and re-run it;
    `python3 configs/generate_grid.py --check` and the test suite both fail if a committed
    file has drifted. `configs/train_sr_x2.yaml` is the one hand-written file (the
@@ -149,13 +151,19 @@ changing anything.
 
 9. **Dependencies stay inside torch + torchvision + timm + numpy/PIL/matplotlib/tqdm/yaml.**
    SegFormer (`transformers`), Depth Anything 3 (the `depth_anything_3` package, installed
-   with `pip install --no-deps depth-anything-3==0.1.1` because its wheel pins numpy<2) and
-   Depth Pro are optional extras, imported lazily
+   with `pip install --no-deps depth-anything-3==0.1.1` because its wheel pins numpy<2) are
+   optional extras, imported lazily
    inside the adapter that needs them so `symtrs doctor` can report the model as unavailable
-   instead of the whole package failing to import.
+   instead of the whole package failing to import. The one addition this rule has taken:
+   the shadow-removal extra (`scipy`, `einops`, `[shadow]` in `pyproject.toml`). Those are
+   not `symtrs` requirements — the *vendored* ShadowFormer/Uformer/Restormer modules import
+   them at module level, so without them the upstream class cannot even be constructed.
+   Install them only in the environment that runs shadow removal. `uv pip install scipy`
+   pulls numpy 2 in as a side effect; keep the environment's `numpy==1.26.4` (pin it in the
+   same command) or the Depth Anything 3 adapter breaks.
 
-10. **timm cannot serve everything from one environment.** ZoeDepth's released weights need
-    `timm==0.6.12`, and so does the MiDaS Swin-V2 checkpoint (`midas_dpt_swin2_tiny`: timm
+10. **timm cannot serve everything from one environment.** The MiDaS Swin-V2 checkpoint needs
+    `timm==0.6.12` (`midas_dpt_swin2_tiny`: timm
     >= 0.9 moved the Swin-V2 patch-merging between stages, so its state_dict loads with a
     missing `downsample.reduction` key), and so does MiDaS DPT-BEiT-Large
     (`midas_dpt_beit_large`: MiDaS patches timm's `Block.forward` with a copy that calls
@@ -165,8 +173,8 @@ changing anything.
     top-level ViT's forward, never a timm `Block`. SegFormer is no
     longer part of the conflict: timm has never shipped MiT, so its encoder comes from
     `transformers` (`nvidia/mit-b{0,1,2}`). `symtrs doctor` reports which side you are on.
-    Plan on two environments (`.venv` and `.venv-zoe`); `scripts/run_queue.py` takes the
-    environment per job.
+    Plan on two environments (`.venv` and `.venv-zoe` - the name is left from ZoeDepth, its
+    first user); `scripts/run_queue.py` takes the environment per job.
 
 11. **Evaluation scores the whole image, with the same path for val and test.** `train.val_patch_size: 0`
     means the full image, never `train.patch_size` (the crop is a memory device; inheriting it
@@ -178,11 +186,41 @@ changing anything.
     averages the classes with a non-empty union (`miou_classes` says how many; class 0 is absent
     from the current capture).
 
+12. **Co-training is an execution strategy, never a protocol.** `symtrs train-group` (and a
+    `group` line in a queue file, §3's `scripts/run_queue.py`) runs several member configs in
+    one process on one loader, handing every member the *same* decoded batch: at 2048 one
+    sample costs ~0.2 s of CPU to decode and ~0.15 s of GPU per depth model on an A6000, so a
+    solo run spends most of its wall clock waiting for images. The sharing unit is the
+    **optimiser window**, not the forward pass: the loader is built at the members' largest
+    effective batch (`batch_size × grad_accum`, `shared_window`), every member's effective
+    batch must divide it, and each member cuts a shared batch into its own windows and
+    micro-batches (`Trainee.split`, driven by `train_one_epoch_many(..., windows=True)`). So a
+    `batch_size: 4, grad_accum: 2` member and a `batch_size: 8, grad_accum: 1` member share the
+    same 8 images per optimiser step while keeping their own memory footprint, and a
+    `batch_size: 4, grad_accum: 1` member beside them takes two optimiser steps per shared
+    batch (DeepLabV3 beside SegFormer at every resolution). In a group a window closes only
+    where `split` says: the solo `(step + 1) % grad_accum` rule counts shared batches there and
+    once gave a 2x2 member six steps for four windows. What a member must not lose:
+    its own optimiser, schedule (`steps_per_epoch = len(shared loader) × windows per shared
+    batch`, never divided by `grad_accum` again — that split is inside the window), checkpoints, `metrics.csv`,
+    previews and `summary.json`
+    (which records `cogroup`), and the same validation/test path a solo run uses
+    (`_finish_epoch` / `_score_and_summarise` — a group must never grow its own eval pass;
+    `tests/test_eval_protocol.py` pins this). Members therefore have to agree on everything
+    that shapes the window, which is `symtrs.engine.trainer.group_conflicts` (task, resolution,
+    data root/splits and the data semantics, patch size, workers, an effective batch that divides the window); a
+    disagreement is refused, never resolved in favour of the first member's loader.
+    `train.epochs` is per member: one that finishes early leaves the shared pass and the
+    others keep going. Only depth and segmentation co-train: domain adaptation, shadow removal
+    and super-resolution are subprocesses and read their own data. A group's `--set` applies
+    to every member, which is why a per-member resume is a flag (`--resume-existing`) rather
+    than a config value.
+
 ## 3. Setup
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -e '.[dev,timm]'          # core + tests; add exr, da3, depthpro as needed
+pip install -e '.[dev,timm]'          # core + tests; add exr, da3 as needed
 pip install -e '.[adapt]'             # domain adaptation: dominate + wandb
 symtrs doctor                         # what is installed, which models can build
 symtrs models                         # every registry key, protocol and requirement
@@ -230,6 +268,14 @@ symtrs eval configs/superresolution/srcnn_x4.yaml --data-root /data/SyMTRS --eva
 symtrs sweep --task depth --data-root /data/SyMTRS --out-dir runs
 symtrs sweep --task depth --data-root /data/SyMTRS --out-dir runs --execute --jobs 1
 
+# several compatible models on one shared batch (one loader, one decoded batch per step)
+symtrs train-group configs/segmentation/2048/unet_small_2048.yaml \
+                  configs/segmentation/2048/segformer_b0_2048.yaml \
+                  --data-root /data/SyMTRS --out-dir runs/group1 --device cuda:0 --dry-run
+symtrs train-group configs/segmentation/2048/unet_small_2048.yaml \
+                  configs/segmentation/2048/segformer_b0_2048.yaml \
+                  --data-root /data/SyMTRS --out-dir runs/group1 --device cuda:0
+
 # collect the results table
 symtrs tables runs --task depth --format markdown
 
@@ -262,7 +308,7 @@ symtrs/
     semantic/          segmentation models
     domain/            the CycleGAN/pix2pix subprocess front-end + vendored-tree check
     superres/          the SR subprocess front-end
-configs/               96 generated YAMLs + generate_grid.py (see configs/README.md)
+configs/               80 generated YAMLs + generate_grid.py (see configs/README.md)
 symtrs/legacy/          the SR implementation and datasets: moved inside, then edited (see its README)
 train_superresolution.py, dataloader/   shims that re-export from symtrs/legacy/
 pytorch-CycleGAN-and-pix2pix/                           vendored upstream, pinned
@@ -329,10 +375,8 @@ subprocess. Add it to §1 of this file and to the table in `configs/README.md`.
   `symtrs.engine.trainer.apply_run_freeze` now does, before `.to()`/DDP/the optimiser. It
   recognises the encoder by module-name prefix (`encoder`, `backbone`, `pretrained`), so a
   model that keeps everything under one of those sets `freeze_encoder_prefixes` (MiDaS:
-  `backbone.pretrained`). Check the "freeze=... -> N M trainable" line. Depth Pro only fits a
-  12 GB card because of it (~7.9 GiB at batch 1; unfrozen it is out of memory above 11 GiB),
-  and its 1536 px internal size is fixed by the architecture, so neither crops nor a lower
-  `resolution` shrink a step.
+  `backbone.pretrained`). Check the "freeze=... -> N M trainable" line. (It was found because
+  Depth Pro, since dropped, ran out of memory with a "frozen" encoder that still trained.)
 - **`data.depth_scale`.** Metric depth models predict metres. If the EXR stores millimetres
   as uint16, every metric is wrong by a constant factor and it looks like a broken model.
   `symtrs doctor --data-root` checks the first file it finds.

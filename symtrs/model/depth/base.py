@@ -5,7 +5,7 @@ how to feed the network, what its raw output means, how to turn a metric ground 
 into a target that loss matches, and how to get back to metres.
 
 The contract is deliberately narrow, because this is the seam that lets MiDaS,
-ZoeDepth, Depth Anything 3 and Depth Pro share one training loop despite disagreeing
+and Depth Anything 3 share one training loop despite disagreeing
 about almost everything else.
 """
 

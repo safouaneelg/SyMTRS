@@ -1,9 +1,9 @@
 """Download every pretrained weight / hub repo the training runs need, into <repo>/.cache.
 
-Run it with the venv that can build the keys you ask for (ZoeDepth keys need .venv-zoe):
+Run it with the venv that can build the keys you ask for (MiDaS Swin-V2 / BEiT need .venv-zoe):
 
-    .venv/Scripts/python.exe scripts/prefetch_weights.py                 # everything but ZoeDepth
-    .venv-zoe/Scripts/python.exe scripts/prefetch_weights.py --keys zoedepth_n zoedepth_k zoedepth_nk
+    .venv/Scripts/python.exe scripts/prefetch_weights.py                 # everything but those two
+    .venv-zoe/Scripts/python.exe scripts/prefetch_weights.py --keys midas_dpt_swin2_tiny midas_dpt_beit_large
     .venv/Scripts/python.exe scripts/prefetch_weights.py --offline       # verify: no network allowed
 
 It is idempotent: the underlying loaders (torch.hub, huggingface_hub, timm, torchvision)
@@ -11,9 +11,7 @@ skip what is already cached. Each key is built through symtrs.registry.build_mod
 same call the trainer uses, so exactly the files training reads are the files cached.
 
 Runs must set the same env (see cache_env()); `source scripts/cache_env.sh` is not needed,
-the values are printed by `--print-env`. Depth Pro's checkpoint goes to
-<repo>/checkpoints/depth_pro.pt because depth_pro's default checkpoint_uri is the
-CWD-relative './checkpoints/depth_pro.pt': launch Depth Pro runs from the repo root.
+the values are printed by `--print-env`.
 """
 from __future__ import annotations
 
@@ -49,16 +47,6 @@ def fmt(n: float) -> str:
         n /= 1024
 
 
-def depth_pro_checkpoint(offline: bool) -> None:
-    target = ROOT / "checkpoints" / "depth_pro.pt"
-    if target.exists() and target.stat().st_size > 1_000_000_000:
-        return
-    from huggingface_hub import hf_hub_download
-
-    target.parent.mkdir(exist_ok=True)
-    hf_hub_download("apple/DepthPro", "depth_pro.pt", local_dir=str(target.parent))
-
-
 def extra_inception() -> None:
     from torchvision.models import Inception_V3_Weights, inception_v3
 
@@ -74,7 +62,7 @@ def extra_inception() -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--keys", nargs="*", help="registry keys (default: every depth/segmentation key except zoedepth*)")
+    ap.add_argument("--keys", nargs="*", help="registry keys (default: every depth/segmentation key except the timm 0.6.12 ones)")
     ap.add_argument("--offline", action="store_true", help="forbid network; verifies the cache is sufficient")
     ap.add_argument("--print-env", action="store_true")
     ap.add_argument("--no-extras", action="store_true", help="skip Inception / FID weights")
@@ -88,21 +76,19 @@ def main() -> int:
     os.environ.update(env)
     for v in env.values():
         Path(v).mkdir(parents=True, exist_ok=True)
-    os.chdir(ROOT)  # depth_pro resolves ./checkpoints/depth_pro.pt against the CWD
+    os.chdir(ROOT)
     sys.path.insert(0, str(ROOT))
 
     from symtrs.registry import REGISTRY, build_model  # noqa: E402
 
     keys = args.keys or [
         k for k, s in REGISTRY.items()
-        if s.task in ("depth", "segmentation") and not k.startswith("zoedepth")
+        if s.task in ("depth", "segmentation") and k not in ("midas_dpt_swin2_tiny", "midas_dpt_beit_large")
     ]
     rows = []
     for key in keys:
         t0, before = time.time(), dir_size(CACHE)
         try:
-            if key == "depth_pro" and not args.offline:
-                depth_pro_checkpoint(args.offline)
             build_model(key)
             status = "OK"
         except Exception as exc:  # report and continue: one bad key must not hide the rest

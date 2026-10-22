@@ -6,7 +6,7 @@ loader, `autoloader` and `symtrs tables` all agree on what `--model midas_dpt_hy
 means.
 
 Entries hold an *import path* rather than the class itself. That matters: importing
-this module must not pull in `transformers`, `depth_pro` or `timm`, because the whole
+this module must not pull in `transformers`, `depth_anything_3` or `timm`, because the whole
 point of the registry is to let `symtrs doctor` tell you that one of them is missing
 instead of dying at import time.
 
@@ -29,7 +29,7 @@ class RegistryError(KeyError):
 
 
 #: What a depth network's raw output means. `depth` is metres (metric models) or depth up to a
-#: scale (ZoeDepth-N, Depth Anything 3 relative); `disparity` is MiDaS's inverse depth, which is
+#: scale (Depth Anything 3 relative); `disparity` is MiDaS's inverse depth, which is
 #: only known up to an affine transform `s / z + t`.
 OUTPUT_SPACES = ("depth", "disparity")
 
@@ -178,55 +178,6 @@ REGISTRY: Dict[str, ModelSpec] = {
         default_align="scale_shift_disparity",
         output_space="disparity",
     ),
-    # The ZoeDepth entries need timm but not cv2, which is worth a word because the MiDaS
-    # entries need both. timm arrives with the MiDaS DPT-BEiT core that ZoeDepth builds on:
-    # the hub entrypoint imports `midas.blocks` -> `backbones.beit`, which does `import timm`
-    # at module level. cv2 is only reached through MiDaS's `transforms()` entrypoint, and the
-    # ZoeDepth adapter never calls it - the model normalises its own input - so cv2 is absent
-    # from these three lines. Measured: ZoeD_N builds, loads its released weights and runs a
-    # forward pass with cv2 blocked from `sys.meta_path`.
-    "zoedepth_n": _spec(
-        "zoedepth_n",
-        "depth",
-        f"{_DEPTH}.zoedepth:ZoeDepthAdapter",
-        default_kwargs={"variant": "N"},
-        description=(
-            "ZoeDepth-N (ZoeD_M12_N): NYU-metric head, scored as relative (depth up to a scale) "
-            "because indoor metres do not transfer to aerial scenes."
-        ),
-        requires=("torch", "timm"),
-        protocol="relative",
-        default_align="scale",
-        output_space="depth",
-    ),
-    "zoedepth_k": _spec(
-        "zoedepth_k",
-        "depth",
-        f"{_DEPTH}.zoedepth:ZoeDepthAdapter",
-        # 80 m is what ZoeD_M12_K was trained with; the hub entry point builds the head with 10 m.
-        # The adapter owns the constant (`ZOED_K_TRAINED_MAX_DEPTH`) and a test keeps the two equal.
-        default_kwargs={"variant": "K", "max_depth": 80.0},
-        aliases=("zoedepth",),
-        description=(
-            "ZoeDepth-K, metric (metres). Bounded bin head: model_kwargs.max_depth (80 m = "
-            "the released weights) is its output ceiling."
-        ),
-        requires=("torch", "timm"),
-        protocol="metric",
-        default_align="none",
-        output_space="depth",
-    ),
-    "zoedepth_nk": _spec(
-        "zoedepth_nk",
-        "depth",
-        f"{_DEPTH}.zoedepth:ZoeDepthAdapter",
-        default_kwargs={"variant": "NK"},
-        description="ZoeDepth-NK, metric with a domain classifier; pass model_kwargs.domain_id.",
-        requires=("torch", "timm"),
-        protocol="metric",
-        default_align="none",
-        output_space="depth",
-    ),
     "da3_large": _spec(
         "da3_large",
         "depth",
@@ -250,17 +201,6 @@ REGISTRY: Dict[str, ModelSpec] = {
         default_align="none",
         output_space="depth",
         focal_kwarg="focal_px",
-    ),
-    "depth_pro": _spec(
-        "depth_pro",
-        "depth",
-        f"{_DEPTH}.depth_pro:DepthProAdapter",
-        aliases=("depthpro",),
-        description="Apple Depth Pro, metric (metres), 1536px. ViT-L, ~1.9GB of weights.",
-        requires=("depth_pro",),
-        protocol="metric",
-        default_align="none",
-        output_space="depth",
     ),
     # ------------------------------------------------------------ segmentation
     "unet_small": _spec(
@@ -351,7 +291,7 @@ REGISTRY: Dict[str, ModelSpec] = {
             "ShadowFormer (guolanqing/ShadowFormer), shadow-interaction transformer; takes the "
             "derived shadow mask as a second input. 2048 only."
         ),
-        requires=("torch", "timm", "einops"),
+        requires=("torch", "timm", "einops", "natsort", "skimage", "h5py"),
     ),
     "restormer": _spec(
         "restormer",

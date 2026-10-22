@@ -61,7 +61,7 @@ Depth, not disparity
 The base adapter assumes a relative model emits disparity, so it converts the target to
 `1 / depth` and inverts the prediction in `to_metres`. Depth Anything 3 emits *depth*, so
 this adapter keeps a relative model's target and prediction in depth space (see
-`prepare_target` and `to_metres`), the same override the ZoeDepth-N adapter makes.
+`prepare_target` and `to_metres`).
 
 Aux head weights
 ----------------

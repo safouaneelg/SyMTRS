@@ -14,6 +14,10 @@
 # If the accumulate-then-step arithmetic is not obvious: batch_size x grad_accum is
 # the effective batch, so this runs the same 8-image step as the hybrid does.
 #
+# lr is 5e-5 for the same reason as DPT-Large's 1e-4: at 5e-6 the frozen-encoder head
+# did not learn on the overfit check (train loss 0.47 -> 0.45, val rmse flat at 8.0);
+# at 5e-5 it fits (0.47 -> 0.24, val rmse 7.2 -> 5.1).
+#
 # The other three cells of this row are the same file at 1024, 512 and 256, in the
 # sibling folders. `symtrs sweep --task depth --models midas_dpt_beit_large` walks them.
 #
@@ -41,7 +45,7 @@ data:
 train:
   epochs: 20
   batch_size: 1
-  lr: 5.0e-6
+  lr: 5.0e-5
   weight_decay: 0.01
   optim: adamw
   sched: cosine

@@ -2,12 +2,12 @@
 
 Two protocols, matching the two kinds of depth model:
 
-*Metric* models (ZoeDepth-K, Depth Anything 3 metric, Depth Pro) predict metres, so
+*Metric* models (Depth Anything 3 metric) predict metres, so
 their error is reported directly and no alignment is applied.
 
 *Relative* models predict an affine-invariant quantity, and which affine family depends on
-the output space (`symtrs.registry.depth_pairing`). ZoeDepth-N and relative Depth Anything 3
-emit depth up to a scale, aligned by `scale`. MiDaS/DPT emits disparity `s / z + t`, aligned by
+the output space (`symtrs.registry.depth_pairing`). Relative Depth Anything 3
+emits depth up to a scale, aligned by `scale`. MiDaS/DPT emits disparity `s / z + t`, aligned by
 `scale_shift_disparity`: scale AND shift fitted against `1 / ground truth`, then inverted. Their
 numbers are only meaningful after per-image alignment, and the convention differs between
 papers, so `align` is recorded per model in the registry rather than hardcoded.

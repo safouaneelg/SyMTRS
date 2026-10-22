@@ -3,7 +3,7 @@
 Three losses, matching the depth protocols and output spaces (`symtrs.registry.depth_pairing`
 is the single statement of which goes with which):
 
-*Relative* models that emit **depth** (ZoeDepth-N, Depth Anything 3) are trained with `silog`,
+*Relative* models that emit **depth** (Depth Anything 3 relative) are trained with `silog`,
 the scale-invariant log loss. It is invariant to the global scale of the prediction, which is
 exactly the freedom such a model has.
 

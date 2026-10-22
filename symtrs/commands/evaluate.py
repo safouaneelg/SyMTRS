@@ -7,7 +7,7 @@ Three ways to say what to evaluate:
 
     symtrs eval --task depth --checkpoint runs/depth/midas_dpt_hybrid/1024/weights/best.pt
 
-    symtrs eval --config configs/depth_zoedepth_k_2048.yaml --checkpoint <run dir>
+    symtrs eval --config configs/depth/2048/da3_metric_large_2048.yaml --checkpoint <run dir>
 
 Passing a run directory works too; `weights/best.pt` is found inside it.
 """

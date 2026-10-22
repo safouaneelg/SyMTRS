@@ -41,10 +41,7 @@ from run_queue import REPO, keep_awake, now, run_env, run_job, run_verdict, trai
 
 TASK_ORDER = ["segmentation", "depth", "superresolution", "shadow_removal", "domain_adapt"]
 # Models whose upstream code pins timm 0.6.12 (AGENTS.md ground rule 10).
-ZOE_VENV_MODELS = (
-    "zoedepth_n",
-    "zoedepth_k",
-    "zoedepth_nk",
+TIMM_0612_MODELS = (
     "midas_dpt_swin2_tiny",
     "midas_dpt_beit_large",
 )
@@ -205,7 +202,7 @@ def main() -> int:
             print(f"{now()}  runs/STOP found, stopping"); break
         head = read_header(config)
         task, model = head["task"], head["model"]
-        venv = ".venv-zoe" if model in ZOE_VENV_MODELS else ".venv"
+        venv = ".venv-zoe" if model in TIMM_0612_MODELS else ".venv"
         batch = head.get("batch_size", 1)
         accum = head.get("grad_accum", 1)
         effective = batch * accum  # the grid's effective batch, preserved across halvings
@@ -263,7 +260,7 @@ def main() -> int:
         if config.stem not in done:
             continue
         head = read_header(config)
-        venv = ".venv-zoe" if head["model"] in ZOE_VENV_MODELS else ".venv"
+        venv = ".venv-zoe" if head["model"] in TIMM_0612_MODELS else ".venv"
         flags = list(VALIDATION_FLAGS.get(head["task"], VALIDATION_FLAGS["default"]))
         if head["model"] in SHADOW_INIT:
             flags += ["--set", f"shadow.init_weights={SHADOW_INIT[head['model']]}"]

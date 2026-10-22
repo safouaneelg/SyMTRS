@@ -1,5 +1,5 @@
 """Download the heavy weight FILES directly (no model build), so they reach the disk even for
-models whose build is still broken in this environment (DA3 image processor, ZoeDepth venv).
+models whose build is still broken in this environment (DA3 image processor).
 Idempotent: a file already complete is skipped. Same cache layout as prefetch_weights.py."""
 import os, sys, urllib.request
 from pathlib import Path
@@ -9,9 +9,6 @@ CK = ROOT / ".cache" / "torch" / "hub" / "checkpoints"
 os.environ.setdefault("HF_HOME", str(ROOT / ".cache" / "huggingface"))
 
 URLS = {
-    "ZoeD_M12_N.pt": "https://github.com/isl-org/ZoeDepth/releases/download/v1.0/ZoeD_M12_N.pt",
-    "ZoeD_M12_K.pt": "https://github.com/isl-org/ZoeDepth/releases/download/v1.0/ZoeD_M12_K.pt",
-    "ZoeD_M12_NK.pt": "https://github.com/isl-org/ZoeDepth/releases/download/v1.0/ZoeD_M12_NK.pt",
     "deeplabv3_resnet101_coco-586e9e4e.pth": "https://download.pytorch.org/models/deeplabv3_resnet101_coco-586e9e4e.pth",
 }
 

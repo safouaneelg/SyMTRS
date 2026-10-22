@@ -115,7 +115,9 @@ def _configs() -> list[Path]:
 
 
 def test_the_grid_is_not_empty() -> None:
-    assert len(_configs()) >= 88
+    # 80 generated files (7 depth, 6 segmentation, 4 SR x 4 levels; 8 domain; 4 shadow) since
+    # ZoeDepth's 12 and Depth Pro's 4 were removed on 2026-10-22, plus the quick-start.
+    assert len(_configs()) >= 80
 
 
 @pytest.mark.parametrize("path", _configs(), ids=lambda p: str(p.relative_to(REPO_ROOT)))
@@ -186,8 +188,8 @@ def test_depth_protocol_is_consistent_down_each_row() -> None:
     The expected pair comes from `symtrs.registry.depth_pairing`, not from a table in this
     test, so the generator (which keeps its own copy because it cannot import the package),
     the registry and the committed YAMLs are all held to one statement. MiDaS emits
-    disparity `s / z + t`, so it needs a disparity-space scale-and-shift fit; ZoeD-N and DA3
-    emit depth, so a scale is enough; metric models take none.
+    disparity `s / z + t`, so it needs a disparity-space scale-and-shift fit; DA3 relative
+    emits depth, so a scale is enough; metric models take none.
     """
     from symtrs.registry import depth_pairing
 
@@ -221,18 +223,13 @@ def test_midas_is_aligned_in_disparity_space_at_every_resolution() -> None:
         assert (raw["train"]["loss"] == "ssi") == is_midas, path.name
 
 
-def test_da3_metric_configs_state_the_camera_and_zoed_k_states_its_depth_range() -> None:
-    """DA3-metric needs the camera's field of view to give metres; ZoeD-K needs a ceiling that
-    covers the data (its bins stop at max_depth). Both are written into the generated files."""
+def test_da3_metric_configs_state_the_camera() -> None:
+    """DA3-metric needs the camera's field of view to give metres; it is written into the
+    generated files."""
     for resolution in (2048, 1024, 512, 256):
         base = REPO_ROOT / "configs" / "depth" / str(resolution)
         da3 = yaml.safe_load((base / f"da3_metric_large_{resolution}.yaml").read_text(encoding="utf-8"))
         assert da3["data"]["camera_hfov_deg"] == 60.0, resolution
-        zoe = yaml.safe_load((base / f"zoedepth_k_{resolution}.yaml").read_text(encoding="utf-8"))
-        assert zoe["model_kwargs"]["max_depth"] == 300.0, resolution
-        assert "max_depth" not in yaml.safe_load(
-            (base / f"zoedepth_nk_{resolution}.yaml").read_text(encoding="utf-8")
-        ).get("model_kwargs", {}), "NK has an unbounded head; max_depth would be refused"
 
 
 def test_segmentation_always_states_the_class_count_and_ignore_index() -> None:
