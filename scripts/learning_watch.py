@@ -64,6 +64,10 @@ def _non_finite(run: Path) -> int:
     count = 0
     for log in (REPO / "logs").glob(f"*{run.name}*.log"):
         text = log.read_text(encoding="utf-8", errors="replace")
+        # Only the newest launch: the queue appends every restart to the same log under a
+        # "=== <time> <command>" header, and a crashed earlier attempt's warnings (7074 from
+        # the float16 MiDaS run) must not flag the run that replaced it.
+        text = text.rsplit("\n=== ", 1)[-1]
         # Only this run's section of a shared group log: the lines that name it.
         count += sum(1 for line in text.splitlines()
                      if "non-finite" in line and (f"[{run.name.rsplit('_', 1)[0]}]" in line
