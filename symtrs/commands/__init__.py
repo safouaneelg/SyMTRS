@@ -15,6 +15,7 @@ from typing import Dict
 #: is roughly the order you would use them in.
 COMMANDS: Dict[str, str] = {
     "train": "symtrs.commands.train",
+    "train-group": "symtrs.commands.train_group",
     "eval": "symtrs.commands.evaluate",
     "infer": "symtrs.commands.infer",
     "sweep": "symtrs.commands.sweep",

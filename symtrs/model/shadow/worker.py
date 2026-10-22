@@ -24,8 +24,11 @@ import argparse
 import importlib.util
 import json
 import math
+import sys
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from collections import OrderedDict
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -55,7 +58,19 @@ def build_network(cfg: RunConfig) -> Tuple[torch.nn.Module, Arch]:
         f"symtrs_upstream_{arch.repo.lower()}", arch.source_path
     )
     module = importlib.util.module_from_spec(module_spec)
-    module_spec.loader.exec_module(module)
+    try:
+        module_spec.loader.exec_module(module)
+    except ModuleNotFoundError as exc:
+        # The upstream modules import their own dependencies at module level (ShadowFormer
+        # does `import scipy.misc`; all three transformer classes import `einops`). Without
+        # the extra, the class cannot even be constructed: name the install command instead
+        # of letting a bare ModuleNotFoundError escape from inside third_party/.
+        raise ModuleNotFoundError(
+            f"the {arch.repo} module needs `{exc.name}`, which is not installed in "
+            f"{sys.executable}. Install the upstream extras with "
+            f"`pip install -e '.[shadow]'` (scipy, einops, natsort, scikit-image, h5py).\n"
+            f"  original error: {exc}"
+        ) from exc
 
     kwargs: Dict[str, Any] = dict(arch.kwargs)
     kwargs.update(cfg.model_kwargs.get("arch_kwargs", {}) or {})
@@ -126,37 +141,94 @@ def read_mask(path: Path) -> np.ndarray:
 
 
 class Store:
-    """A split held in RAM as uint8 arrays: `{key: (input, target, mask)}`.
+    """A split read on demand, behind a bounded cache and a prefetch pool.
 
-    PNG decoding of three 2048 px images costs about a second, which would dominate a
-    crop-based iteration; 96 training triples are ~3 GB, loaded once by a thread pool
-    (PIL decodes without holding the GIL).
+    This used to decode the whole split into RAM. That was fine for the 96-image preview
+    dataset (~3 GB) and impossible for the real one: 14 000 pairs of 2048 px images are
+    ~400 GB, and the machine would have been killed before the first iteration. Images are
+    now decoded when the batch that needs them is scheduled and kept in a small LRU
+    (`cache_images`; ~25 MB each at 2048). `prefetch` starts the next batch's decodes while
+    the GPU is busy with the current one, so a random crop costs no PNG decode on the
+    critical path - which is the reason the whole split was preloaded in the first place.
     """
 
-    def __init__(self, staging: Path, limit: int = 0) -> None:
+    def __init__(self, staging: Path, limit: int = 0, cache_images: int = 128,
+                 workers: int = 8) -> None:
+        self.staging = staging
         self.keys = staged_keys(staging)
         if limit:
             self.keys = self.keys[:limit]
         if not self.keys:
             raise RuntimeError(f"nothing staged in {staging}")
-
-        def load(key: str):
-            return (
-                read_rgb(staging / "input" / f"{key}.png"),
-                read_rgb(staging / "target" / f"{key}.png"),
-                read_mask(staging / "mask" / f"{key}.png"),
-            )
-
-        started = time.time()
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            self.items = list(pool.map(load, self.keys))
-        print(f"[symtrs] loaded {len(self.keys)} images from {staging} in {time.time() - started:.0f}s")
+        self.cache_images = max(1, int(cache_images))
+        self.cache: "OrderedDict[int, tuple]" = OrderedDict()
+        self.pending: Dict[int, "Future[tuple]"] = {}
+        self.sizes: Dict[int, Tuple[int, int]] = {}
+        self.lock = threading.Lock()
+        self.pool = ThreadPoolExecutor(max_workers=max(1, int(workers)))
+        print(f"[symtrs] {len(self.keys)} images staged in {staging} (cache {self.cache_images})")
 
     def __len__(self) -> int:
         return len(self.keys)
 
+    def _path(self, index: int, role: str) -> Path:
+        return self.staging / role / f"{self.keys[index]}.png"
+
+    def _load(self, index: int):
+        from PIL import Image
+
+        item = (
+            read_rgb(self._path(index, "input")),
+            read_rgb(self._path(index, "target")),
+            read_mask(self._path(index, "mask")),
+        )
+        with Image.open(self._path(index, "input")) as handle:
+            self.sizes[index] = handle.size  # (width, height)
+        return item
+
+    def _remember(self, index: int, item: tuple) -> None:
+        with self.lock:
+            self.cache[index] = item
+            self.cache.move_to_end(index)
+            while len(self.cache) > self.cache_images:
+                self.cache.popitem(last=False)
+
+    def prefetch(self, indices: List[int]) -> None:
+        """Start decoding `indices` in the pool; a no-op for what is already there."""
+        for index in indices:
+            with self.lock:
+                if index in self.cache or index in self.pending:
+                    continue
+                self.pending[index] = self.pool.submit(self._load, index)
+
+    def get(self, index: int) -> tuple:
+        with self.lock:
+            future = self.pending.pop(index, None)
+            item = self.cache.get(index)
+            if item is not None:
+                self.cache.move_to_end(index)
+        if future is not None:
+            item = future.result()
+            self._remember(index, item)
+            return item
+        if item is None:
+            item = self._load(index)
+            self._remember(index, item)
+        return item
+
+    def shape(self, index: int) -> Tuple[int, int]:
+        """`(height, width)` without decoding; only the PNG header is read."""
+        if index not in self.sizes:
+            from PIL import Image
+
+            with Image.open(self._path(index, "input")) as handle:
+                width, height = handle.size
+            self.sizes[index] = (width, height)
+        width, height = self.sizes[index]
+        return height, width
+
     def crop(self, index: int, top: int, left: int, size: int):
-        image, target, mask = self.items[index]
+        image, target, mask = self.get(index)
         sl = (slice(top, top + size), slice(left, left + size))
         return image[sl], target[sl], mask[sl]
 
@@ -179,11 +251,10 @@ def augment(arrays: Tuple[np.ndarray, ...], rng: np.random.Generator) -> Tuple[n
     return tuple(out)
 
 
-def sample_batch(store: Store, size: int, batch: int, order: List[int], rng, device):
+def sample_batch(store: Store, size: int, indices: List[int], rng, device):
     images, targets, masks = [], [], []
-    for _ in range(batch):
-        index = order.pop()
-        h, w = store.items[index][0].shape[:2]
+    for index in indices:
+        h, w = store.shape(index)
         top = int(rng.integers(0, h - size + 1))
         left = int(rng.integers(0, w - size + 1))
         i, t, m = augment(store.crop(index, top, left, size), rng)
@@ -275,8 +346,13 @@ def train(cfg: RunConfig) -> None:
         weight_decay=cfg.train.weight_decay,
     )
 
-    train_store = Store(run_dir / "staging" / cfg.data.split, cfg.data.max_samples)
-    val_store = Store(run_dir / "staging" / cfg.data.val_split, cfg.data.max_samples)
+    train_store = Store(
+        run_dir / "staging" / cfg.data.split, cfg.data.max_samples, cfg.shadow.cache_images
+    )
+    val_store = Store(
+        run_dir / "staging" / cfg.data.val_split, cfg.data.max_samples,
+        min(cfg.shadow.cache_images, max(2, cfg.shadow.val_crops)),
+    )
     batch = cfg.train.batch_size
     size = cfg.train.patch_size
     per_epoch = math.ceil(len(train_store) / batch)
@@ -289,7 +365,7 @@ def train(cfg: RunConfig) -> None:
     crops = []
     for _ in range(cfg.shadow.val_crops):
         index = int(val_rng.integers(len(val_store)))
-        h, w = val_store.items[index][0].shape[:2]
+        h, w = val_store.shape(index)
         crops.append((index, int(val_rng.integers(0, h - size + 1)), int(val_rng.integers(0, w - size + 1)), size))
 
     start = 0
@@ -311,17 +387,27 @@ def train(cfg: RunConfig) -> None:
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats()
     order: List[int] = []
+
+    def next_batch() -> List[int]:
+        nonlocal order
+        if len(order) < batch:
+            order = list(rng.permutation(len(train_store))) + order
+        return [order.pop() for _ in range(batch)]
+
     loss_sum, loss_n, window_start = 0.0, 0, time.time()
     train_started = time.time()
     timed_seconds, timed_iterations = 0.0, 0
 
+    # The batch for this iteration is decoded before the loop; every pass then schedules the
+    # next one, so its PNG decodes run in the pool while the GPU works on the current batch.
+    indices = next_batch()
+    train_store.prefetch(indices)
+
     for iteration in range(start, total):
         for group in optimizer.param_groups:
             group["lr"] = cfg.train.lr * schedule(iteration, total, warmup, cfg.train.min_lr_ratio)
-        if len(order) < batch:
-            order = list(rng.permutation(len(train_store))) + order
         step_started = time.time()
-        images, targets, masks = sample_batch(train_store, size, batch, order, rng, device)
+        images, targets, masks = sample_batch(train_store, size, indices, rng, device)
         with amp_context(cfg, device):
             prediction = forward(net, arch, images, masks)
         loss = charbonnier(prediction.float().clamp(0, 1), targets)
@@ -332,6 +418,8 @@ def train(cfg: RunConfig) -> None:
         optimizer.step()
         loss_sum += float(loss)  # also synchronises, so the timing below is real
         loss_n += 1
+        indices = next_batch()
+        train_store.prefetch(indices)
         if iteration - start >= 2:  # the first iterations include cudnn/kernel warm-up
             timed_seconds += time.time() - step_started
             timed_iterations += 1
@@ -415,7 +503,9 @@ def predict(cfg: RunConfig, splits: List[str], weights: str) -> None:
             mask = torch.from_numpy(read_mask(staging / "mask" / f"{key}.png")).to(device)
             packed = torch.cat([image.permute(2, 0, 1).float() / 255.0, mask[None].float()], dim=0)[None]
             with torch.no_grad():
-                restored = predict_tiled(packed, tile_forward, tile, overlap)
+                restored = predict_tiled(
+                    packed, tile_forward, tile, overlap, tile_batch=cfg.eval.tile_batch
+                )
             array = (restored[0].clamp(0, 1).permute(1, 2, 0).cpu().numpy() * 255.0).round().astype(np.uint8)
             Image.fromarray(array).save(out / f"{key}.png")
             if n % 5 == 0 or n == len(keys):

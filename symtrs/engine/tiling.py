@@ -24,7 +24,7 @@ plain blend of them is neither tile's answer. Which map depends on the output sp
 error the final per-image alignment cannot remove:
 
   * disparity (MiDaS: `s / z + t`) is ambiguous in scale AND shift -> `match="affine"`;
-  * depth up to a scale (ZoeD-N scored relative, DA3 relative) is ambiguous in scale only ->
+  * depth up to a scale (DA3 relative) is ambiguous in scale only ->
     `match="scale"`. A fitted shift there would add an offset that the final `scale` alignment
     (no shift) cannot remove;
   * metric depth and logits are absolute -> `match="none"`; matching them would only add noise.
@@ -195,6 +195,25 @@ def fit_overlap(
     return clamped, mean_reference - clamped * mean_source, clamped != slope
 
 
+def _forward_windows(single: torch.Tensor, boxes: Sequence[Box], forward_fn, tile_batch: int):
+    """Predict a chunk of windows, returning one prediction per window in `boxes`.
+
+    `tile_batch > 1` stacks windows only when they share a size; the last window of an
+    image smaller than one tile has a different one, and it falls back to its own call
+    rather than being padded (padding would put made-up pixels through the network).
+    """
+    tiles = [single[..., top : top + h, left : left + w] for top, left, h, w in boxes]
+    if tile_batch <= 1 or len(boxes) == 1 or len({tuple(t.shape[-2:]) for t in tiles}) != 1:
+        return [forward_fn(tile) for tile in tiles]
+    prediction = forward_fn(torch.cat(tiles, dim=0))
+    if prediction.shape[0] != len(boxes):
+        raise ValueError(
+            f"forward_fn returned {prediction.shape[0]} predictions for a batch of "
+            f"{len(boxes)} windows; it must keep the batch dimension"
+        )
+    return [prediction[index : index + 1] for index in range(len(boxes))]
+
+
 @torch.no_grad()
 def predict_tiled(
     image: torch.Tensor,
@@ -205,6 +224,7 @@ def predict_tiled(
     match: str = "none",
     stats: Optional[Dict[str, int]] = None,
     scale: int = 1,
+    tile_batch: int = 1,
 ) -> torch.Tensor:
     """Run `forward_fn` over overlapping windows and stitch the results.
 
@@ -229,6 +249,15 @@ def predict_tiled(
             `[1, K, scale * h, scale * w]`, and the stitched field is `scale * H` by `scale * W`.
             A window whose answer has any other size is refused rather than resized, because
             stretching it would blend a misregistered tile into its neighbours.
+        tile_batch: how many windows `forward_fn` is given at once. 1 keeps the original
+            one-window-at-a-time call. A window is a 384px tile on a 2048px image: one at a
+            time the network spends most of its time on kernel launches and the evaluation
+            of a whole split becomes the largest cost of a run (40 min/epoch against 11 min
+            of training at depth/2048). Stacking windows is safe because the stitching below
+            is still strictly sequential - each window is fitted against the field stitched
+            so far - so the result does not depend on this number beyond the last bits of
+            the kernels. Windows are only ever stacked when they have the same size, which
+            is every window but those of an image smaller than one tile.
 
     Returns:
         `[B, K, scale * H, scale * W]` in whatever space `forward_fn` produces.
@@ -243,6 +272,8 @@ def predict_tiled(
         raise ValueError(f"unknown match mode {match!r}; expected one of {MATCH_MODES}")
     if scale < 1:
         raise ValueError("scale must be a positive integer")
+    if tile_batch < 1:
+        raise ValueError("tile_batch must be at least 1")
     if stats is None:
         stats = {}
     for key in ("windows", "matched", "fallbacks", "unmatched"):
@@ -256,50 +287,54 @@ def predict_tiled(
         accumulator = None
         weights = None
 
-        for in_top, in_left, tile_h, tile_w in tile_grid(height, width, tile_size, overlap):
-            tile = single[..., in_top : in_top + tile_h, in_left : in_left + tile_w]
-            prediction = forward_fn(tile)
-            if prediction.dim() == 3:
-                prediction = prediction.unsqueeze(1)
-            # Everything below is in OUTPUT pixels (identical to input pixels when scale == 1).
-            top, left, tile_h, tile_w = in_top * scale, in_left * scale, tile_h * scale, tile_w * scale
-            if scale > 1 and tuple(prediction.shape[-2:]) != (tile_h, tile_w):
-                raise ValueError(
-                    f"forward_fn returned {tuple(prediction.shape[-2:])} for a window that should "
-                    f"come back as {(tile_h, tile_w)} (scale {scale}); an upscaling network must "
-                    "return exactly scale x its input, so fix forward_fn instead of resizing"
+        boxes = tile_grid(height, width, tile_size, overlap)
+        for start in range(0, len(boxes), tile_batch):
+            chunk = boxes[start : start + tile_batch]
+            chunk_predictions = _forward_windows(single, chunk, forward_fn, tile_batch)
+            for (in_top, in_left, tile_h, tile_w), prediction in zip(chunk, chunk_predictions):
+                if prediction.dim() == 3:
+                    prediction = prediction.unsqueeze(1)
+                # Everything below is in OUTPUT pixels (identical to input pixels when scale == 1).
+                top, left, tile_h, tile_w = (
+                    in_top * scale, in_left * scale, tile_h * scale, tile_w * scale
                 )
-            prediction = _resize(prediction, (tile_h, tile_w)).float()
-
-            if accumulator is None:
-                channels = prediction.shape[1]
-                accumulator = torch.zeros(
-                    (1, channels, out_height, out_width),
-                    device=prediction.device, dtype=prediction.dtype,
-                )
-                weights = torch.zeros(
-                    (1, 1, out_height, out_width), device=prediction.device, dtype=prediction.dtype
-                )
-
-            window = hann_window(tile_h, tile_w, device=prediction.device, dtype=prediction.dtype)
-            stats["windows"] += 1
-            if match != "none" and prediction.shape[1] == 1:
-                region = (..., slice(top, top + tile_h), slice(left, left + tile_w))
-                seen = weights[region]
-                shared = (seen > 0)[0, 0]
-                if bool(shared.any()):
-                    reference = (accumulator[region] / seen.clamp_min(1e-6))[0, 0][shared]
-                    fit = fit_overlap(
-                        prediction[0, 0][shared], reference, (seen[0, 0] * window)[shared], match
+                if scale > 1 and tuple(prediction.shape[-2:]) != (tile_h, tile_w):
+                    raise ValueError(
+                        f"forward_fn returned {tuple(prediction.shape[-2:])} for a window that should "
+                        f"come back as {(tile_h, tile_w)} (scale {scale}); an upscaling network must "
+                        "return exactly scale x its input, so fix forward_fn instead of resizing"
                     )
-                    if fit is None:
-                        stats["unmatched"] += 1
-                    else:
-                        stats["matched"] += 1
-                        stats["fallbacks"] += int(fit[2])
-                        prediction = prediction * fit[0] + fit[1]
-            accumulator[..., top : top + tile_h, left : left + tile_w] += prediction * window
-            weights[..., top : top + tile_h, left : left + tile_w] += window
+                prediction = _resize(prediction, (tile_h, tile_w)).float()
+
+                if accumulator is None:
+                    channels = prediction.shape[1]
+                    accumulator = torch.zeros(
+                        (1, channels, out_height, out_width),
+                        device=prediction.device, dtype=prediction.dtype,
+                    )
+                    weights = torch.zeros(
+                        (1, 1, out_height, out_width), device=prediction.device, dtype=prediction.dtype
+                    )
+
+                window = hann_window(tile_h, tile_w, device=prediction.device, dtype=prediction.dtype)
+                stats["windows"] += 1
+                if match != "none" and prediction.shape[1] == 1:
+                    region = (..., slice(top, top + tile_h), slice(left, left + tile_w))
+                    seen = weights[region]
+                    shared = (seen > 0)[0, 0]
+                    if bool(shared.any()):
+                        reference = (accumulator[region] / seen.clamp_min(1e-6))[0, 0][shared]
+                        fit = fit_overlap(
+                            prediction[0, 0][shared], reference, (seen[0, 0] * window)[shared], match
+                        )
+                        if fit is None:
+                            stats["unmatched"] += 1
+                        else:
+                            stats["matched"] += 1
+                            stats["fallbacks"] += int(fit[2])
+                            prediction = prediction * fit[0] + fit[1]
+                accumulator[..., top : top + tile_h, left : left + tile_w] += prediction * window
+                weights[..., top : top + tile_h, left : left + tile_w] += window
 
         outputs.append((accumulator / weights.clamp_min(1e-6)).to(image.dtype))
 

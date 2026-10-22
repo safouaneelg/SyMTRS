@@ -9,7 +9,7 @@ also the only part of the engine that a test can exercise with a stub model.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -68,7 +68,12 @@ def prepare_input(model, image: torch.Tensor) -> torch.Tensor:
 
 
 def forward_native(
-    model, image: torch.Tensor, tile_size: int = 0, tile_overlap: int = 0, stats=None
+    model,
+    image: torch.Tensor,
+    tile_size: int = 0,
+    tile_overlap: int = 0,
+    stats=None,
+    tile_batch: int = 1,
 ) -> torch.Tensor:
     """Raw prediction for a whole batch, at the input's spatial size.
 
@@ -100,7 +105,8 @@ def forward_native(
             return _restore_size(model, model.forward(prepare_input(model, tile)), tile)
 
         stitched = predict_tiled(
-            image, forward_fn, tile_size, tile_overlap, match=match_mode(model), stats=stats
+            image, forward_fn, tile_size, tile_overlap, match=match_mode(model), stats=stats,
+            tile_batch=tile_batch,
         )
         return _resize(stitched, image.shape[-2:])
 
@@ -197,6 +203,204 @@ def _training_step(model, batch: Mapping[str, Any], device: torch.device, task: 
     raise ValueError(f"task {task!r} has no training step; it is not a supervised task")
 
 
+class Trainee:
+    """One model's optimiser state inside a training pass.
+
+    `train_one_epoch` drives exactly one; `train_one_epoch_many` drives several over the
+    *same* batch. That is how a co-trained group pays for a 2048px sample once: decoding a
+    2048 PNG + EXR is 0.21 s of CPU, while one forward+backward of the cheapest depth model
+    at a 384 crop is 0.15 s of GPU on an A6000, so several models can consume the same
+    decoded batch before the GPU catches up with the loader. The model's own loss,
+    optimiser, scaler and scheduler stay private to it.
+    """
+
+    def __init__(self, model, optimizer, scaler, cfg: RunConfig, label: str = "", scheduler=None,
+                 windows_per_batch: int = 1):
+        self.model = model
+        self.optimizer = optimizer
+        self.scaler = scaler
+        self.scheduler = scheduler
+        self.cfg = cfg
+        self.label = label
+        self.tracker = MetricTracker()
+        self.accumulation = max(1, int(cfg.train.grad_accum))
+        # How many of this member's optimiser windows one shared batch holds. 1 for every
+        # member whose effective batch is the group's; 2 for a member whose effective batch
+        # is half of it (DeepLabV3 beside SegFormer), which then steps twice per shared batch.
+        self.windows_per_batch = max(1, int(windows_per_batch))
+        self.optimizer.zero_grad(set_to_none=True)
+
+    @property
+    def prefix(self) -> str:
+        return f"[{self.label}] " if self.label else ""
+
+    def split(self, batch: Mapping[str, Any]) -> Tuple[Tuple[Mapping[str, Any], bool], ...]:
+        """Cut one shared batch into this member's micro-batches, each with "closes a window".
+
+        Only a co-trained group calls this. The group's loader is built at the *largest*
+        effective batch among its members (`batch_size * grad_accum`), so one shared batch is
+        `windows_per_batch` whole accumulation windows for this member. It is cut into those
+        windows first, in order, and each window into the member's `grad_accum`
+        micro-batches; the last micro-batch of each window carries True, and that is where
+        the optimiser steps. A member asking for 4 images over 2 accumulation steps in a group
+        whose window is 16 therefore takes two 8-sample windows, four 4-image forwards and two
+        optimiser steps per shared batch - the samples per step its config describes, and the
+        whole shared batch is consumed exactly once.
+
+        The cuts are as even as the batch allows, so a short last batch still yields the
+        member's full number of windows and micro-batches rather than a ragged one.
+        """
+        out: List[Tuple[Mapping[str, Any], bool]] = []
+        for window in _even_cuts(batch, self.windows_per_batch):
+            micro = _even_cuts(window, self.accumulation)
+            out.extend((chunk, index == len(micro) - 1) for index, chunk in enumerate(micro))
+        return tuple(out)
+
+    def step(self, batch: Mapping[str, Any], device: torch.device, epoch: int, step: int,
+             batch_count: int, close_window: Optional[bool] = None, log: bool = True) -> None:
+        """One forward+backward on `batch`, and an optimiser step when the window closes.
+
+        `close_window` is for the group driver: there, `step` counts *shared* batches, one
+        of which is already a whole accumulation window for this member, so the window is
+        closed explicitly rather than inferred from the step index. `log=False` suppresses
+        the progress line for a micro-batch in the middle of a window, which would otherwise
+        print the same step number once per micro-batch.
+        """
+        cfg = self.cfg
+        with autocast_context(device, cfg.train.amp):
+            loss, components = _training_step(self.model, batch, device, cfg.task)
+            # Divide before backward so the accumulated gradient is a mean over the
+            # accumulation window rather than a sum that grows with it.
+            scaled_loss = loss / self.accumulation
+
+        if not torch.isfinite(scaled_loss):
+            # A non-finite loss means NaN weights if it is allowed to backpropagate,
+            # and NaN weights never recover. Skip the step and say so loudly.
+            print(f"[symtrs] {self.prefix}warning: non-finite loss at epoch {epoch} step {step}; "
+                  "skipping batch")
+            self.optimizer.zero_grad(set_to_none=True)
+            return
+
+        if self.scaler is not None and self.scaler.is_enabled():
+            self.scaler.scale(scaled_loss).backward()
+        else:
+            scaled_loss.backward()
+
+        batch_size = int(batch["image"].shape[0])
+        self.tracker.update("loss", float(loss.detach()), n=batch_size)
+        self.tracker.update_many(components, n=batch_size)
+
+        # A group passes `close_window` explicitly and it is the only signal: `step` counts
+        # *shared* batches there, so the solo rule below fired on every odd shared batch for a
+        # 2-way-accumulating member and stepped its optimiser (and schedule) mid-window - six
+        # steps for four windows. None is the solo shape, where the index decides.
+        if close_window is None:
+            close_window = (step + 1) % self.accumulation == 0 or (step + 1) == batch_count
+        if close_window:
+            if cfg.train.grad_clip and cfg.train.grad_clip > 0:
+                if self.scaler is not None and self.scaler.is_enabled():
+                    self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(
+                    [p for p in self.model.parameters() if p.requires_grad], cfg.train.grad_clip
+                )
+            if self.scaler is not None and self.scaler.is_enabled():
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                self.optimizer.step()
+            self.optimizer.zero_grad(set_to_none=True)
+            if self.scheduler is not None:
+                self.scheduler.step()
+
+        if log and cfg.train.log_every and (step + 1) % cfg.train.log_every == 0:
+            print(
+                f"[symtrs] {self.prefix}epoch {epoch} step {step + 1}/{batch_count} "
+                f"loss={self.tracker.get('loss'):.4f}"
+            )
+
+
+def _even_cuts(batch: Mapping[str, Any], parts: int) -> List[Mapping[str, Any]]:
+    """`batch` cut into `parts` consecutive, near-equal pieces (fewer if it is smaller)."""
+    size = int(batch["image"].shape[0])
+    if parts <= 1 or size <= 1:
+        return [batch]
+    parts = min(parts, size)
+    base, extra = divmod(size, parts)
+    out: List[Mapping[str, Any]] = []
+    start = 0
+    for index in range(parts):
+        stop = start + base + (1 if index < extra else 0)
+        out.append(_slice_batch(batch, start, stop, size))
+        start = stop
+    return out
+
+
+def _slice_batch(batch: Mapping[str, Any], start: int, stop: int, size: int) -> Dict[str, Any]:
+    """`batch` restricted to samples `[start, stop)`.
+
+    Tensors are cut on the batch axis. The datasets also carry per-sample metadata as a
+    list of strings (`image_path`, `depth_path`, ...); a list is cut only when its length is
+    the batch size, so a scalar-ish field is passed through untouched. Nothing in a training
+    step reads those paths, but a member must still see its own samples' if anything later
+    does.
+    """
+    out: Dict[str, Any] = {}
+    for key, value in batch.items():
+        if torch.is_tensor(value):
+            out[key] = value[start:stop]
+        elif isinstance(value, (list, tuple)) and len(value) == size:
+            out[key] = list(value[start:stop])
+        else:
+            out[key] = value
+    return out
+
+
+def train_one_epoch_many(
+    trainees: List[Trainee],
+    loader,
+    device: torch.device,
+    epoch: int = 0,
+    max_steps: int = 0,
+    windows: bool = False,
+) -> List[Dict[str, float]]:
+    """One pass over `loader`, stepping every trainee on every batch.
+
+    The loader is read once. Each trainee sees exactly the same images, crops and flips
+    (see `Trainee` for why that is the point), and returns its own averaged metrics. The
+    tensors are shared, so a model's preprocessing must not write into them in place; no
+    adapter does, and a new one must not.
+
+    `windows=True` is the co-trained group's shape: the loader yields the group's largest
+    accumulation window per batch (`batch_size * grad_accum`), and each trainee cuts that
+    into its own windows and micro-batches (`Trainee.split`), stepping its optimiser once
+    per window of its own. `windows=False` is the solo shape, where a loader batch *is* a
+    micro-batch and the optimiser steps every `grad_accum` of them. The arithmetic -
+    scaling, clipping, stepping, logging - is `Trainee.step` in both cases; only the
+    batching in front of it differs, because that is what the two loaders disagree about.
+    """
+    for trainee in trainees:
+        trainee.model.train()
+        # A trainee outlives the pass in a co-trained group (it carries the optimiser and
+        # scheduler across epochs), so the running averages are cleared here, not in the
+        # constructor: each epoch's row is that epoch's mean.
+        trainee.tracker.reset()
+
+    batch_count = len(loader)
+    for step, batch in enumerate(loader):
+        if max_steps and step >= max_steps:
+            break
+        for trainee in trainees:
+            if not windows:
+                trainee.step(batch, device, epoch, step, batch_count)
+                continue
+            pieces = trainee.split(batch)
+            last = len(pieces) - 1
+            for index, (chunk, closes) in enumerate(pieces):
+                trainee.step(chunk, device, epoch, step, batch_count,
+                             close_window=closes, log=index == last)
+    return [trainee.tracker.averages() for trainee in trainees]
+
+
 def train_one_epoch(
     model,
     loader,
@@ -219,60 +423,8 @@ def train_one_epoch(
     partial accumulation group, and for a step the loss-scaler skipped, which still
     advances the schedule so the epoch ends where `build_scheduler` expects.
     """
-    model.train()
-    tracker = MetricTracker()
-    accumulation = max(1, int(cfg.train.grad_accum))
-
-    optimizer.zero_grad(set_to_none=True)
-    for step, batch in enumerate(loader):
-        if max_steps and step >= max_steps:
-            break
-
-        with autocast_context(device, cfg.train.amp):
-            loss, components = _training_step(model, batch, device, cfg.task)
-            # Divide before backward so the accumulated gradient is a mean over the
-            # accumulation window rather than a sum that grows with it.
-            scaled_loss = loss / accumulation
-
-        if not torch.isfinite(scaled_loss):
-            # A non-finite loss means NaN weights if it is allowed to backpropagate,
-            # and NaN weights never recover. Skip the step and say so loudly.
-            print(f"[symtrs] warning: non-finite loss at epoch {epoch} step {step}; skipping batch")
-            optimizer.zero_grad(set_to_none=True)
-            continue
-
-        if scaler is not None and scaler.is_enabled():
-            scaler.scale(scaled_loss).backward()
-        else:
-            scaled_loss.backward()
-
-        batch_size = int(batch["image"].shape[0])
-        tracker.update("loss", float(loss.detach()), n=batch_size)
-        tracker.update_many(components, n=batch_size)
-
-        if (step + 1) % accumulation == 0 or (step + 1) == len(loader):
-            if cfg.train.grad_clip and cfg.train.grad_clip > 0:
-                if scaler is not None and scaler.is_enabled():
-                    scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(
-                    [p for p in model.parameters() if p.requires_grad], cfg.train.grad_clip
-                )
-            if scaler is not None and scaler.is_enabled():
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
-            if scheduler is not None:
-                scheduler.step()
-
-        if cfg.train.log_every and (step + 1) % cfg.train.log_every == 0:
-            print(
-                f"[symtrs] epoch {epoch} step {step + 1}/{len(loader)} "
-                f"loss={tracker.get('loss'):.4f}"
-            )
-
-    return tracker.averages()
+    trainee = Trainee(model, optimizer, scaler, cfg, scheduler=scheduler)
+    return train_one_epoch_many([trainee], loader, device, epoch, max_steps)[0]
 
 
 # ------------------------------------------------------------------ evaluation
@@ -324,7 +476,8 @@ def evaluate_depth(
 
         with autocast_context(device, cfg.eval.amp):
             prediction = forward_native(
-                model, image, cfg.eval.tile_size, cfg.eval.tile_overlap, stats=tile_stats
+                model, image, cfg.eval.tile_size, cfg.eval.tile_overlap, stats=tile_stats,
+                tile_batch=cfg.eval.tile_batch,
             )
             metres = model.to_metres(prediction)
 
@@ -422,7 +575,10 @@ def evaluate_segmentation(
         mask = batch["mask"].to(device, non_blocking=True)
 
         with autocast_context(device, cfg.eval.amp):
-            logits = forward_native(model, image, cfg.eval.tile_size, cfg.eval.tile_overlap)
+            logits = forward_native(
+                model, image, cfg.eval.tile_size, cfg.eval.tile_overlap,
+                tile_batch=cfg.eval.tile_batch,
+            )
             loss, _ = model.compute_loss(logits, mask)
 
         total_loss += float(loss.detach())

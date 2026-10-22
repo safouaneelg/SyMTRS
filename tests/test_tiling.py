@@ -340,3 +340,48 @@ def test_match_mode_follows_output_space():
     assert match_mode(Model("relative", "depth")) == "scale"
     assert match_mode(Model("metric", "depth")) == "none"
     assert match_mode(object()) == "none"
+
+
+# ------------------------------------------------------------------ window batching
+
+
+def test_window_batching_stitches_the_same_field_as_one_window_at_a_time():
+    """`eval.tile_batch` is a speed knob, not a protocol change. The stitching stays
+    sequential - each window is still fitted against the field placed so far - so the
+    only thing that may differ is the last bits of the kernels."""
+    image = torch.rand(1, 2, 400, 400)
+    one = predict_tiled(image, _pointwise, tile_size=128, overlap=32)
+    for tile_batch in (2, 5, 16):
+        many = predict_tiled(image, _pointwise, tile_size=128, overlap=32, tile_batch=tile_batch)
+        assert torch.allclose(one, many, atol=1e-6), tile_batch
+
+
+def test_window_batching_matches_relative_windows_in_the_same_order():
+    """The relative-depth fit is order-dependent by construction; batching must not
+    reorder it, or two windows fitted against different neighbours would move."""
+    field = _textured()
+    image, forward = _per_window_distortion(field, [1.0, 1.5, 0.8], [0.0, 0.1, -0.05])
+    stats_one: dict = {}
+    stats_many: dict = {}
+    one = predict_tiled(image, forward, 48, 24, match="affine", stats=stats_one)
+    many = predict_tiled(image, forward, 48, 24, match="affine", stats=stats_many, tile_batch=4)
+    assert torch.allclose(one, many, atol=1e-5)
+    assert stats_one == stats_many
+
+
+def test_window_batching_sends_batches_to_forward_and_keeps_the_batch_dimension():
+    image = torch.rand(1, 1, 300, 300)
+    sizes = []
+
+    def forward(tile):
+        sizes.append(int(tile.shape[0]))
+        return tile * tile
+
+    stitched = predict_tiled(image, forward, tile_size=128, overlap=32, tile_batch=4)
+    assert max(sizes) == 4 and sum(sizes) == len(tile_grid(300, 300, 128, 32))
+    assert torch.allclose(stitched, image * image, atol=1e-6)
+
+
+def test_window_batching_refuses_a_forward_that_drops_the_batch_dimension():
+    with pytest.raises(ValueError, match="batch dimension"):
+        predict_tiled(torch.rand(1, 1, 256, 256), lambda tile: tile[:1], 64, 16, tile_batch=4)

@@ -138,6 +138,11 @@ class TrainConfig:
     """How a run trains. Ignored entirely for zero-shot evaluation."""
 
     epochs: int = 20
+    # Score the validation split every N epochs (the last epoch is always scored). 1 keeps the
+    # original behaviour: one full validation pass per epoch. At 2048 a pass over the 3000
+    # validation images costs several times the epoch's training (49 windows each), so a long
+    # run scores every few epochs to pick `best.pt` and pays for one full pass at the end.
+    val_every: int = 1
     batch_size: int = 4
     lr: float = 1e-4
     weight_decay: float = 0.01
@@ -176,6 +181,8 @@ class TrainConfig:
             raise ConfigError("train.epochs must be at least 1")
         if self.batch_size < 1:
             raise ConfigError("train.batch_size must be at least 1")
+        if self.val_every < 1:
+            raise ConfigError("train.val_every must be at least 1 (1 = every epoch)")
         if self.lr <= 0:
             raise ConfigError("train.lr must be positive")
         if self.optim not in {"adamw", "adam", "sgd"}:
@@ -210,6 +217,11 @@ class EvalConfig:
     # Sliding-window inference for images that do not fit at full resolution.
     tile_size: int = 0  # 0 = whole image in one forward pass
     tile_overlap: int = 128
+    # How many windows go through the network in one call. 1 keeps the original behaviour;
+    # more turns the evaluation of a whole split from a kernel-launch-bound loop into a real
+    # batch (7 ms -> 2 ms per 384px window on an A6000). The stitching order is unchanged, so
+    # the number does not change what is measured beyond the last bits of the kernels.
+    tile_batch: int = 1
     # "" -> the model's own published alignment convention.
     align: str = ""
     num_visualizations: int = 4
@@ -221,6 +233,8 @@ class EvalConfig:
             raise ConfigError("eval.tile_size must be >= 0")
         if self.tile_size and self.tile_overlap >= self.tile_size:
             raise ConfigError("eval.tile_overlap must be smaller than eval.tile_size")
+        if self.tile_batch < 1:
+            raise ConfigError("eval.tile_batch must be at least 1")
 
 
 @dataclass
@@ -246,6 +260,10 @@ class ShadowConfig:
     # (full 2048 images are only run once, at the end). 0 validates only at the end.
     val_every: int = 250
     val_crops: int = 32
+    # Decoded training images kept in RAM (~25 MB each at 2048). The worker no longer decodes
+    # the whole split up front: 14 000 pairs are ~400 GB. A random crop at 320 px reads one
+    # image, so the cache only has to cover the images still in flight.
+    cache_images: int = 128
     # Optional upstream checkpoint to initialise from. "" trains from scratch. Only tensors
     # whose name and shape match are loaded, and the count is printed.
     init_weights: str = ""
@@ -273,6 +291,8 @@ class ShadowConfig:
             raise ConfigError(
                 "shadow.mask_open, iterations, val_every and val_crops must not be negative"
             )
+        if self.cache_images < 1:
+            raise ConfigError("shadow.cache_images must be at least 1")
 
 
 

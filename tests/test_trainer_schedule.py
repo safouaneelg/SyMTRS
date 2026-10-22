@@ -313,3 +313,44 @@ def test_a_checkpoint_from_the_per_epoch_scheduler_is_fast_forwarded_not_loaded(
     assert optimizer.param_groups[0]["lr"] == pytest.approx(
         scheduler.base_lrs[0] * scheduler.lr_lambdas[0](6)
     )
+
+
+# ----------------------------------------------------------- validation cadence
+
+
+def test_val_every_scores_the_scheduled_epochs_and_always_the_last(tmp_path, scripted):
+    """At 2048 a validation pass over the split costs several times the epoch's training.
+    `train.val_every` trades the frequency of the comparison for that time. It must not
+    trade the final number: the last epoch is always scored, so every run ends with a
+    validation of the weights it leaves behind."""
+    scripted.val = [0.4, 0.7, 0.2]
+    cfg = _cfg(tmp_path, epochs=5, batch_size=2, val_every=2)
+    summary = trainer.train(cfg, model=_TinySeg())
+
+    # epochs 1 and 3 are scored by the cadence, epoch 4 because it is the last one.
+    assert scripted.val == [], "exactly three validation passes were run"
+    assert summary["best"] == pytest.approx(0.7) and summary["best_epoch"] == 3
+    history = summary["history"]
+    assert len(history) == 5
+    assert "val_miou" in history[1] and "val_miou" in history[3] and "val_miou" in history[4]
+    assert "val_miou" not in history[0] and "val_miou" not in history[2]
+    assert "train_loss" in history[0], "a skipped epoch still records its training loss"
+    on_disk = json.loads((Path(summary["run_dir"]) / "summary.json").read_text(encoding="utf-8"))
+    assert on_disk["best_epoch"] == 3
+
+
+def test_val_every_of_one_is_the_original_one_pass_per_epoch(tmp_path, scripted):
+    scripted.val = [0.1, 0.2, 0.3]
+    cfg = _cfg(tmp_path, epochs=3, batch_size=2)
+    summary = trainer.train(cfg, model=_TinySeg())
+    assert scripted.val == []
+    assert [row["epoch"] for row in summary["history"]] == [0, 1, 2]
+    assert all("val_miou" in row for row in summary["history"])
+
+
+def test_val_every_must_be_at_least_one(tmp_path):
+    from symtrs.config import ConfigError
+
+    cfg = _cfg(tmp_path, epochs=2, batch_size=2, val_every=0)
+    with pytest.raises(ConfigError, match="val_every"):
+        cfg.validate()

@@ -136,14 +136,25 @@ def test_evaluation_crops_are_deterministic_centre_crops_and_training_crops_are_
 @requires_torch
 def test_val_and_test_share_one_evaluation_function_and_one_tiling_setting():
     """`evaluate` is one function for both splits and reads only `cfg.eval`; this pins that
-    there is no second code path where val could be tiled and test not."""
+    there is no second code path where val could be tiled and test not.
+
+    The two passes live in `_finish_epoch` and `_score_and_summarise` because co-training
+    added a second caller; both callers - the solo run and the group - have to go through
+    them, which is what the last assertion pins.
+    """
     import inspect
 
     from symtrs.engine import loop, trainer
 
-    source = inspect.getsource(trainer._run)
-    assert "evaluate(model, val_loader, cfg, resolved)" in source
-    assert "evaluate(\n        model, test_loader, cfg, resolved" in source.replace("\r\n", "\n")
+    val_source = inspect.getsource(trainer._finish_epoch)
+    test_source = inspect.getsource(trainer._score_and_summarise)
+    assert "evaluate(model, val_loader, cfg, resolved)" in val_source
+    assert "evaluate(\n        model, test_loader, cfg, resolved" in test_source.replace("\r\n", "\n")
+
+    group_source = inspect.getsource(trainer._run_group)
+    assert "_finish_epoch(" in group_source and "_score_and_summarise(" in group_source
+    assert "evaluate(" not in group_source, "a group must not grow its own val/test pass"
+
     assert inspect.getsource(loop.evaluate_depth).count("cfg.eval.tile_size") == 1
     assert inspect.getsource(loop.evaluate_segmentation).count("cfg.eval.tile_size") == 1
 
@@ -234,7 +245,7 @@ def test_absolute_outputs_are_not_matched_by_default():
 
 @requires_torch
 def test_forward_native_matches_tiles_by_output_space_not_by_protocol_alone():
-    """Disparity (MiDaS) is ambiguous in scale AND shift; depth up to a scale (ZoeD-N, DA3
+    """Disparity (MiDaS) is ambiguous in scale AND shift; depth up to a scale (DA3
     relative) in scale only - a fitted shift there is an offset the final `scale` alignment cannot
     remove; metric depth and logits are absolute and must never be matched."""
     import torch

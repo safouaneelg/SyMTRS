@@ -289,3 +289,54 @@ def test_shadowmaskformer_builds_with_about_2_3_million_parameters_and_runs_on_c
     with torch.no_grad():
         out = forward(net, arch, image, mask)
     assert out.shape == image.shape and torch.isfinite(out).all()
+
+
+def test_doctor_reports_the_vendored_imports_and_pyproject_installs_them() -> None:
+    """A shadow run that cannot import the upstream class must say which extra to install.
+
+    The three vendored classes import their own dependencies at module level (ShadowFormer
+    does `import scipy.misc`; all of them import `einops`), so a missing one stops
+    `build_network` before training starts. `symtrs doctor` has to name it, and the extra it
+    names has to be the one that installs it - the same contract as `adapt`.
+    """
+    import re
+    import sys
+
+    from symtrs.commands.doctor import OPTIONAL
+    from symtrs.model.shadow.archs import ARCHS, upstream_missing
+
+    if any(upstream_missing(key) for key in ARCHS):
+        pytest.skip("third_party checkouts absent (scripts/fetch_third_party.py)")
+
+    needed = set()
+    for arch in ARCHS.values():
+        for node in ast.parse(arch.source_path.read_text(encoding="utf-8")).body:
+            if isinstance(node, ast.Import):
+                needed.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                needed.add((node.module or "").split(".")[0])
+            elif isinstance(node, ast.Try):
+                for child in ast.walk(node):
+                    if isinstance(child, ast.Import):
+                        needed.update(alias.name.split(".")[0] for alias in child.names)
+                    elif isinstance(child, ast.ImportFrom) and child.level == 0:
+                        needed.add((child.module or "").split(".")[0])
+    local = {child.stem for arch in ARCHS.values() for child in arch.repo_path.iterdir()}
+    external = {
+        name for name in needed
+        if name and name not in sys.stdlib_module_names and name not in local
+    }
+    assert {"scipy", "einops"} <= external, "the vendored imports changed; re-read archs.py"
+
+    for name in external:
+        assert name in OPTIONAL, f"{name} is imported by a vendored shadow model but not reported by `symtrs doctor`"
+    # Only these two are `symtrs`' addition for this task; cv2/timm/numpy are reported
+    # under their own extras, which a shadow run needs anyway.
+    for name in ("scipy", "einops"):
+        assert OPTIONAL[name][1] == "shadow", f"{name} is reported under the wrong extra"
+
+    text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    extra = re.search(r"^shadow = \[(.*?)\]", text, re.MULTILINE | re.DOTALL)
+    assert extra, "pyproject.toml no longer declares the `shadow` extra"
+    for name in ("scipy", "einops"):
+        assert f'"{name}"' in extra.group(1)

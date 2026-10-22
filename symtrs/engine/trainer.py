@@ -39,7 +39,7 @@ from symtrs.common.ddp import (
 from symtrs.common.meters import MetricTracker
 from symtrs.common.seed import describe_device, resolve_device, set_seed
 from symtrs.common.table import append_csv_row
-from symtrs.config import MODES, RunConfig
+from symtrs.config import ConfigError, MODES, RunConfig
 
 #: `superresolution` is a real SyMTRS task, but its training loop is not this one. The
 #: architectures, the loading, the metrics and the loop all predate this package and now
@@ -320,6 +320,165 @@ def save_run(
 # ------------------------------------------------------------------------ the run
 
 
+def _finish_epoch(
+    cfg: RunConfig,
+    model,
+    optimizer,
+    scheduler,
+    run_dir: Path,
+    val_loader,
+    resolved: torch.device,
+    epoch: int,
+    train_metrics: Dict[str, float],
+    scored: bool,
+    best: Optional[float],
+    best_epoch: int,
+    history: List[Dict[str, Any]],
+    non_finite_epochs: List[int],
+    monitor: str,
+    direction: str,
+    elapsed: Optional[float] = None,
+    label: str = "",
+) -> tuple:
+    """Validate if scheduled, record the row, checkpoint. Returns `(best, best_epoch)`.
+
+    Shared by the single-model run and the co-trained group so that a group member is
+    scored, recorded and checkpointed by exactly the code that runs it alone.
+    """
+    from symtrs.engine.loop import evaluate, format_metrics
+
+    prefix = f"[{label}] " if label else ""
+    val_metrics = evaluate(model, val_loader, cfg, resolved) if scored else {}
+    lr = float(optimizer.param_groups[0]["lr"])
+
+    row: Dict[str, Any] = {"epoch": epoch, "lr": lr}
+    if elapsed is not None:
+        row["seconds"] = round(elapsed, 1)
+    row.update({f"train_{k}": v for k, v in train_metrics.items()})
+    row.update({f"val_{k}": v for k, v in val_metrics.items()})
+    history.append(row)
+    if is_main_process():
+        append_csv_row(str(run_dir / "metrics.csv"), row)
+
+    if is_main_process():
+        took = f" ({elapsed:.1f}s)" if elapsed is not None else ""
+        print(f"[symtrs] {prefix}epoch {epoch}{took} lr={lr:.2e}")
+        print(f"[symtrs]   {prefix}train {format_metrics(train_metrics)}")
+
+        improved = False
+        if scored:
+            print(f"[symtrs]   {prefix}val   {format_metrics(val_metrics)}")
+            value = float(val_metrics.get(monitor, float("nan")))
+            if not math.isfinite(value):
+                non_finite_epochs.append(epoch)
+                print(
+                    f"[symtrs]   {prefix}warning: val {monitor}={value} is not finite; "
+                    f"epoch {epoch} cannot be the best checkpoint (weights/last.pt is still written)"
+                )
+            improved = is_improvement(value, best, direction)
+            if improved:
+                best = value
+                best_epoch = epoch
+        else:
+            # The row still goes into metrics.csv and the history - without val keys -
+            # so the curve shows the training loss of every epoch.
+            print(f"[symtrs]   {prefix}val   skipped (train.val_every={cfg.train.val_every})")
+
+        # `best` and the history go into the payload *after* this epoch is decided, so
+        # that a resume from either checkpoint knows what it is up against.
+        state = _state(
+            model, optimizer, scheduler, epoch, val_metrics,
+            best=best, best_epoch=best_epoch, history=history,
+            non_finite_epochs=non_finite_epochs,
+        )
+        save_run(model, cfg, run_dir, state, "last", val_metrics)
+        if improved:
+            save_run(model, cfg, run_dir, state, "best", val_metrics)
+            print(f"[symtrs]   {prefix}new best {monitor}={value:.4f} -> weights/best.pt")
+
+        # Previews come from the validation split, so they follow the same cadence:
+        # they exist to show what the checkpoint being compared looks like.
+        if (
+            scored
+            and cfg.train.save_samples_every
+            and (epoch + 1) % cfg.train.save_samples_every == 0
+        ):
+            _save_previews(model, val_loader, cfg, resolved, run_dir, epoch)
+
+        _save_curves(history, run_dir)
+    return best, best_epoch
+
+
+def _score_and_summarise(
+    cfg: RunConfig,
+    model,
+    run_dir: Path,
+    test_loader,
+    resolved: torch.device,
+    mode: str,
+    best: Optional[float],
+    best_epoch: int,
+    history: List[Dict[str, Any]],
+    non_finite_epochs: List[int],
+    monitor: str,
+    extra_summary: Optional[Dict[str, Any]] = None,
+    label: str = "",
+) -> Dict[str, Any]:
+    """Score the test split with `best.pt` and write `summary.json`.
+
+    The test pass scores the checkpoint the summary reports as "best", not whatever the
+    last epoch left in memory: `best` and `test` sit side by side in summary.json, and the
+    other tasks (shadow removal) score best.pt, so a number from the last-epoch weights
+    made the protocols differ between tasks. Which weights were scored is recorded rather
+    than implied.
+    """
+    from symtrs.engine.loop import evaluate, format_metrics
+
+    test_weights = _load_test_weights(model, run_dir, mode, best, resolved)
+    test_metrics = evaluate(
+        model, test_loader, cfg, resolved,
+        align="",
+        num_visualizations=cfg.eval.num_visualizations,
+        vis_dir=str(run_dir / "preview"),
+        vis_prefix="test",
+    )
+
+    summary = {
+        "run_dir": str(run_dir),
+        "task": cfg.task,
+        "model": cfg.model,
+        "resolution": cfg.resolution,
+        "mode": mode,
+        "monitor": monitor,
+        "best": best,
+        "best_epoch": best_epoch,
+        "epochs": cfg.train.epochs if mode == "finetune" else 0,
+        "test_weights": test_weights,
+        "test": test_metrics,
+        "history": history,
+    }
+    if non_finite_epochs:
+        summary["non_finite_monitor_epochs"] = non_finite_epochs
+    if extra_summary:
+        summary.update(extra_summary)
+    if is_main_process():
+        prefix = f"[{label}] " if label else ""
+        print(f"[symtrs] {prefix}test {format_metrics(test_metrics)}")
+        # Non-finite floats are written as null: a bare NaN is not JSON, and one diverged
+        # run must not make the whole results directory unreadable by `jq` or a browser.
+        write_json(run_dir / "summary.json", summary)
+        if mode == "finetune" and best is not None:
+            print(f"[symtrs] {prefix}best {monitor}={best:.4f} at epoch {best_epoch}")
+        elif mode == "finetune":
+            print(
+                f"[symtrs] {prefix}no epoch produced a finite val {monitor}: no "
+                "weights/best.pt was written and \"best\" is null in summary.json. The test "
+                "numbers above come from the last-epoch weights (test_weights=\"last\"); treat "
+                "them as a failed run."
+            )
+    return summary
+
+
 def train(
     cfg: RunConfig,
     model=None,
@@ -370,6 +529,302 @@ def train(
     return _run(cfg, model=model, mode=mode, device=device, world_size=world_size)
 
 
+def train_group(
+    cfgs: List[RunConfig],
+    device: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Train several compatible runs in one process on one shared pass over the data.
+
+    Why this exists: at 2048 one sample costs ~0.21 s of CPU to decode (PNG + EXR) and
+    ~0.15 s of GPU for the cheapest depth model on an A6000, so a single run is
+    data-bound and a GPU sits idle waiting for images. A group reads each batch once and
+    steps every member on it - the models see the same images, crops and flips - which is
+    the same thing the run would have seen alone (`set_seed` and the sampler are per
+    process, and a solo run's stream is what a group member gets) for one data cost.
+
+    What it is not: a different protocol. Each member keeps its own optimiser, schedule,
+    checkpoints, `metrics.csv`, previews and `summary.json`; the training/validation/test
+    loop, the monitor and the test pass are the same functions a solo run uses. The
+    summary records `cogroup`, so a number produced this way says what it shared a pass
+    with.
+
+    The sharing unit is the optimiser window, not the forward pass: the loader is built at
+    the members' common *effective* batch (`batch_size * grad_accum`), and each member cuts
+    that window into its own micro-batches (`Trainee.split`). A `batch_size: 4,
+    grad_accum: 2` member and a `batch_size: 8, grad_accum: 1` member therefore share the
+    same 8 decoded images per optimiser step - the decode is paid once - while keeping
+    their own memory footprint and their own samples-per-step. Only members whose
+    effective batch, image shape and data semantics agree can do that; `group_conflicts`
+    lists it. Only depth and segmentation are trained in this process; the three
+    subprocess tasks cannot share a batch.
+
+    Args:
+        cfgs: two or more validated configs, one per run.
+        device: overrides every member's `train.device` (one GPU, one process).
+
+    Returns:
+        One summary dict per config, in order.
+    """
+    if not cfgs:
+        raise ConfigError("train_group needs at least one config")
+    if len(cfgs) == 1:
+        # Degenerate group: the solo path is the single implementation of "one run".
+        return [train(cfgs[0], mode="finetune", device=device)]
+
+    for cfg in cfgs:
+        cfg.validate()
+    conflicts = group_conflicts(cfgs)
+    if conflicts:
+        names = ", ".join(cfg.model for cfg in cfgs)
+        raise ConfigError(
+            f"cannot co-train {names}: " + "; ".join(conflicts) + ". One group reads one "
+            "loader and hands every member the same optimiser window, so the members have to "
+            "agree on the data and on `batch_size x grad_accum`. Run them separately "
+            "(`symtrs train <config>`, one at a time) or make the configs agree."
+        )
+    if world_size_from_env() > 1:
+        raise ConfigError(
+            "co-training runs every member in one process on one device and cannot be "
+            "combined with DDP (train.gpus > 1); launch the members separately instead"
+        )
+    return _run_group(cfgs, device=device)
+
+
+def effective_batch(cfg: RunConfig) -> int:
+    """Samples per optimiser step: `train.batch_size * train.grad_accum`.
+
+    This - not the micro-batch - is what a group has to agree on, because it decides how
+    many samples each member's optimiser step averages over. How those samples are split
+    into forward passes is the member's own memory choice and stays private to it.
+    """
+    return max(1, int(cfg.train.batch_size)) * max(1, int(cfg.train.grad_accum))
+
+
+#: The settings a group must share. The first block builds the one shared loader, so a
+#: mismatch there means a member would train on images or labels other than the ones its
+#: own config describes - the kind of difference that shows up as a slightly wrong number,
+#: never as an error. The second block sets the window the shared loader yields.
+_GROUP_FIELDS = (
+    ("task", lambda c: c.task),
+    ("resolution", lambda c: c.resolution),
+    # The seed decides the shared sampler's stream and the crop draws: members with
+    # different seeds would all see the first member's order.
+    ("seed", lambda c: c.seed),
+    ("data.root", lambda c: c.data.root),
+    ("data.split", lambda c: c.data.split),
+    ("data.val_split", lambda c: c.data.val_split),
+    ("data.test_split", lambda c: c.data.test_split),
+    ("data.num_workers", lambda c: c.data.num_workers),
+    ("data.pin_memory", lambda c: c.data.pin_memory),
+    ("data.max_samples", lambda c: c.data.max_samples),
+    ("data.limit_train_batches", lambda c: c.data.limit_train_batches),
+    ("data.limit_val_batches", lambda c: c.data.limit_val_batches),
+    ("data.depth_scale", lambda c: c.data.depth_scale),
+    ("data.max_depth", lambda c: c.data.max_depth),
+    ("data.depth_channel", lambda c: c.data.depth_channel),
+    ("data.camera_hfov_deg", lambda c: c.data.camera_hfov_deg),
+    ("data.depth_backend", lambda c: c.data.depth_backend),
+    ("data.num_classes", lambda c: c.data.num_classes),
+    ("data.label_step", lambda c: c.data.label_step),
+    ("data.ignore_index", lambda c: c.data.ignore_index),
+    ("train.patch_size", lambda c: c.train.patch_size),
+    # The effective batch is not here: members need not agree on it, only divide the
+    # group's largest one (`group_conflicts`), and `Trainee.split` cuts every shared batch
+    # into each member's own windows and micro-batches. `train.epochs` is not here either:
+    # a member that finishes early simply leaves the shared pass.
+)
+
+
+def shared_window(cfgs: List[RunConfig]) -> int:
+    """Samples per shared batch: the largest member's effective batch.
+
+    Every member's effective batch must divide it (see `group_conflicts`), and a member
+    whose effective batch is k times smaller takes k optimiser steps per shared batch, so
+    each keeps the samples-per-step and steps-per-epoch it would have trained with alone.
+    """
+    return max(effective_batch(cfg) for cfg in cfgs)
+
+
+def group_conflicts(cfgs: List[RunConfig]) -> List[str]:
+    """Why these configs cannot share one training pass. Empty when they can."""
+    if len(cfgs) < 2:
+        return ["a group needs at least two configs"]
+
+    out: List[str] = []
+    unsupported = sorted({cfg.task for cfg in cfgs} - set(MONITORS))
+    for task in unsupported:
+        out.append(
+            f"{task} is driven as a subprocess and cannot share this process's batches "
+            "(only depth and segmentation co-train)"
+        )
+
+    for label, get in _GROUP_FIELDS:
+        values = [get(cfg) for cfg in cfgs]
+        if any(value != values[0] for value in values[1:]):
+            shown = ", ".join(repr(value) for value in values)
+            out.append(f"{label} differs ({shown})")
+
+    window = shared_window(cfgs)
+    for cfg in cfgs:
+        if window % effective_batch(cfg):
+            out.append(
+                f"{cfg.model}'s effective batch {effective_batch(cfg)} (batch_size x grad_accum) "
+                f"does not divide the group's window {window}, so it cannot take whole optimiser "
+                "steps out of a shared batch; group it with members whose effective batch it "
+                "divides"
+            )
+
+    if any(cfg.train.gpus > 1 for cfg in cfgs):
+        out.append("train.gpus > 1 (DDP) cannot be combined with co-training")
+
+    run_dirs = [str(Path(cfg.resolved_out_dir).resolve()) for cfg in cfgs]
+    duplicated = {d for d in run_dirs if run_dirs.count(d) > 1}
+    if duplicated:
+        out.append(f"two members would write to the same run dir ({sorted(duplicated)[0]})")
+
+    return out
+
+
+def _run_group(cfgs: List[RunConfig], device: Optional[str] = None) -> List[Dict[str, Any]]:
+    """`train_group`'s body: build every member, then one epoch loop over one loader."""
+    from symtrs.data.factory import from_config
+    from symtrs.engine.loop import Trainee, make_grad_scaler, train_one_epoch_many
+    from symtrs.model.wrapper import build_from_config
+
+    first = cfgs[0]
+    resolved = resolve_device(device or first.train.device)
+    # One seed for the process. Every member's sampler and crop draw from the same stream,
+    # which is what makes the shared batch literally the same batch; a member trained
+    # alone would have consumed that stream too.
+    set_seed(first.seed)
+
+    shared = shared_window(cfgs)
+    # One shared batch is one or more whole accumulation windows for every member: it
+    # carries the largest effective batch, and `Trainee.split` hands each member its own
+    # windows and micro-batches out of it. Building the loader at a member's
+    # `train.batch_size` instead would drop the samples the other micro-batches should see.
+    loader_cfg = first.with_overrides({"train.batch_size": shared, "train.grad_accum": 1})
+    train_loader = from_config(loader_cfg, train=True)
+    # Validation and test are per member (each model is scored on its own), and neither
+    # reads `train.batch_size`; the first member's config is enough to build them.
+    val_loader = from_config(first, train=False)
+    test_loader = from_config(first, split=first.data.test_split, train=False)
+    # A shared batch is `shared // effective_batch` optimiser steps for a member, so its
+    # schedule is `len(train_loader)` times that per epoch, whatever its micro-batching is -
+    # do not divide by `grad_accum` here, that split is inside the window, not across them.
+    windows = {id(cfg): shared // effective_batch(cfg) for cfg in cfgs}
+
+    if is_main_process():
+        splits = ", ".join(
+            f"{cfg.model} {cfg.train.batch_size}x{cfg.train.grad_accum}"
+            + (f" x{windows[id(cfg)]} steps" if windows[id(cfg)] > 1 else "")
+            for cfg in cfgs
+        )
+        print(
+            f"[symtrs] co-training {len(cfgs)} runs on one pass over "
+            f"{first.task} / {first.resolution}px: {len(train_loader)} train batches of "
+            f"{shared} samples ({splits}), {len(val_loader)} val batches"
+        )
+
+    members: List[Dict[str, Any]] = []
+    for cfg in cfgs:
+        run_dir = prepare_run_dir(cfg)
+        model = build_from_config(cfg)
+        apply_run_freeze(model, cfg)
+        model.to(resolved)
+        monitor, direction = resolve_monitor(cfg)
+        optimizer = build_optimizer(model, cfg)
+        steps_per_epoch = len(train_loader) * windows[id(cfg)]
+        scheduler = build_scheduler(optimizer, cfg, steps_per_epoch)
+        scaler = make_grad_scaler(resolved, cfg.train.amp)
+        if is_main_process():
+            print(f"[symtrs] [{cfg.model}] run dir: {run_dir}")
+            print(f"[symtrs] [{cfg.model}] {model.describe()}")
+            if cfg.train.freeze:
+                counts = sum(p.numel() for p in model.parameters() if p.requires_grad)
+                print(f"[symtrs] [{cfg.model}] freeze={cfg.train.freeze!r} -> {counts / 1e6:.1f}M trainable")
+
+        start_epoch = 0
+        best: Optional[float] = None
+        best_epoch = -1
+        history: List[Dict[str, Any]] = []
+        non_finite: List[int] = []
+        if cfg.train.resume:
+            start_epoch, restored = _resume(
+                cfg, model, optimizer, scheduler, run_dir, steps_per_epoch, monitor
+            )
+            best = restored["best"]
+            best_epoch = restored["best_epoch"]
+            history = restored["history"]
+            non_finite = restored["non_finite_epochs"]
+            if is_main_process():
+                print(
+                    f"[symtrs] [{cfg.model}] resumed from {cfg.train.resume} at epoch "
+                    f"{start_epoch} (best {monitor}={best} at epoch {best_epoch})"
+                )
+
+        members.append({
+            "cfg": cfg,
+            "run_dir": run_dir,
+            "model": model,
+            "optimizer": optimizer,
+            "scheduler": scheduler,
+            "trainee": Trainee(model, optimizer, scaler, cfg, label=cfg.model, scheduler=scheduler,
+                               windows_per_batch=windows[id(cfg)]),
+            "monitor": monitor,
+            "direction": direction,
+            "start_epoch": start_epoch,
+            "best": best,
+            "best_epoch": best_epoch,
+            "history": history,
+            "non_finite": non_finite,
+        })
+
+    # A resumed member may be a few epochs ahead of its group-mates when a crash landed
+    # between two members' checkpoints. It simply does not train the epochs it has already
+    # done; the batch stream is per-epoch deterministic, so the epochs it does train match
+    # what it would have seen in the shared pass.
+    first_start = min(member["start_epoch"] for member in members)
+    # Members may want different numbers of epochs (a `--set train.epochs` on one of them);
+    # the pass runs until the last one is done and each leaves when its own `epochs` is
+    # reached. It keeps its optimiser, best score and history, so its summary is unaffected.
+    end_epoch = max(member["cfg"].train.epochs for member in members)
+    for epoch in range(first_start, end_epoch):
+        active = [m for m in members
+                  if m["start_epoch"] <= epoch < m["cfg"].train.epochs]
+        if not active:
+            continue
+        started = time.time()
+        metrics = train_one_epoch_many(
+            [m["trainee"] for m in active], train_loader, resolved, epoch=epoch, windows=True
+        )
+        elapsed = time.time() - started
+
+        for member, train_metrics in zip(active, metrics):
+            cfg = member["cfg"]
+            val_every = max(1, int(cfg.train.val_every))
+            scored = epoch == cfg.train.epochs - 1 or (epoch + 1) % val_every == 0
+            member["best"], member["best_epoch"] = _finish_epoch(
+                cfg, member["model"], member["optimizer"], member["scheduler"],
+                member["run_dir"], val_loader, resolved, epoch, train_metrics, scored,
+                member["best"], member["best_epoch"], member["history"],
+                member["non_finite"], member["monitor"], member["direction"],
+                elapsed=elapsed, label=cfg.model,
+            )
+        barrier()
+
+    group = [cfg.model for cfg in cfgs]
+    summaries = []
+    for member in members:
+        summaries.append(_score_and_summarise(
+            member["cfg"], member["model"], member["run_dir"], test_loader, resolved,
+            "finetune", member["best"], member["best_epoch"], member["history"],
+            member["non_finite"], member["monitor"],
+            extra_summary={"cogroup": group}, label=member["cfg"].model,
+        ))
+    return summaries
+
+
 def _spawn(cfg: RunConfig, model, mode: str, device: Optional[str]) -> Dict[str, Any]:
     import torch.multiprocessing as mp
 
@@ -404,12 +859,7 @@ def _run(
     world_size: int,
 ) -> Dict[str, Any]:
     from symtrs.data.factory import from_config
-    from symtrs.engine.loop import (
-        evaluate,
-        format_metrics,
-        make_grad_scaler,
-        train_one_epoch,
-    )
+    from symtrs.engine.loop import make_grad_scaler, train_one_epoch
 
     distributed = world_size > 1
     rank = setup_ddp() if distributed else 0
@@ -486,104 +936,36 @@ def _run(
                     f"(best {monitor}={best} at epoch {best_epoch})"
                 )
 
+        # Scoring the whole validation split every epoch is not free: at 2048 it is a few
+        # thousand images of ~49 windows each, several times the epoch's training. A run that
+        # validates every few epochs still keeps `best.pt` (picked on the epochs it scores) and
+        # always scores the final one, so the summary is one checkpoint and one number either
+        # way; `train.val_every` only changes how often the model is compared.
+        val_every = max(1, int(cfg.train.val_every))
+        last_epoch = cfg.train.epochs - 1
+        if is_main_process() and val_every > 1:
+            print(f"[symtrs] validation every {val_every} epochs, and on the last one")
+
         for epoch in range(start_epoch, cfg.train.epochs):
             started = time.time()
             train_metrics = train_one_epoch(
                 model, train_loader, optimizer, scaler, cfg, resolved, epoch=epoch,
                 scheduler=scheduler,
             )
-
-            val_metrics = evaluate(model, val_loader, cfg, resolved)
-            lr = float(optimizer.param_groups[0]["lr"])
             elapsed = time.time() - started
 
-            row: Dict[str, Any] = {"epoch": epoch, "lr": lr, "seconds": round(elapsed, 1)}
-            row.update({f"train_{k}": v for k, v in train_metrics.items()})
-            row.update({f"val_{k}": v for k, v in val_metrics.items()})
-            history.append(row)
-            if is_main_process():
-                append_csv_row(str(run_dir / "metrics.csv"), row)
-
-            if is_main_process():
-                print(f"[symtrs] epoch {epoch} ({elapsed:.1f}s) lr={lr:.2e}")
-                print(f"[symtrs]   train {format_metrics(train_metrics)}")
-                print(f"[symtrs]   val   {format_metrics(val_metrics)}")
-
-                value = float(val_metrics.get(monitor, float("nan")))
-                if not math.isfinite(value):
-                    non_finite_epochs.append(epoch)
-                    print(
-                        f"[symtrs]   warning: val {monitor}={value} is not finite; epoch {epoch} "
-                        "cannot be the best checkpoint (weights/last.pt is still written)"
-                    )
-                improved = is_improvement(value, best, direction)
-                if improved:
-                    best = value
-                    best_epoch = epoch
-
-                # `best` and the history go into the payload *after* this epoch is decided, so
-                # that a resume from either checkpoint knows what it is up against.
-                state = _state(
-                    model, optimizer, scheduler, epoch, val_metrics,
-                    best=best, best_epoch=best_epoch, history=history,
-                    non_finite_epochs=non_finite_epochs,
-                )
-                save_run(model, cfg, run_dir, state, "last", val_metrics)
-                if improved:
-                    save_run(model, cfg, run_dir, state, "best", val_metrics)
-                    print(f"[symtrs]   new best {monitor}={value:.4f} -> weights/best.pt")
-
-                if cfg.train.save_samples_every and (epoch + 1) % cfg.train.save_samples_every == 0:
-                    _save_previews(model, val_loader, cfg, resolved, run_dir, epoch)
-
-                _save_curves(history, run_dir)
-
+            scored = epoch == last_epoch or (epoch + 1) % val_every == 0
+            best, best_epoch = _finish_epoch(
+                cfg, model, optimizer, scheduler, run_dir, val_loader, resolved,
+                epoch, train_metrics, scored, best, best_epoch, history,
+                non_finite_epochs, monitor, direction, elapsed=elapsed,
+            )
             barrier()
 
-    # The test pass scores the checkpoint the summary reports as "best", not whatever the
-    # last epoch left in memory: `best` and `test` sit side by side in summary.json, and the
-    # other tasks (shadow removal) score best.pt, so a number from the last-epoch weights
-    # made the protocols differ between tasks. Which weights were scored is recorded rather
-    # than implied.
-    test_weights = _load_test_weights(model, run_dir, mode, best, resolved)
-    test_align = ""
-    test_metrics = evaluate(
-        model, test_loader, cfg, resolved,
-        align=test_align,
-        num_visualizations=cfg.eval.num_visualizations,
-        vis_dir=str(run_dir / "preview"),
-        vis_prefix="test",
+    summary = _score_and_summarise(
+        cfg, model, run_dir, test_loader, resolved, mode, best, best_epoch,
+        history, non_finite_epochs, monitor,
     )
-
-    summary = {
-        "run_dir": str(run_dir),
-        "task": cfg.task,
-        "model": cfg.model,
-        "resolution": cfg.resolution,
-        "mode": mode,
-        "monitor": monitor,
-        "best": best,
-        "best_epoch": best_epoch,
-        "epochs": cfg.train.epochs if mode == "finetune" else 0,
-        "test_weights": test_weights,
-        "test": test_metrics,
-        "history": history,
-    }
-    if non_finite_epochs:
-        summary["non_finite_monitor_epochs"] = non_finite_epochs
-    if is_main_process():
-        print(f"[symtrs] test {format_metrics(test_metrics)}")
-        # Non-finite floats are written as null: a bare NaN is not JSON, and one diverged
-        # run must not make the whole results directory unreadable by `jq` or a browser.
-        write_json(run_dir / "summary.json", summary)
-        if mode == "finetune" and best is not None:
-            print(f"[symtrs] best {monitor}={best:.4f} at epoch {best_epoch}")
-        elif mode == "finetune":
-            print(
-                f"[symtrs] no epoch produced a finite val {monitor}: no weights/best.pt was "
-                "written and \"best\" is null in summary.json. The test numbers above come "
-                "from the last-epoch weights (test_weights=\"last\"); treat them as a failed run."
-            )
     return summary
 
 
