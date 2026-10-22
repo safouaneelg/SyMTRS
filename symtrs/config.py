@@ -143,6 +143,12 @@ class TrainConfig:
     # validation images costs several times the epoch's training (49 windows each), so a long
     # run scores every few epochs to pick `best.pt` and pays for one full pass at the end.
     val_every: int = 1
+    # Validation images scored per pass during training (0 = the whole val split). The passes
+    # only pick `best.pt`, and at 2048 a full 3000-image pass took ~30 min per model - more
+    # than the epoch it follows (2026-10-22 campaign). Every pass, the last one included, uses
+    # the same evenly spaced subset (`symtrs.data.splits.spread_indices`), so best.pt is chosen
+    # on one consistent measure. The test split is never subsampled: it is the reported number.
+    val_subset: int = 0
     batch_size: int = 4
     lr: float = 1e-4
     weight_decay: float = 0.01
@@ -183,6 +189,8 @@ class TrainConfig:
             raise ConfigError("train.batch_size must be at least 1")
         if self.val_every < 1:
             raise ConfigError("train.val_every must be at least 1 (1 = every epoch)")
+        if self.val_subset < 0:
+            raise ConfigError("train.val_subset must be 0 (the whole val split) or positive")
         if self.lr <= 0:
             raise ConfigError("train.lr must be positive")
         if self.optim not in {"adamw", "adam", "sgd"}:

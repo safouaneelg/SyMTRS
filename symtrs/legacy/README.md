@@ -51,6 +51,11 @@ changed.
    upsampling blocks, which the constructor already produced for a scale outside {2, 4, 8}
    - it only refused it. `srgan_x1` had never been able to run; its smoke "OOM" was this
    `ValueError`. No layer, loss or parameter changed.
+5. **The per-epoch validation can read a subset** (`train.py`, `--val_subset`, added
+   2026-10-22). The pass only picks `best.pt`, and over the whole 3000-image val split at 2048
+   it was ~20 of each epoch's ~67 min. `--val_subset N` scores the same N evenly spaced images
+   every epoch (`symtrs.data.splits.spread_indices`); 0 keeps the whole split. The test pass
+   reads its own loader and is never subsampled.
 
 Smaller companion edits in `train.py`: SwinIR is built with `img_size` = the training crop
 (`swinir_img_size`) instead of the whole LR frame. Its shifted-window attention masks are

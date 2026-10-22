@@ -30,6 +30,7 @@ from torch.utils.data.distributed import DistributedSampler
 # so it is the hand-run default and nothing else.
 ROOT = Path(__file__).resolve().parent
 
+from symtrs.data.splits import spread_indices
 from symtrs.engine.tiling import predict_tiled
 from symtrs.legacy.dataloader import SuperResDataset, split_indices
 from symtrs.legacy.superres.models import (
@@ -90,6 +91,8 @@ def parse_args():
     p.add_argument("--patch_size", type=int, default=0,
                    help="LR patch size for TRAINING, every model (0 = whole frames; 2048 px frames "
                         "do not fit a 12 GB card). The HR patch is patch_size * scale.")
+    p.add_argument("--val_subset", type=int, default=0,
+                   help="validation images per epoch, evenly spaced (0 = all); picks best.pt only")
     p.add_argument("--val_patch_size", type=int, default=0,
                    help="LR size of a deterministic CENTRE crop to validate/test on, for speed only "
                         "(0 = the whole image, never the training patch: ground rule 11)")
@@ -550,7 +553,9 @@ def main_worker(rank, world_size, args):
         # val/. Two datasets, so the index lists are into different datasets.
         val_dataset = SuperResDataset(args.val_lr_root, args.val_hr_root)
         train_idx = list(range(len(dataset)))
-        val_idx = list(range(len(val_dataset)))
+        # The per-epoch pass only picks best.pt; at 2048 the whole 3000-image split was ~20 of
+        # each epoch's ~67 min. The test pass below reads its own loader and is never subsampled.
+        val_idx = spread_indices(len(val_dataset), args.val_subset)
     else:
         print(f"[split] no --val_lr_root/--val_hr_root: carving {args.split} out of {args.lr_root} "
               "(the original behaviour; the symtrs front-end passes val/ whenever it exists)")

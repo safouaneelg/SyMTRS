@@ -44,7 +44,13 @@ PENDING = ()
 DROPPED = ("zoedepth_n", "zoedepth_k", "zoedepth_nk", "depth_pro")
 
 SR = ("srcnn", "autoencoder", "srgan", "swinir")
-SR_SCALE = {2048: "x1", 1024: "x2", 512: "x4", 256: "x8"}
+# x1 (resolution 2048: LR and HR are the same folder) is a refiner control row, not
+# super-resolution, and cost ~45-70 h per model; left out of the campaign on 2026-10-22 at
+# the dataset owner's call. Its configs stay in configs/superresolution/.
+SR_SCALE = {1024: "x2", 512: "x4", 256: "x8"}
+#: Validation images per pass during training (`train.val_subset`): the passes only pick
+#: best.pt, and a full 3000-image pass at 2048 took ~30 min per model. Test is always whole.
+VAL_SUBSET = 300
 DOMAIN = [f"{m}_{d}" for m in ("pix2pix", "cyclegan")
           for d in ("day2night", "night2day", "noshadow2shadow", "shadow2noshadow")]
 
@@ -53,6 +59,7 @@ def _flags(resolution: int, tile_batch: int) -> str:
     # val_every=2 at >= 1024: a pass over the 3000 val images costs several 2048 epochs.
     flags = ["--set train.val_every=2"] if resolution >= 1024 else []
     flags.append(f"--set eval.tile_batch={tile_batch}")
+    flags.append(f"--set train.val_subset={VAL_SUBSET}")
     return "  ".join(flags)
 
 
@@ -78,9 +85,10 @@ def _by_patch(configs):
 
 
 def solos():
-    for res in RESOLUTIONS:
+    for res in SR_SCALE:
         for model in SR:
-            yield f".venv  configs/superresolution/{model}_{SR_SCALE[res]}.yaml  --set eval.tile_batch=8"
+            yield (f".venv  configs/superresolution/{model}_{SR_SCALE[res]}.yaml  "
+                   f"--set eval.tile_batch=8  --set train.val_subset={VAL_SUBSET}")
     for name in DOMAIN:
         yield f".venv  configs/domain_adapt/{name}.yaml"
     shadow = REPO / "runs" / "queue_shadow.txt"
@@ -98,18 +106,15 @@ def render() -> str:
         *(["# Not yet in the queue (did not learn as configured on scripts/overfit_check.py):",
            "#   " + ", ".join(PENDING)] if PENDING else []),
         "# Dropped from the benchmark: " + ", ".join(DROPPED),
-        "# Launch: scripts/run_queue.py --jobs 3 --devices 0,1,2 --num-workers 4 --omp-threads 2",
+        "# Launch: scripts/run_queue.py --jobs 8 --devices 0,1,2,0,1,2,0,1 --num-workers 3 --omp-threads 2",
         "",
     ]
     grouped = [f"group  {venv}  " + "  ".join(cfgs) + f"  {flags}" for venv, cfgs, flags in groups()]
-    solo = list(solos())
-    # Groups are the long jobs; interleave so the three lanes are not all on solos at the end.
-    while grouped or solo:
-        if grouped:
-            lines.append(grouped.pop(0))
-        for _ in range(3):
-            if solo:
-                lines.append(solo.pop(0))
+    # Groups first: they are where one decoded batch trains several models, and the solo
+    # subprocess jobs (SR, domain adaptation, shadow) barely load a GPU, so they fill the lanes
+    # the groups leave. Interleaving them (the first launch) put four SR jobs ahead of ten
+    # groups for days.
+    lines += grouped + list(solos())
     return "\n".join(lines) + "\n"
 
 
@@ -140,8 +145,21 @@ def main() -> None:
     args = ap.parse_args()
     if args.check_groups:
         raise SystemExit(check_groups())
-    Path(args.out).write_text(render(), encoding="utf-8")
+    text = render()
+    Path(args.out).write_text(text, encoding="utf-8")
     print(f"wrote {args.out}")
+    # The runner pools devices but cannot pin a task to them, so segmentation (all 24 models,
+    # four groups) gets its own queue and GPUs, and everything else another: two queues side
+    # by side, e.g. --devices 0,0,1,1 for the first and 2,2,2 for the second.
+    header = [line for line in text.splitlines() if line.startswith("#")]
+    jobs = [line for line in text.splitlines() if line and not line.startswith("#")]
+    seg = [line for line in jobs if " configs/segmentation/" in line]
+    rest = [line for line in jobs if line not in seg]
+    stem = Path(args.out).with_suffix("")
+    for suffix, part in (("_seg", seg), ("_rest", rest)):
+        target = stem.parent / f"{stem.name}{suffix}.txt"
+        target.write_text("\n".join(header + [""] + part) + "\n", encoding="utf-8")
+        print(f"wrote {target} ({len(part)} jobs)")
 
 
 if __name__ == "__main__":

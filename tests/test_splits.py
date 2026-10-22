@@ -127,3 +127,14 @@ def test_describe_layout_marks_each_role(layout: Path, partial_layout: Path):
 def test_describe_layout_on_a_root_with_nothing(tmp_path: Path):
     text = describe_layout(str(tmp_path / "absent"))
     assert "MISSING" in text
+
+
+def test_the_validation_subset_is_spread_over_the_split_not_its_head():
+    """The val files are sorted by location, so the first N would be a few scenes only."""
+    from symtrs.data.splits import spread_indices
+
+    assert spread_indices(3000, 0) == list(range(3000))
+    assert spread_indices(10, 50) == list(range(10))
+    picked = spread_indices(3000, 300)
+    assert len(picked) == 300 == len(set(picked))
+    assert picked[0] == 0 and picked[-1] >= 2990, "must reach the end of the split"

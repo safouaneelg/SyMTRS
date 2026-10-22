@@ -243,6 +243,8 @@ class SuperResolution:
             command += ["--patch_size", str(cfg.train.patch_size)]
         if cfg.train.val_patch_size > 0:
             command += ["--val_patch_size", str(cfg.train.val_patch_size)]
+        if cfg.train.val_subset > 0:
+            command += ["--val_subset", str(cfg.train.val_subset)]
         if cfg.eval.tile_size > 0:
             command += [
                 "--eval_tile_size", str(cfg.eval.tile_size),

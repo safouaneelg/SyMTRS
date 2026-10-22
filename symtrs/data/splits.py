@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, Optional, Tuple
+from typing import Iterator, List, Optional, Tuple
 
 #: Named resolutions, largest first.
 RESOLUTIONS: Tuple[int, ...] = (2048, 1024, 512, 256)
@@ -51,6 +51,18 @@ class MissingDirectoryError(FileNotFoundError):
         self.path = Path(path)
         self.resolution = resolution
         self.split = split
+
+
+def spread_indices(total: int, count: int) -> List[int]:
+    """`count` indices spread evenly over `range(total)` (all of them when count is 0 or >= total).
+
+    The validation subset that picks `best.pt` (`train.val_subset`): evenly spaced over the
+    sorted split rather than its first `count` files, because the files are sorted by location
+    and the first few hundred would all come from a handful of scenes.
+    """
+    if count <= 0 or count >= total:
+        return list(range(total))
+    return [int(i * total / count) for i in range(count)]
 
 
 def scale_for_resolution(resolution: int) -> int:

@@ -474,3 +474,29 @@ def test_a_single_config_is_just_a_run(tmp_path, scripted):
     summary = trainer.train_group([_cfg(tmp_path, "a", epochs=1, batch_size=2)])
     assert summary[0]["test_weights"] == "best"
     assert "cogroup" not in summary[0], "one member shares nothing"
+
+
+def test_validation_reads_the_spread_subset_and_the_whole_split_by_default(tmp_path, monkeypatch):
+    """`train.val_subset` shrinks the passes that pick best.pt (a 2048 pass over 3000 images
+    took ~30 min per model); 0 must keep the whole split, and the subset must be the evenly
+    spread one, so best.pt is chosen on the same images every epoch."""
+    import symtrs.data.factory as factory
+    from torch.utils.data import DataLoader, TensorDataset
+
+    full = TensorDataset(torch.arange(50))
+    monkeypatch.setattr(factory, "from_config",
+                        lambda cfg, *a, **k: DataLoader(full, batch_size=1))
+
+    cfg = _cfg(tmp_path, "a")
+    assert len(trainer.validation_loader(cfg).dataset) == 50
+
+    cfg.train.val_subset = 10
+    picked = [int(x[0]) for x in trainer.validation_loader(cfg)]
+    assert picked == [0, 5, 10, 15, 20, 25, 30, 35, 40, 45]
+
+
+def test_members_must_agree_on_the_validation_subset(tmp_path):
+    a = _cfg(tmp_path, "a")
+    b = _cfg(tmp_path, "b")
+    b.train.val_subset = 300
+    assert any(c.startswith("train.val_subset differs") for c in trainer.group_conflicts([a, b]))

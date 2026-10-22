@@ -320,6 +320,28 @@ def save_run(
 # ------------------------------------------------------------------------ the run
 
 
+def validation_loader(cfg: RunConfig):
+    """The loader every validation pass during training reads: the val split, or its
+    `train.val_subset` evenly spaced images. The test loader is built separately and is never
+    subsampled (see `train.val_subset`)."""
+    from torch.utils.data import DataLoader, Subset
+
+    from symtrs.data.factory import from_config
+    from symtrs.data.splits import spread_indices
+
+    loader = from_config(cfg, train=False)
+    count = int(cfg.train.val_subset)
+    if count <= 0 or not isinstance(loader, DataLoader) or count >= len(loader.dataset):
+        return loader
+    return DataLoader(
+        Subset(loader.dataset, spread_indices(len(loader.dataset), count)),
+        batch_size=loader.batch_size,
+        shuffle=False,
+        num_workers=loader.num_workers,
+        pin_memory=loader.pin_memory,
+    )
+
+
 def _finish_epoch(
     cfg: RunConfig,
     model,
@@ -619,6 +641,8 @@ _GROUP_FIELDS = (
     ("data.max_samples", lambda c: c.data.max_samples),
     ("data.limit_train_batches", lambda c: c.data.limit_train_batches),
     ("data.limit_val_batches", lambda c: c.data.limit_val_batches),
+    # One validation loader for the group, built from the first member.
+    ("train.val_subset", lambda c: c.train.val_subset),
     ("data.depth_scale", lambda c: c.data.depth_scale),
     ("data.max_depth", lambda c: c.data.max_depth),
     ("data.depth_channel", lambda c: c.data.depth_channel),
@@ -707,7 +731,7 @@ def _run_group(cfgs: List[RunConfig], device: Optional[str] = None) -> List[Dict
     train_loader = from_config(loader_cfg, train=True)
     # Validation and test are per member (each model is scored on its own), and neither
     # reads `train.batch_size`; the first member's config is enough to build them.
-    val_loader = from_config(first, train=False)
+    val_loader = validation_loader(first)
     test_loader = from_config(first, split=first.data.test_split, train=False)
     # A shared batch is `shared // effective_batch` optimiser steps for a member, so its
     # schedule is `len(train_loader)` times that per epoch, whatever its micro-batching is -
@@ -892,7 +916,7 @@ def _run(
             counts = sum(p.numel() for p in inner.parameters() if p.requires_grad)
             print(f"[symtrs] freeze={cfg.train.freeze!r} -> {counts / 1e6:.1f}M trainable")
 
-    val_loader = from_config(cfg, train=False)
+    val_loader = validation_loader(cfg)
     test_loader = from_config(cfg, split=cfg.data.test_split, train=False)
 
     history: List[Dict[str, Any]] = []

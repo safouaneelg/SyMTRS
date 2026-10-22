@@ -104,6 +104,25 @@ def test_command_carries_the_scale_and_both_folder_pairs(layout: Path) -> None:
     assert command[:3] == [sys.executable, "-m", "symtrs.legacy.superres.train"]
 
 
+def test_the_validation_subset_reaches_the_trainer_and_only_when_asked(layout: Path) -> None:
+    """`train.val_subset` shrinks the per-epoch pass that picks best.pt; it must be passed
+    through, and absent by default so a config without it validates on the whole split."""
+    plain = build_model("srcnn").train_command(_config(layout, resolution=512), layout / "run")
+    assert "--val_subset" not in plain
+
+    cfg = _config(layout, resolution=512)
+    cfg.train.val_subset = 300
+    command = build_model("srcnn").train_command(cfg, layout / "run")
+    assert command[command.index("--val_subset") + 1] == "300"
+
+
+def test_the_legacy_trainer_accepts_the_validation_subset_flag(monkeypatch) -> None:
+    from symtrs.legacy.superres.train import parse_args
+
+    monkeypatch.setattr(sys, "argv", ["train", "--lr_root", "a", "--hr_root", "b", "--val_subset", "300"])
+    assert parse_args().val_subset == 300
+
+
 def test_the_trainer_is_launched_as_a_module_of_this_package(layout: Path) -> None:
     """A module of this package, not a script beside it.
 
