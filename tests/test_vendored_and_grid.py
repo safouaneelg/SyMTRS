@@ -268,11 +268,12 @@ def test_da3_crops_to_512_wherever_the_image_is_larger_than_that() -> None:
             assert raw["train"]["patch_size"] <= int(resolution)
 
 
-def test_only_the_midas_models_that_overflowed_float16_train_in_bfloat16() -> None:
-    """BEiT-Large and Swin-V2 overflowed float16 in the 2048 run and then skipped thousands
-    of batches; every other row keeps the float16 default, so this is the whole list."""
+def test_every_midas_row_trains_in_bfloat16_and_only_those() -> None:
+    """BEiT-Large, Swin-V2 and then DPT-Hybrid overflowed float16 in the 2048 run and skipped
+    thousands of batches, so the whole MiDaS family runs in bfloat16; DA3 keeps the float16
+    default, so this is the whole list."""
     for path in sorted((REPO_ROOT / "configs" / "depth").rglob("*.yaml")):
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-        want = "bfloat16" if raw["model"] in ("midas_dpt_beit_large", "midas_dpt_swin2_tiny") else None
+        want = "bfloat16" if raw["model"].startswith("midas_") else None
         assert raw["train"].get("amp_dtype") == want, path
         assert raw["eval"].get("amp_dtype") == want, path

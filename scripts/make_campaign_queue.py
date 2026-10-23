@@ -63,14 +63,35 @@ def _flags(resolution: int, tile_batch: int) -> str:
     return "  ".join(flags)
 
 
+#: Below this resolution every model is its own job. Grouping pays where decoding is the
+#: bottleneck (a 2048 image is ~0.2 s of CPU), but it ties every member to the slowest one and
+#: lets one stuck or crashed member stall the rest; at 512 and 256 decoding is cheap, so
+#: separate jobs cost little and each model finishes on its own (the user's call, 2026-10-23).
+GROUP_MIN_RESOLUTION = 1024
+
+
+def _venv(model: str) -> str:
+    return ".venv-zoe" if model in ("midas_dpt_swin2_tiny", "midas_dpt_beit_large") else ".venv"
+
+
 def groups():
     """(venv, configs, flags) for every co-trained group, native resolution first."""
-    for res in RESOLUTIONS:
+    for res in (r for r in RESOLUTIONS if r >= GROUP_MIN_RESOLUTION):
         yield (".venv", [f"configs/segmentation/{res}/{m}_{res}.yaml" for m in SEGMENTATION],
                _flags(res, 8))
         for configs in _by_patch([f"configs/depth/{res}/{m}_{res}.yaml" for m in MIDAS]):
             yield (".venv-zoe", configs, _flags(res, 8 if len(configs) > 2 else 4))
         yield (".venv", [f"configs/depth/{res}/{m}_{res}.yaml" for m in DA3], _flags(res, 4))
+
+
+def separate():
+    """One line per depth/segmentation model below GROUP_MIN_RESOLUTION, native order."""
+    for res in (r for r in RESOLUTIONS if r < GROUP_MIN_RESOLUTION):
+        for task, models in (("segmentation", SEGMENTATION), ("depth", MIDAS + DA3)):
+            for model in models:
+                tile_batch = 4 if model in DA3 else 8
+                yield (f"{_venv(model)}  configs/{task}/{res}/{model}_{res}.yaml  "
+                       f"{_flags(res, tile_batch)}")
 
 
 def _by_patch(configs):
@@ -114,7 +135,7 @@ def render() -> str:
     # subprocess jobs (SR, domain adaptation, shadow) barely load a GPU, so they fill the lanes
     # the groups leave. Interleaving them (the first launch) put four SR jobs ahead of ten
     # groups for days.
-    lines += grouped + list(solos())
+    lines += grouped + list(separate()) + list(solos())
     return "\n".join(lines) + "\n"
 
 

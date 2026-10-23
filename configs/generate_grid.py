@@ -166,6 +166,7 @@ DEPTH_MODELS: List[DepthModel] = [
         grad_accum=1,
         space="disparity",
         patch={2048: 384, 1024: 0},
+        amp_dtype="bfloat16",
         note=(
             "The cheapest cell in the grid: EfficientNet-lite3 backbone, a DPT-lite head, and\n"
             "a 256px training resolution inside MiDaS itself. A full four-resolution sweep\n"
@@ -177,6 +178,11 @@ DEPTH_MODELS: List[DepthModel] = [
             "then inverted, the MiDaS protocol - and trained with the matching scale-and-shift-\n"
             "invariant `ssi` loss. A depth-space `scale` alignment cannot remove the shift and\n"
             "scored these models as if they were broken (2026-10-17 audit)."
+            "\n"
+            "Autocast runs in bfloat16, as for every MiDaS row: DPT-Hybrid overflowed float16\n"
+            "at epoch 6 of the 2026-10-22 2048 run (3034 of its next epoch's steps skipped as\n"
+            "non-finite), after BEiT-Large and Swin-V2 had done the same, so the family runs in\n"
+            "bfloat16 (float32's range) rather than waiting for the next one to stall."
         ),
     ),
     DepthModel(
@@ -188,6 +194,7 @@ DEPTH_MODELS: List[DepthModel] = [
         grad_accum=1,
         space="disparity",
         patch={2048: 384, 1024: 0},
+        amp_dtype="bfloat16",
         note=(
             "The standard published baseline, and the model the MiDaS numbers in the paper's\n"
             "comparison table are quoted from. Relative-depth: it predicts disparity, and a\n"
@@ -200,6 +207,11 @@ DEPTH_MODELS: List[DepthModel] = [
             "At 2048 a full batch of 4 is ~200MB of input per step and the DPT decoder's\n"
             "attention is quadratic in the token count on top of that, so training crops to\n"
             "384px patches. Below 2048 the whole image fits and patch_size drops to 0."
+            "\n"
+            "Autocast runs in bfloat16, as for every MiDaS row: DPT-Hybrid overflowed float16\n"
+            "at epoch 6 of the 2026-10-22 2048 run (3034 of its next epoch's steps skipped as\n"
+            "non-finite), after BEiT-Large and Swin-V2 had done the same, so the family runs in\n"
+            "bfloat16 (float32's range) rather than waiting for the next one to stall."
         ),
     ),
     DepthModel(
@@ -212,6 +224,7 @@ DEPTH_MODELS: List[DepthModel] = [
         space="disparity",
         patch={2048: 384, 1024: 512},
         freeze="encoder",
+        amp_dtype="bfloat16",
         note=(
             "The same head as DPT-Hybrid on a ViT-Large encoder: ~3x the parameters and the\n"
             "slowest of the MiDaS family. The encoder is frozen here, which is the posture the\n"
@@ -224,6 +237,11 @@ DEPTH_MODELS: List[DepthModel] = [
             "trainable, 1e-5 barely moved it (scripts/overfit_check.py, 2026-10-22: train loss\n"
             "0.58 -> 0.48, val rmse 9.8 -> 8.9 over 120 steps on 32 images it trains on), while\n"
             "1e-4 fits them (0.58 -> 0.17, val rmse 5.0 -> 3.4)."
+            "\n"
+            "Autocast runs in bfloat16, as for every MiDaS row: DPT-Hybrid overflowed float16\n"
+            "at epoch 6 of the 2026-10-22 2048 run (3034 of its next epoch's steps skipped as\n"
+            "non-finite), after BEiT-Large and Swin-V2 had done the same, so the family runs in\n"
+            "bfloat16 (float32's range) rather than waiting for the next one to stall."
         ),
     ),
     DepthModel(
