@@ -6,6 +6,9 @@ blue-screened under load, so the queue keeps no state in memory:
 - a job whose `<run_dir>/summary.json` exists AND says it succeeded (`run_verdict`) is done and
   is skipped; a summary of a run that failed, or that scored no test split, is not;
 - a job with `<run_dir>/weights/last.pt` but no summary was interrupted and is resumed from it;
+- a job some other process is already writing into (another queue over an overlapping entry
+  list, a run started by hand) is skipped, not resumed: two writers on one run directory
+  interleave `metrics.csv` and race on `weights/last.pt` (see `inflight`);
 - `runs/STOP` (an empty file) makes the queue exit after the current job, cleanly;
 - every start / end is appended to `logs/queue_<date>.log` and `<out_root>/status.tsv`, so the
   next session reads where things stand instead of guessing.
@@ -49,6 +52,7 @@ import datetime as dt
 import json
 import os
 import queue
+import re
 import shlex
 import signal
 import subprocess
@@ -137,6 +141,49 @@ def run_verdict(rc, run_dir: Path, eval_only: bool = False) -> tuple:
     if not eval_only and not (isinstance(summary.get("test"), dict) and summary["test"]):
         return False, "summary has no test metrics"
     return True, ""
+
+
+def inflight(run_dir: Path, config: str | None = None,
+             proc_root: Path = Path("/proc")) -> str | None:
+    """The command of a live process already writing `run_dir`, or None.
+
+    "No summary.json, has last.pt" cannot tell an interrupted job from one another queue is
+    running right now, and on 2026-10-25 two overlapping queues both read it the same way: the
+    rest queue started a second `srcnn_x2` into the directory the tail queue was training, and
+    `midas_small_256` was trained by two processes at once (its metrics.csv carries epochs
+    10-19 twice). A run that something is visibly working in is not this queue's to start.
+
+    Matching is on the command line, because the subprocess front-ends (domain adaptation,
+    shadow removal, super-resolution) run their own Python children and the parent's
+    `<run_dir>/weights/last.pt` is the only shared state. Both the spelling the queue uses
+    (`runs/campaign2/srcnn_x2`) and its absolute form are accepted: a queue passes `--out-dir`
+    as given, so the child's argv usually holds the relative one.
+    """
+    spellings = {str(run_dir), str(run_dir.resolve())}
+    patterns = [re.compile(re.escape(item) + r"(?![\w.-])") for item in spellings]
+    if config:
+        # `train-group` names its members by config path and writes to `<out_root>/<stem>`, so
+        # a member a live group is training has no `--out-dir` of its own to match on.
+        patterns.append(re.compile(re.escape(Path(config).name) + r"(?![\w.-])"))
+    try:
+        entries = list(proc_root.iterdir())
+    except OSError:
+        return None
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            raw = (entry / "cmdline").read_bytes()
+        except OSError:
+            continue  # raced with the process exiting
+        cmdline = raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
+        # A zombie has an empty cmdline; an unrelated tool that merely mentions the path
+        # (`symtrs tables runs`, an editor) must not block a queued run.
+        if not cmdline or "symtrs" not in cmdline:
+            continue
+        if any(pattern.search(cmdline) for pattern in patterns):
+            return f"pid {entry.name}: {cmdline[:140]}"
+    return None
 
 
 def keep_awake() -> None:
@@ -321,6 +368,16 @@ def main() -> int:
             if not pending:
                 note(f"{tag} skip (every member has a scored summary.json)")
                 return
+            # A member another process is training is left alone; resuming it here would put
+            # two writers on one weights/last.pt and interleave metrics.csv (see `inflight`).
+            busy = {c: inflight(run_dir_for(out_root, c), c) for c in pending}
+            if any(busy.values()):
+                for config, where in busy.items():
+                    if where:
+                        note(f"{tag} {Path(config).stem} skip (already running: {where})")
+                pending = [c for c in pending if not busy[c]]
+                if not pending:
+                    return
             if len(pending) < len(configs):
                 note(f"{tag} {len(configs) - len(pending)} member(s) already scored; "
                      f"running the remaining {len(pending)}")
@@ -352,6 +409,10 @@ def main() -> int:
         run_dir = run_dir_for(out_root, config)
         if run_verdict(0, run_dir)[0]:
             note(f"{tag} skip (summary.json exists and records a scored run)")
+            return
+        busy = inflight(run_dir, config)
+        if busy:
+            note(f"{tag} skip (already running: {busy})")
             return
         cmd = train_cmd(venv, config, args.data_root, run_dir, extra, args.num_workers)
         last = run_dir / "weights" / "last.pt"
