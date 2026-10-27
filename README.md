@@ -40,6 +40,9 @@ ds = load_dataset("safouaneelg/SyMTRS")
   `symtrs/legacy/`, kept so the documented command and imports keep working.
 - `pytorch-CycleGAN-and-pix2pix/` — the upstream code used by the domain adaptation task,
   vendored in full at a pinned revision. See [Domain adaptation](#domain-adaptation).
+- `third_party/` — the four shadow-removal upstreams (ShadowFormer, Restormer, Uformer,
+  ShadowMaskFormer) as git submodules, unmodified and pinned to one commit each; only their
+  network classes are used. Notes and licences in `third_party/PINS.md`.
 - `AGENTS.md` — how to set up, run and extend the project, written for an automated
   coder as much as for a person.
 
@@ -62,6 +65,7 @@ torchvision DeepLabV3, and the CLI. Everything else is an extra:
 | `timm` | `timm` | **MiDaS** — see below |
 | `da3` | `transformers` | Depth Anything 3 |
 | `adapt` | `dominate`, `wandb` | **domain adaptation** — upstream imports both at start-up |
+| `shadow` | `scipy`, `einops`, `natsort`, `scikit-image`, `h5py` | **shadow removal** — the upstream network files import them |
 | `dev` | `pytest` | the test suite |
 
 ```bash
@@ -75,6 +79,23 @@ The `adapt` extra is what an upstream run cannot begin without: the vendored
 `wandb` at module level, before a single option is parsed. They are listed by
 `symtrs doctor`, and a domain-adaptation run started without them stops with the install
 command rather than upstream's traceback.
+
+### Shadow removal needs the submodules
+
+The shadow-removal networks come from four upstream repositories under `third_party/`,
+included as git submodules. A plain `git clone` leaves those folders empty; fetch them with
+
+```bash
+git clone --recursive <this repository>              # at clone time, or afterwards:
+git submodule update --init third_party
+python scripts/fetch_third_party.py --check          # all four should print [ok]
+```
+
+Nothing else needs them: depth, segmentation, super-resolution, domain adaptation and the
+test suite run without. Install the `shadow` extra in the environment that runs shadow
+removal, keeping `numpy==1.26.4` in the same command (`pip install -e '.[shadow]'
+numpy==1.26.4`), because `scipy` otherwise pulls numpy 2 and breaks the Depth Anything 3
+adapter.
 
 ### timm is needed by more than SegFormer
 
