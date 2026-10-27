@@ -1444,9 +1444,9 @@ def shadow_yaml(model: ShadowModel) -> str:
     ]
     header += model.note.split("\n") + [""]
     header += [
-        f"This is not a SyMTRS model. The network class is upstream {model.repo}, cloned at the",
-        "revision in third_party/PINS.md by `python scripts/fetch_third_party.py` (the clones are",
-        "not committed). SyMTRS stages the data, runs one shared training loop and one shared",
+        f"This is not a SyMTRS model. The network class is upstream {model.repo}, a git",
+        "submodule under third_party/ pinned to one commit (`git submodule update --init",
+        "third_party`; notes in third_party/PINS.md). SyMTRS stages the data, runs one shared training loop and one shared",
         "tiled inference around the upstream class, and scores the PNGs it writes with",
         "symtrs/metrics/shadow.py - the same numbers for all four models:",
         "PSNR, SSIM and LAB error on all pixels, in the shadow region and outside it.",

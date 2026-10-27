@@ -279,8 +279,8 @@ REGISTRY: Dict[str, ModelSpec] = {
         requires=("torch",),
     ),
     # ------------------------------------------------------------- shadow removal
-    # Like domain adaptation, the networks are upstream's (third_party/, pinned in
-    # third_party/PINS.md); `symtrs.model.shadow` stages the data, launches the worker that
+    # Like domain adaptation, the networks are upstream's (third_party/, git submodules;
+    # notes in third_party/PINS.md); `symtrs.model.shadow` stages the data, launches the worker that
     # imports the class, and scores the result. Architecture arguments live in
     # `symtrs/model/shadow/archs.py`, so this table only says that the models exist.
     "shadowformer": _spec(

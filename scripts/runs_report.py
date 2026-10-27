@@ -50,7 +50,7 @@ PROTOCOL = {
                       "(ShadowFormer input and the shadow / non-shadow metric split) derived "
                       "from the pair: `(Y_noshadow - Y_day) / Y_noshadow > mask_threshold`, "
                       "then a `mask_open` px opening. Upstream code in `third_party/` "
-                      "(pins in `third_party/PINS.md`). Metrics: PSNR, SSIM, LAB RMSE over "
+                      "(git submodules, notes in `third_party/PINS.md`). Metrics: PSNR, SSIM, LAB RMSE over "
                       "all / shadow / non-shadow pixels.",
     "domain_adapt": "`rgb_day` <-> `rgb_night` and `rgb_day` <-> `rgb_noshadow` (2048 only; "
                     "the generated side is upstream's `fake_B` in every direction); vendored "

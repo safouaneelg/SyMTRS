@@ -4,8 +4,8 @@
                  --set shadow.iterations=500
 
 Like domain adaptation and super-resolution this task does not own its networks: the
-classes come from the upstream checkouts under `third_party/` (pinned in
-`third_party/PINS.md`, recreated by `scripts/fetch_third_party.py`). `symtrs` owns the
+classes come from the upstream checkouts under `third_party/` (git submodules, pinned by
+their gitlinks; `git submodule update --init third_party`). `symtrs` owns the
 folder mapping (`staging.py`), the launch (`runner.py`, `worker.py`) and the scoring
 (`symtrs.metrics.shadow`), and folds the result into the usual `summary.json`.
 """

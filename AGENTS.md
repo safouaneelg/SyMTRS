@@ -41,8 +41,9 @@ removal is a third case, below):
   failed trainer run exits non-zero and leaves `summary_failed.json`, never `summary.json`.
 
 **Shadow removal** takes only the network *class* from four upstream checkouts under
-`third_party/` (pinned in `third_party/PINS.md`, cloned by `python scripts/fetch_third_party.py`,
-gitignored). `symtrs/model/shadow/` stages `rgb_day`/`rgb_noshadow` pairs plus a *derived* shadow
+`third_party/` (git submodules, pinned by their gitlinks and unmodified; `git submodule update
+--init third_party`, `python scripts/fetch_third_party.py --check` verifies; notes and licence in
+`third_party/PINS.md`). `symtrs/model/shadow/` stages `rgb_day`/`rgb_noshadow` pairs plus a *derived* shadow
 mask (the dataset has none; `shadow.mask_threshold`/`mask_open`; derived once per pair and settings into the shared,
 gitignored `shadow.mask_cache` (`.cache/shadow_masks`, valid while the sources' size/mtime match,
 filled by `shadow.mask_workers` processes, never inside the dataset) and only linked into each run,

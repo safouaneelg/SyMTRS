@@ -1,0 +1,16 @@
+[submodule "third_party/ShadowFormer"]
+	path = third_party/ShadowFormer
+	url = https://github.com/guolanqing/ShadowFormer
+	ignore = untracked
+[submodule "third_party/Restormer"]
+	path = third_party/Restormer
+	url = https://github.com/swz30/Restormer
+	ignore = untracked
+[submodule "third_party/Uformer"]
+	path = third_party/Uformer
+	url = https://github.com/ZhendongWang6/Uformer
+	ignore = untracked
+[submodule "third_party/ShadowMaskFormer"]
+	path = third_party/ShadowMaskFormer
+	url = https://github.com/lizhh268/ShadowMaskFormer
+	ignore = untracked

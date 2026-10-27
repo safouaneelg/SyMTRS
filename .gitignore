@@ -214,13 +214,11 @@ __marimo__/
 runs/
 
 # Local training state (SyMTRS-train): logs, checkpoints, weight caches and the second venv.
-# Third-party shadow-removal repos are cloned at the revisions in third_party/PINS.md by
-# scripts/fetch_third_party.py rather than committed.
+# The third-party shadow-removal repos under third_party/ are git submodules (see .gitmodules),
+# so they are deliberately not ignored here.
 logs/
 checkpoints/
 *.pt
 *.pth
 *.ckpt
 .venv-*/
-third_party/*/
-!third_party/PINS.md

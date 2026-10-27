@@ -52,7 +52,7 @@ def build_network(cfg: RunConfig) -> Tuple[torch.nn.Module, Arch]:
     arch = arch_for(spec.key)
     if not arch.source_path.is_file():
         raise FileNotFoundError(
-            f"{arch.source_path} is missing; run `python scripts/fetch_third_party.py`"
+            f"{arch.source_path} is missing; run `git submodule update --init third_party`"
         )
     module_spec = importlib.util.spec_from_file_location(
         f"symtrs_upstream_{arch.repo.lower()}", arch.source_path

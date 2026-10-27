@@ -1,75 +1,57 @@
 #!/usr/bin/env python3
-"""Clone the four shadow-removal upstreams at the revisions pinned in third_party/PINS.md.
+"""Check out the four shadow-removal upstreams (git submodules under third_party/).
 
-    python scripts/fetch_third_party.py           # clone / checkout / apply third_party/patches/<repo>*.patch
-    python scripts/fetch_third_party.py --check   # verify revisions (and patches applied); change nothing
+    python scripts/fetch_third_party.py           # git submodule update --init third_party
+    python scripts/fetch_third_party.py --check   # verify every checkout is at its pin; change nothing
 
-The clones are gitignored (third_party/*/): they are upstream code, not ours. The pins are
-read from PINS.md so there is one table to edit. Patches, if any, live in
-third_party/patches/<RepoName>-*.patch and are applied with `git apply`; every patch must be
-listed in PINS.md (the current set is: none needed on torch 2.11).
+The pins are the submodule gitlinks, not a table: `.gitmodules` holds each URL and git records
+the commit, so `git submodule status` is the single source of truth (third_party/PINS.md keeps
+the notes - dates, licence, weights - and no hashes). This wrapper exists so the command the
+error messages and older docs name keeps working, and so `--check` reads as a pass/fail list.
+A submodule cannot carry local edits: none of the four is modified, and if one ever has to be,
+fork it and point the submodule at the fork rather than editing the checkout.
 """
 from __future__ import annotations
 
 import argparse
-import re
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-TP = ROOT / "third_party"
+
+#: `git submodule status` prefixes: ' ' at the pin, '+' another commit checked out,
+#: '-' not initialised, 'U' merge conflict.
+STATES = {" ": "ok", "+": "BAD (checked out at another commit)", "-": "missing (run without --check)",
+          "U": "BAD (merge conflict)"}
 
 
-def pins():
-    rows = []
-    for line in (TP / "PINS.md").read_text(encoding="utf-8").splitlines():
-        m = re.match(r"\|\s*(\w+)\s*\|\s*(https://\S+)\s*\|\s*([0-9a-f]{40})\s*\|", line)
-        if m:
-            rows.append(m.groups())
-    if not rows:
-        raise SystemExit("no pins found in third_party/PINS.md")
-    return rows
-
-
-def git(*args, cwd=None):
-    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
-
-
-def head(path: Path) -> str:
-    result = git("rev-parse", "HEAD", cwd=path)
-    return result.stdout.strip() if result.returncode == 0 else ""
+def git(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
+
+    if not args.check:
+        result = git("submodule", "update", "--init", "third_party")
+        if result.returncode:
+            print(result.stderr, end="")
+            return 1
+
+    result = git("submodule", "status", "third_party")
+    if result.returncode or not result.stdout.strip():
+        print(result.stderr or "no submodules under third_party/ (is .gitmodules present?)")
+        return 1
     bad = 0
-    for name, url, commit in pins():
-        path = TP / name
-        patches = sorted((TP / "patches").glob(f"{name}-*.patch"))
-        if args.check:
-            ok = head(path) == commit
-            print(f"[{'ok' if ok else 'BAD'}] {name} at {head(path)[:10] or 'missing'} (pinned {commit[:10]})")
-            bad += not ok
-            continue
-        if not path.is_dir():
-            r = git("clone", url, str(path))
-            if r.returncode:
-                print(r.stderr)
-                return 1
-        if head(path) != commit:
-            for cmd in (("fetch", "origin", commit), ("checkout", "--force", commit)):
-                r = git(*cmd, cwd=path)
-                if r.returncode:
-                    print(f"{name}: git {' '.join(cmd)} failed: {r.stderr}")
-                    return 1
-        for patch in patches:
-            if git("apply", "--check", str(patch), cwd=path).returncode == 0:
-                git("apply", str(patch), cwd=path)
-                print(f"{name}: applied {patch.name}")
-        print(f"{name}: at {commit[:10]}")
+    for line in result.stdout.splitlines():
+        state, commit, path = line[0], *line[1:].split()[:2]
+        label = STATES.get(state, f"BAD (unknown state {state!r})")
+        print(f"[{label.split()[0]}] {Path(path).name} at {commit[:10]}"
+              + ("" if state == " " else f"  - {label}"))
+        bad += state != " "
     return 1 if bad else 0
 
 

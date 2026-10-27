@@ -44,7 +44,7 @@ def test_archs_match_upstream_signatures():
 
     for key, arch in ARCHS.items():
         if upstream_missing(key):
-            pytest.skip("third_party checkouts absent (scripts/fetch_third_party.py)")
+            pytest.skip("third_party checkouts absent (git submodule update --init third_party)")
         tree = ast.parse(arch.source_path.read_text(encoding="utf-8"))
         cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == arch.cls)
         init = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "__init__")
@@ -273,7 +273,7 @@ def test_shadowmaskformer_builds_with_about_2_3_million_parameters_and_runs_on_c
     from symtrs.model.shadow.worker import forward
 
     if upstream_missing("shadowmaskformer"):
-        pytest.skip("third_party checkouts absent (scripts/fetch_third_party.py)")
+        pytest.skip("third_party checkouts absent (git submodule update --init third_party)")
     arch = arch_for("shadowmaskformer")
     spec = importlib.util.spec_from_file_location("symtrs_test_smf", arch.source_path)
     module = importlib.util.module_from_spec(spec)
@@ -306,7 +306,7 @@ def test_doctor_reports_the_vendored_imports_and_pyproject_installs_them() -> No
     from symtrs.model.shadow.archs import ARCHS, upstream_missing
 
     if any(upstream_missing(key) for key in ARCHS):
-        pytest.skip("third_party checkouts absent (scripts/fetch_third_party.py)")
+        pytest.skip("third_party checkouts absent (git submodule update --init third_party)")
 
     needed = set()
     for arch in ARCHS.values():

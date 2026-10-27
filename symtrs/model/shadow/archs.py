@@ -25,7 +25,7 @@ THIRD_PARTY = REPO_ROOT / "third_party"
 @dataclass(frozen=True)
 class Arch:
     key: str
-    #: Directory under third_party/ (the upstream checkout, see third_party/PINS.md).
+    #: Directory under third_party/ (the upstream submodule, see third_party/PINS.md).
     repo: str
     #: Python file that defines the class, relative to the checkout.
     source: str
@@ -135,7 +135,8 @@ def upstream_missing(key: str) -> str:
     if arch.source_path.is_file():
         return ""
     return (
-        f"the {arch.repo} checkout is missing ({arch.source_path}). The three upstream repos "
-        "are cloned at pinned revisions, not committed: run "
-        "`python scripts/fetch_third_party.py` (add `--check` to verify)."
+        f"the {arch.repo} checkout is missing ({arch.source_path}). The four upstream repos "
+        "are git submodules, not fetched by a plain clone: run "
+        "`git submodule update --init third_party` (or `python scripts/fetch_third_party.py`; "
+        "add `--check` to verify)."
     )
