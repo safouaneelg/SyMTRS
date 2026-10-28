@@ -340,3 +340,42 @@ def test_doctor_reports_the_vendored_imports_and_pyproject_installs_them() -> No
     assert extra, "pyproject.toml no longer declares the `shadow` extra"
     for name in ("scipy", "einops"):
         assert f'"{name}"' in extra.group(1)
+
+
+@requires_numpy
+@requires_pil
+def test_score_split_in_processes_matches_serial_in_key_order(tmp_path):
+    # Scoring was moved into processes because 3000 images at 2048 px took ~20 h serially;
+    # the parallel path must give the same per-image rows, in key order, as the serial one.
+    import json
+
+    import numpy as np
+    from PIL import Image
+
+    from symtrs.config import RunConfig
+    from symtrs.model.shadow import runner
+
+    rng = np.random.default_rng(0)
+    keys = [f"img{i:02d}" for i in range(6)]
+    for key in keys:
+        target = rng.integers(0, 256, (40, 40, 3), np.uint8)
+        noisy = np.clip(target.astype(int) + rng.integers(-30, 31, target.shape), 0, 255).astype(np.uint8)
+        mask = np.zeros((40, 40), np.uint8)
+        mask[5 : 5 + int(rng.integers(0, 30)), 5:30] = 255  # img with an empty shadow region too
+        for folder, image in (("input", target), ("target", target), ("mask", mask)):
+            path = tmp_path / "staging" / "test" / folder / f"{key}.png"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(image).save(path)
+        prediction = tmp_path / "predictions" / "test" / f"{key}.png"
+        prediction.parent.mkdir(parents=True, exist_ok=True)
+        Image.fromarray(noisy).save(prediction)
+
+    cfg = RunConfig.from_yaml(str(REPO_ROOT / "configs/shadow_removal/shadowformer.yaml"))
+    results = {}
+    for workers in (1, 3):
+        cfg.shadow.mask_workers = workers
+        metrics = runner.score_split(cfg, tmp_path, "test")
+        rows = json.loads((tmp_path / "per_image_test.json").read_text(encoding="utf-8"))
+        results[workers] = (metrics, rows)
+    assert [row["key"] for row in results[3][1]] == keys
+    assert results[3] == results[1]

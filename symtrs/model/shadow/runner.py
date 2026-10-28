@@ -32,6 +32,9 @@ from symtrs.common.jsonio import dumps as json_dumps_safe
 
 WORKER_MODULE = "symtrs.model.shadow.worker"
 
+#: Upper bound on the processes `score_split` uses (see the comment there).
+SCORE_WORKERS_MAX = 4
+
 #: Every column `metrics.csv` can hold, fixed up front: the worker appends training rows
 #: and the parent appends scoring rows, and a CSV whose header was taken from the first
 #: row would misalign the others.
@@ -117,7 +120,7 @@ def score_split(cfg, run_dir: Path, split: str) -> Dict[str, float]:
     import numpy as np
     from PIL import Image
 
-    from symtrs.metrics.shadow import aggregate, score_image
+    from symtrs.metrics.shadow import aggregate
     from symtrs.model.shadow.staging import staged_keys
 
     staging = run_dir / "staging" / split
@@ -131,17 +134,29 @@ def score_split(cfg, run_dir: Path, split: str) -> Dict[str, float]:
             f"`symtrs eval <config> --eval-split {split}` once it has."
         )
 
-    rows = []
-    per_image = []
-    for index, key in enumerate(keys):
+    # One 2048 px image costs ~24 s of single-threaded numpy (the SSIM filter dominates), so
+    # 3000 test images scored serially took ~20 h and held a GPU slot of the queue the whole
+    # time (pix2pix_shadow2noshadow, 2026-10-27). The images are independent, so they are
+    # scored in processes. The count follows shadow.mask_workers (the other CPU-side shadow
+    # step) but is capped at SCORE_WORKERS_MAX: scoring runs beside GPU jobs whose loaders
+    # need the cores. `spawn`, not fork: the parent may already hold torch/CUDA state.
+    jobs = [(str(predictions / f"{k}.png"), str(staging / "target" / f"{k}.png"),
+             str(staging / "mask" / f"{k}.png")) for k in keys]
+    workers = max(1, min(SCORE_WORKERS_MAX, cfg.shadow.mask_workers, len(jobs)))
+    if workers == 1:
+        rows = [_score_files(job) for job in jobs]
+    else:
+        import multiprocessing
+        from concurrent.futures import ProcessPoolExecutor
+
+        print(f"[symtrs] scoring {len(jobs)} {split} images in {workers} processes")
+        with ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context("spawn")) as pool:
+            rows = list(pool.map(_score_files, jobs, chunksize=8))
+    per_image = [{"key": key, **row} for key, row in zip(keys, rows)]
+    for key in keys[: cfg.eval.num_visualizations]:
         prediction = np.asarray(Image.open(predictions / f"{key}.png").convert("RGB"), np.float32) / 255.0
-        target = np.asarray(Image.open(staging / "target" / f"{key}.png").convert("RGB"), np.float32) / 255.0
         mask = np.asarray(Image.open(staging / "mask" / f"{key}.png").convert("L")) > 127
-        row = score_image(prediction, target, mask)
-        rows.append(row)
-        per_image.append({"key": key, **row})
-        if index < cfg.eval.num_visualizations:
-            _write_preview(run_dir / "preview" / f"{split}_{key}.png", staging, key, prediction, mask)
+        _write_preview(run_dir / "preview" / f"{split}_{key}.png", staging, key, prediction, mask)
 
     (run_dir / f"per_image_{split}.json").write_text(json_dumps_safe(per_image, indent=1), encoding="utf-8")
     metrics = aggregate(rows)
@@ -152,6 +167,24 @@ def score_split(cfg, run_dir: Path, split: str) -> Dict[str, float]:
         f"non-shadow psnr={metrics.get('psnr_nonshadow', float('nan')):.3f} ({len(keys)} images)"
     )
     return metrics
+
+
+def _score_files(paths) -> Dict[str, Optional[float]]:
+    """`score_image` on one (prediction, target, mask) triple of PNG paths.
+
+    Top-level and path-based so a spawned process can run it: it reads its own images rather
+    than receiving three 2048 px arrays through a pipe.
+    """
+    import numpy as np
+    from PIL import Image
+
+    from symtrs.metrics.shadow import score_image
+
+    prediction_path, target_path, mask_path = paths
+    prediction = np.asarray(Image.open(prediction_path).convert("RGB"), np.float32) / 255.0
+    target = np.asarray(Image.open(target_path).convert("RGB"), np.float32) / 255.0
+    mask = np.asarray(Image.open(mask_path).convert("L")) > 127
+    return score_image(prediction, target, mask)
 
 
 def _write_preview(path: Path, staging: Path, key: str, prediction, mask) -> None:
