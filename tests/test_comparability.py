@@ -153,6 +153,26 @@ def test_tables_put_kid_before_fid():
     assert order.index("kid") < order.index("fid")
 
 
+def test_the_table_reports_means_and_keeps_the_spread_behind_a_flag():
+    # `summary.json` carries std/median/p05/p95 for every metric now, and `symtrs tables`
+    # without a flag printed all of them: a 72-column results table. The paper table is the
+    # means; the spread is one flag away. KID's std is a measurement of its own (and `None`
+    # when the set is full), not one of `aggregate`'s additions, so it stays by default.
+    from symtrs.commands import tables
+
+    rows = [{"run": "r", "model": "cyclegan", "kid": 0.01, "kid_std": None,
+             "psnr": 20.0, "psnr_std": 1.0, "psnr_median": 20.5}]
+
+    default = tables._columns(rows, None)
+    assert "psnr" in default and "kid_std" in default
+    assert "psnr_std" not in default and "psnr_median" not in default
+    assert "psnr_std" in tables._columns(rows, None, spread=True)
+
+    # With a metric group, each mean keeps its spread beside it.
+    spread = tables._columns(rows, "domain_adapt", spread=True)
+    assert spread.index("psnr_std") == spread.index("psnr") + 1
+
+
 # --------------------------------------------------------------- shadow init
 
 

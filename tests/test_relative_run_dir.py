@@ -54,6 +54,7 @@ def test_anchored_resolves_against_the_callers_cwd_and_leaves_the_original(calle
             "data.root": "data",
             "shadow.init_weights": os.path.join(".cache", "w.pth"),
             "train.resume": os.path.join("old", "last.pt"),
+            "train.init_weights": os.path.join("day", "best.pt"),
         }
     )
     anchored = cfg.anchored()
@@ -61,6 +62,7 @@ def test_anchored_resolves_against_the_callers_cwd_and_leaves_the_original(calle
     _assert_absolute_under(anchored.data.root, caller_cwd / "data")
     _assert_absolute_under(anchored.shadow.init_weights, caller_cwd / ".cache" / "w.pth")
     _assert_absolute_under(anchored.train.resume, caller_cwd / "old" / "last.pt")
+    _assert_absolute_under(anchored.train.init_weights, caller_cwd / "day" / "best.pt")
     assert cfg.out_dir == RELATIVE_OUT, "anchored() must copy, not mutate the caller's config"
 
 
@@ -68,7 +70,8 @@ def test_anchored_covers_the_default_run_directory_and_keeps_empty_paths_empty(c
     """With no `--out-dir` the canonical default (`runs/<task>/<model>/<res>`) is relative too."""
     anchored = RunConfig(task="shadow_removal", model="restormer").anchored()
     _assert_absolute_under(anchored.out_dir, caller_cwd / "runs" / "shadow_removal" / "restormer" / "2048")
-    assert anchored.shadow.init_weights == "" and anchored.train.resume == "" and anchored.data.root == ""
+    assert (anchored.shadow.init_weights == "" and anchored.train.resume == ""
+            and anchored.train.init_weights == "" and anchored.data.root == "")
 
 
 # --------------------------------------------------------------------- shadow removal

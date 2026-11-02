@@ -600,8 +600,9 @@ def test_pix2pix_staging_writes_the_AB_pairs_the_vendored_aligned_dataset_reads(
     staging = upstream.build_staging_dir(
         str(root), str(tmp_path / "run"), "test", direction="shadow2noshadow", aligned=True
     )
-    pairs = sorted(p.name for p in (staging / "test").iterdir())
+    pairs = sorted(p.name for p in (staging / "test").iterdir() if not p.name.startswith("."))
     assert pairs == ["loc000.png", "loc001.png"]
+    assert (staging / "test" / upstream.PAIR_SIZE_MARKER).read_text() == "0"  # native
     pair = Image.open(staging / "test" / "loc000.png").convert("RGB")
     assert pair.size == (64, 32)
     assert pair.getpixel((16, 16)) == (70, 70, 70)  # left half: rgb_day, the shadowed square
@@ -616,7 +617,8 @@ def test_pix2pix_staging_writes_the_AB_pairs_the_vendored_aligned_dataset_reads(
     again = upstream.build_staging_dir(
         str(root), str(tmp_path / "run"), "test", direction="shadow2noshadow", aligned=True
     )
-    assert sorted(p.name for p in (again / "test").iterdir()) == ["loc000.png"]
+    assert sorted(p.name for p in (again / "test").iterdir() if not p.name.startswith(".")) \
+        == ["loc000.png"]
 
 
 def test_pix2pix_selects_the_aligned_dataset_mode_and_cyclegan_the_unaligned_one() -> None:

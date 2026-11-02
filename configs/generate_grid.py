@@ -1202,6 +1202,7 @@ def domain_yaml(model: DomainModel, direction: str) -> str:
     folder_a, folder_b = DOMAIN_FOLDERS[direction]
     shadow = direction in SHADOW_DIRECTIONS
     paired_scored = direction == "shadow2noshadow"
+    aligned = model.dataset_mode == "aligned"  # pix2pix: the pairs are written, not just linked
     where = f"configs/domain_adapt/{model.key}_{direction}.yaml"
     header = [
         f"{model.title} {source} -> {target}, at native resolution.",
@@ -1233,6 +1234,15 @@ def domain_yaml(model: DomainModel, direction: str) -> str:
         "  * After training, test.py generates the translations and the result is scored with",
         "    FID and KID against the real target domain.",
     ]
+    if aligned:
+        header += [
+            "  * pix2pix needs pairs, so on top of the links one lossless PNG per scene is",
+            "    written to <run_dir>/staging/<split>/<split>/ holding A beside B. At native",
+            "    size that is ~200 GB and ~9 h of encoding per direction, while upstream only",
+            "    ever reads 286x286 of it: add `--set model_kwargs.staging_size=286` to stage",
+            "    each half at the size upstream resizes to (same BICUBIC filter, so the tensor",
+            "    is identical). The default is native.",
+        ]
     if paired_scored:
         header += [
             "  * The target here has a pixel-aligned ground truth, so the generated image is",

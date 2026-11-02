@@ -2,6 +2,7 @@
 
     symtrs tables runs/ --format markdown
     symtrs tables runs/ --metric depth --split test --csv results/depth.csv
+    symtrs tables runs/ --task shadow_removal --spread     # with the distribution columns
 
 Walks a runs directory for `summary.json` files and prints the test metrics of every
 run it finds. This is the step that turns a directory full of run folders into the
@@ -20,6 +21,11 @@ from typing import Any, Dict, List, Optional
 
 #: Columns that identify a run rather than measure it.
 IDENTITY = ("task", "model", "resolution", "mode", "best_epoch")
+
+#: Suffixes `aggregate` adds beside each mean. They live in `summary.json` (a figure or a
+#: paired test wants them) but a results table reports means; `--spread` adds them back.
+#: A name that is in a `COLUMN_ORDER` (KID's own std, a metric in its own right) is not one.
+SPREAD_SUFFIXES = ("_std", "_median", "_p05", "_p95")
 
 #: Metric order per task, so two tables of the same task line up.
 COLUMN_ORDER = {
@@ -51,6 +57,8 @@ def add_parser(subparsers) -> None:
     parser.add_argument("--resolution", type=int, default=None)
     parser.add_argument("--metric", default=None,
                         help="restrict the columns to one metric group: depth, segmentation, domain_adapt, shadow_removal")
+    parser.add_argument("--spread", action="store_true",
+                        help="also print std/median/p05/p95, which summary.json carries for every metric")
     parser.add_argument("--format", choices=["markdown", "csv", "json"], default="markdown")
     parser.add_argument("--out", default=None, help="write to a file instead of stdout")
     parser.add_argument("--sort-by", dest="sort_by", default="", help="column to sort on")
@@ -85,18 +93,34 @@ def collect(root: str) -> List[Dict[str, Any]]:
     return rows
 
 
-def _columns(rows: List[Dict[str, Any]], metric: Optional[str]) -> List[str]:
+def is_spread(name: str) -> bool:
+    """True for the distribution columns `aggregate` writes beside a mean."""
+    return name.endswith(SPREAD_SUFFIXES) and not any(
+        name in names for names in COLUMN_ORDER.values()
+    )
+
+
+def _columns(rows: List[Dict[str, Any]], metric: Optional[str], spread: bool = False) -> List[str]:
     identity = [
         name for name in ("run", "task", "model", "direction", "resolution", "mode")
         if any(name in r for r in rows)
     ]
     if metric:
         measured = [name for name in COLUMN_ORDER.get(metric, ()) if any(name in r for r in rows)]
+        if spread:
+            # Each base metric followed by its own spread, so a column sits beside its mean.
+            # KID's std is a metric of its own, so a name can be produced twice; keep one.
+            expanded: List[str] = []
+            for base in measured:
+                for name in [base] + [base + suffix for suffix in SPREAD_SUFFIXES]:
+                    if name not in expanded and any(name in r for r in rows):
+                        expanded.append(name)
+            measured = expanded
     else:
         seen: List[str] = []
         for row in rows:
             for name in row:
-                if name not in identity and name not in seen:
+                if name not in identity and (spread or not is_spread(name)) and name not in seen:
                     seen.append(name)
         measured = sorted(seen, key=lambda n: (
             next((i for i, names in enumerate(COLUMN_ORDER.values()) if n in names), 99), n
@@ -159,7 +183,7 @@ def _run(args: argparse.Namespace) -> int:
 
         rows.sort(key=_sort_key)
 
-    columns = _columns(rows, args.metric)
+    columns = _columns(rows, args.metric, args.spread)
     text = render(rows, columns, args.format)
 
     if args.out:

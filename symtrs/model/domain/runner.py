@@ -99,6 +99,7 @@ class DomainAdaptation:
         gpu_ids: str = "",
         extra_args: Optional[List[str]] = None,
         decay_epochs: Optional[int] = None,
+        staging_size: int = 0,
         **kwargs: Any,
     ) -> None:
         upstream_module.direction_spec(direction)  # unknown direction -> ValueError
@@ -111,6 +112,10 @@ class DomainAdaptation:
         # None -> divide cfg.train.epochs following upstream's own flat-then-decay shape.
         # See `upstream.epoch_split` for why this has to be passed at all.
         self.decay_epochs = None if decay_epochs is None else int(decay_epochs)
+        # Side of each half of a pix2pix pair, 0 for native. Upstream resizes to 286 anyway, so
+        # nothing the network sees changes; only the disk and the staging time do. See
+        # `upstream.write_aligned_pairs`.
+        self.staging_size = int(staging_size or 0)
         self.extra_kwargs = kwargs
 
     # ------------------------------------------------------------------ description
@@ -150,7 +155,8 @@ class DomainAdaptation:
     ) -> List[str]:
         root = self.resolve_upstream()
         staging = upstream_module.build_staging_dir(
-            dataroot, run_dir, split, direction=self.direction, aligned=self.dataset_mode == "aligned"
+            dataroot, run_dir, split, direction=self.direction,
+            aligned=self.dataset_mode == "aligned", pair_size=self.staging_size,
         )
         count_a, count_b = upstream_module.count_staged(staging, split)
         print(f"[symtrs] staged {split}: {count_a} domain-A images, {count_b} domain-B images")
@@ -192,7 +198,8 @@ class DomainAdaptation:
     ) -> List[str]:
         root = self.resolve_upstream()
         staging = upstream_module.build_staging_dir(
-            dataroot, run_dir, split, direction=self.direction, aligned=self.dataset_mode == "aligned"
+            dataroot, run_dir, split, direction=self.direction,
+            aligned=self.dataset_mode == "aligned", pair_size=self.staging_size,
         )
 
         command = upstream_module.test_command(
@@ -326,6 +333,7 @@ def run_domain_adaptation(cfg, mode: str = "finetune") -> Dict[str, Any]:
             dataset_mode=cfg.model_kwargs.get("dataset_mode", ""),
             gpu_ids=str(cfg.model_kwargs.get("gpu_ids", "")),
             decay_epochs=cfg.model_kwargs.get("decay_epochs"),
+            staging_size=cfg.model_kwargs.get("staging_size", 0),
             extra_args=list(cfg.upstream_args) + list(cfg.model_kwargs.get("extra_args", []) or []),
         )
     ]
@@ -395,6 +403,11 @@ def run_domain_adaptation(cfg, mode: str = "finetune") -> Dict[str, Any]:
     if task.direction in SHADOW_REMOVAL_DIRECTIONS:
         summary["paired_scoring"] = PAIRED_SCORING_NOTE
         summary["metric_notes"]["ssim_y"] = SSIM_NOTE
+        # Same rule as the shadow_removal task: this direction is scored through its scorer,
+        # so it is its prediction images that decide what `eval.retain_predictions` keeps.
+        from symtrs.model.shadow.runner import retention_record
+
+        summary["predictions"] = retention_record(cfg, run_dir)
     (run_dir / "summary.json").write_text(json_dumps_safe(summary, indent=2), encoding="utf-8")
     return summary
 
@@ -507,6 +520,13 @@ def score_shadow_removal(
         )
 
     predictions = Path(run_dir) / "predictions" / split
+    # Resampled fresh below from upstream's output, so a previous pass's files - including
+    # the marker `retain_predictions` leaves on a downsampled split - must not survive into
+    # this one: scoring would refuse the split, or score a stale key.
+    if predictions.exists():
+        import shutil
+
+        shutil.rmtree(predictions)
     predictions.mkdir(parents=True, exist_ok=True)
     sizes = set()
     for key in keys:

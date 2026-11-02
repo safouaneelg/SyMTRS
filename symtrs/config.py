@@ -45,6 +45,9 @@ class ConfigError(ValueError):
 #: The autocast types `train.amp_dtype` / `eval.amp_dtype` accept.
 AMP_DTYPES = ("float16", "bfloat16")
 
+#: What `eval.retain_predictions` accepts; see `EvalConfig.retain_predictions`.
+RETAIN_MODES = ("downsample", "all", "none")
+
 
 def focal_px_for_resolution(resolution: int, hfov_deg: float) -> float:
     """Focal length in pixels of a square image `resolution` pixels wide.
@@ -188,7 +191,15 @@ class TrainConfig:
 
     log_every: int = 50
     save_samples_every: int = 1
+    # Continue a run: optimizer, epoch counter, `best`, history and the schedule are restored,
+    # so it is the flag for an interrupted job and nothing else.
     resume: str = ""
+    # Start from another run's weights and train as a new run: weights only, epoch 0, a fresh
+    # `best`, history and schedule. This is the flag for a fine-tune, and `resume` cannot do
+    # the job - it restores the old epoch counter (so the run starts at epoch 21 of 20) and
+    # the old `best` (which a model moved to a second domain never beats, so no `best.pt` is
+    # ever written and the run scores nothing).
+    init_weights: str = ""
     device: str = "cuda"
 
     def validate(self) -> None:
@@ -219,6 +230,12 @@ class TrainConfig:
                 "train.freeze must be '', 'encoder', 'head' or 'last_n:<k>'; "
                 f"got {self.freeze!r}"
             )
+        if self.resume and self.init_weights:
+            raise ConfigError(
+                "train.resume and train.init_weights are different things and cannot be "
+                "combined: `resume` continues a run (optimizer, epoch counter, best), "
+                "`init_weights` starts a new one from another run's weights. Drop one."
+            )
 
 
 @dataclass
@@ -247,6 +264,21 @@ class EvalConfig:
     # "" -> the model's own published alignment convention.
     align: str = ""
     num_visualizations: int = 4
+    # What survives of a split's prediction images once it has been scored. Only the shadow
+    # and domain scorers write them, because they score pixels rather than tensors: one
+    # lossless 2048 px PNG per image is ~15 MB, i.e. 45 GB for a 3000-image split, and the
+    # metrics they exist for are in `per_image_<split>.json` by the time scoring returns.
+    #   "downsample" - replace each with a 512 px copy (enough to look at any scene) and keep
+    #                  the full-resolution file of the few scenes in `preview/`, which is
+    #                  where figures zoom in. ~2 GB per split instead of ~45 GB.
+    #   "all"        - keep every PNG at full resolution (what you want while changing a
+    #                  scorer, where the point is to inspect what it read).
+    #   "none"       - keep no prediction images, only the JSON and the preview strips.
+    # Nothing here is a metric: re-scoring a run re-runs prediction from its checkpoint, so
+    # what is lost is the cost of that pass, never a number. A retained (downsampled) split
+    # is marked, and scoring refuses to read it rather than silently measuring 512 px
+    # predictions against 2048 px targets.
+    retain_predictions: str = "downsample"
 
     def validate(self) -> None:
         if self.batch_size < 1:
@@ -259,6 +291,11 @@ class EvalConfig:
             raise ConfigError("eval.tile_overlap must be smaller than eval.tile_size")
         if self.tile_batch < 1:
             raise ConfigError("eval.tile_batch must be at least 1")
+        if self.retain_predictions not in RETAIN_MODES:
+            raise ConfigError(
+                f"eval.retain_predictions must be one of {', '.join(RETAIN_MODES)}; "
+                f"got {self.retain_predictions!r}"
+            )
 
 
 @dataclass
@@ -395,6 +432,7 @@ class RunConfig:
             (cfg.shadow, "init_weights"),
             (cfg.shadow, "mask_cache"),
             (cfg.train, "resume"),
+            (cfg.train, "init_weights"),
         ):
             value = getattr(owner, name)
             if value:

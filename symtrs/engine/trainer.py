@@ -754,6 +754,8 @@ def _run_group(cfgs: List[RunConfig], device: Optional[str] = None) -> List[Dict
     for cfg in cfgs:
         run_dir = prepare_run_dir(cfg)
         model = build_from_config(cfg)
+        if cfg.train.init_weights:
+            _load_init_weights(cfg, model)
         apply_run_freeze(model, cfg)
         model.to(resolved)
         monitor, direction = resolve_monitor(cfg)
@@ -905,6 +907,8 @@ def _run(
         from symtrs.model.wrapper import build_from_config
 
         model = build_from_config(cfg)
+    if cfg.train.init_weights:
+        _load_init_weights(cfg, model)
     apply_run_freeze(model, cfg)
     model.to(resolved)
     if distributed:
@@ -1049,6 +1053,44 @@ def _fast_forward_scheduler(scheduler, steps: int) -> None:
     ):
         group["lr"] = base * lambda_(steps)
     scheduler._last_lr = [group["lr"] for group in scheduler.optimizer.param_groups]
+
+
+def _load_init_weights(cfg: RunConfig, model) -> None:
+    """Start a run from another run's weights. Only the weights cross over.
+
+    This is the fine-tune, and it is deliberately not `_resume`: the epoch counter, `best`,
+    the history and the schedule all start fresh here. Resuming instead would restore the
+    donor run's `best`, which a model moved to a second domain does not beat on its
+    validation split - the run would train its full schedule and never write `best.pt`, so
+    the arm it exists for would score nothing.
+
+    A mismatch is an error rather than a note: a fine-tune starts from the same architecture,
+    and `strict=False` here would otherwise quietly train a partly random model.
+    """
+    from symtrs.common.checkpoint import resolve_checkpoint_path
+
+    path = resolve_checkpoint_path(cfg.train.init_weights)
+    if path is None:
+        raise FileNotFoundError(f"nothing to initialise from at {cfg.train.init_weights}")
+    payload = load_checkpoint(path, map_location="cpu")
+    state = payload.get("model", payload)
+    inner = getattr(model, "module", model)
+    try:
+        missing, unexpected = inner.load_state_dict(state, strict=False)
+    except RuntimeError as exc:
+        # A shape disagreement is not in `missing`/`unexpected` - it raises - and it is the
+        # usual way a wrong model key is noticed.
+        raise ConfigError(
+            f"train.init_weights {path} does not match {cfg.model}: {exc}"
+        ) from exc
+    if missing or unexpected:
+        raise ConfigError(
+            f"train.init_weights {path} does not match {cfg.model}: {len(missing)} missing "
+            f"and {len(unexpected)} unexpected keys "
+            f"(first: {(list(missing) + list(unexpected))[:3]}). A fine-tune starts from the "
+            "same architecture; `symtrs models` lists the keys."
+        )
+    print(f"[symtrs] initial weights from {path} (epoch 0, fresh best and schedule)")
 
 
 def _resume(
@@ -1236,7 +1278,12 @@ def evaluate_run(
 
     loader = from_config(cfg, split=split, train=False)
     if is_main_process():
-        print(f"[symtrs] evaluating {cfg.task} / {cfg.model} on split {split or cfg.data.test_split}")
+        # The data root is in the line because it is the only part of a score that a log does
+        # not otherwise record: two arms that differ only in what was staged under
+        # `<root>/<split>/rgb_day_lr` print identical text here, and reading the arm off the
+        # log filename instead of the root swapped two adaptation results once.
+        print(f"[symtrs] evaluating {cfg.task} / {cfg.model} on split "
+              f"{split or cfg.data.test_split} from {cfg.data.root}")
 
     metrics = evaluate(
         model, loader, cfg, resolved,

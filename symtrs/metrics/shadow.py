@@ -209,7 +209,14 @@ def score_image(
 
 
 def aggregate(rows: Iterable[Dict[str, Optional[float]]]) -> Dict[str, float]:
-    """Mean of each metric over the images that have it, plus `images` and `n_<region>`."""
+    """Mean of each metric over the images that have it, plus its spread and `images` counts.
+
+    The distribution is kept, not only the mean, because the per-image rows are the only
+    place these numbers exist once the prediction images are downsampled or deleted
+    (`eval.retain_predictions`): a table reports a mean, but a figure, a reviewer asking
+    "how many scenes did it fail on" or a paired test needs the spread, the median and the
+    5/95 percentiles, which are cheap to carry here and impossible to recover later.
+    """
     rows = list(rows)
     out: Dict[str, float] = {}
     keys: List[str] = []
@@ -221,6 +228,11 @@ def aggregate(rows: Iterable[Dict[str, Optional[float]]]) -> Dict[str, float]:
         values = [row[key] for row in rows if row.get(key) is not None]
         if values:
             out[key] = float(np.mean(values))
+            array = np.asarray(values, dtype=np.float64)
+            out[f"{key}_std"] = float(array.std())
+            out[f"{key}_median"] = float(np.median(array))
+            out[f"{key}_p05"] = float(np.percentile(array, 5))
+            out[f"{key}_p95"] = float(np.percentile(array, 95))
     out["images"] = float(len(rows))
     out["images_with_shadow"] = float(sum(1 for r in rows if r.get("psnr_shadow") is not None))
     return out

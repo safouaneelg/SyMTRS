@@ -163,7 +163,9 @@ def _save_depth(prediction, target: Path, save_npy: bool) -> None:
     millimetres = np.clip(metres * 1000.0, 0, 65535).astype(np.uint16)
 
     target.parent.mkdir(parents=True, exist_ok=True)
-    Image.fromarray(millimetres, mode="I;16").save(target)
+    # No explicit mode: Pillow >= 13 rejects `mode="I;16"` for a uint16 array it would pick
+    # that mode for anyway ("Invalid mode for data type").
+    Image.fromarray(millimetres).save(target)
 
     finite = metres[metres > 0]
     if finite.size:

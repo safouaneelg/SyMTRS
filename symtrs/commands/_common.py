@@ -53,6 +53,7 @@ FLAG_TO_PATH: Dict[str, str] = {
     "log_every": "train.log_every",
     "save_samples_every": "train.save_samples_every",
     "resume": "train.resume",
+    "init_weights": "train.init_weights",
     "device": "train.device",
     "eval_batch_size": "eval.batch_size",
     "tile_size": "eval.tile_size",
@@ -127,6 +128,9 @@ def add_common_args(parser: argparse.ArgumentParser, training: bool = True) -> N
         optimiser.add_argument("--log-every", dest="log_every", type=int, default=None)
         optimiser.add_argument("--save-samples-every", dest="save_samples_every", type=int, default=None)
         optimiser.add_argument("--resume", default=None)
+        optimiser.add_argument("--init-weights", dest="init_weights", default=None,
+                               help="start a NEW run from another run's weights (a fine-tune; "
+                                    "use --resume to continue an interrupted one)")
 
     misc = parser.add_argument_group("misc")
     misc.add_argument("--set", action="append", default=None, metavar="KEY=VALUE",

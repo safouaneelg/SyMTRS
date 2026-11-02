@@ -321,6 +321,19 @@ Run artefacts, uniformly for every task: `<run_dir>/weights/best.pt`, `weights/l
 `summary.json`; a missing `test` key means the test split was never scored, and it is
 absent rather than zero on purpose.
 
+Shadow removal and the `shadow2noshadow` direction also write prediction images, because
+their scorer reads pixels. `eval.retain_predictions` decides what survives that scoring:
+`downsample` (the default) keeps a 512 px copy of each (`predictions/<split>/`, marked with
+`_retained.json` so scoring refuses to read it again), the scenes a figure zooms into at
+full resolution (`preview/full/`, one per camera height, picked by
+`shadow.runner.preview_keys`), and every metric in `per_image_<split>.json`; `all` keeps the
+full-size PNGs (~45 GB per 3000-image split - the setting to use while changing a scorer);
+`none` keeps no prediction images. `symtrs eval` re-runs prediction before scoring, so a
+pruned run is re-scored from its checkpoint, never from a downsampled image.
+`scripts/prune_predictions.py --runs <root>` applies the same rule to runs created before it
+existed (dry run by default), and backfills `summary.json` with the spread and the retention
+record those runs' scorer did not write - additive keys only.
+
 ## 6. Making changes
 
 **Add a model.** One `_spec` entry in `symtrs/registry.py` (key, task, protocol if it is a

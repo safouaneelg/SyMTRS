@@ -7,6 +7,7 @@ __pycache__/
 *.so
 sr_runs*
 sr_eval*
+SyMTRS___IJCV_latex/
 
 # Distribution / packaging
 .Python
@@ -222,3 +223,15 @@ checkpoints/
 *.pth
 *.ckpt
 .venv-*/
+
+# Manuscript working material kept out of the package. REVIEWERS.md is a local planning note
+# and the GeoTIFFs and screen captures are third-party imagery under their own licences; none
+# of them is needed to run, train or reproduce anything here.
+REVIEWERS.md
+swiss_topo_test_image*.png
+top_potsdam_*.tif
+
+# Under notebooks/ only the notebooks are tracked. The figure scripts beside them and the
+# PNG/PDF they render are outputs, and the paper directory (ignored above) already holds them.
+notebooks/*
+!notebooks/*.ipynb

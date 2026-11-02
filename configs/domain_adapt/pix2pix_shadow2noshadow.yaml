@@ -28,6 +28,12 @@
 #     folders are absent, which would ignore the SyMTRS train/val/test split entirely.
 #   * After training, test.py generates the translations and the result is scored with
 #     FID and KID against the real target domain.
+#   * pix2pix needs pairs, so on top of the links one lossless PNG per scene is
+#     written to <run_dir>/staging/<split>/<split>/ holding A beside B. At native
+#     size that is ~200 GB and ~9 h of encoding per direction, while upstream only
+#     ever reads 286x286 of it: add `--set model_kwargs.staging_size=286` to stage
+#     each half at the size upstream resizes to (same BICUBIC filter, so the tensor
+#     is identical). The default is native.
 #   * The target here has a pixel-aligned ground truth, so the generated image is
 #     also scored like a shadow-removal result: PSNR, SSIM and LAB error over all
 #     pixels, the shadow region and outside it (symtrs/metrics/shadow.py, the same

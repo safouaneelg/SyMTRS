@@ -371,6 +371,10 @@ def test_score_split_in_processes_matches_serial_in_key_order(tmp_path):
         Image.fromarray(noisy).save(prediction)
 
     cfg = RunConfig.from_yaml(str(REPO_ROOT / "configs/shadow_removal/shadowformer.yaml"))
+    # This test is about the parallel scorer agreeing with the serial one, so the images must
+    # survive both passes: the default retention downsamples them (and marks them) after the
+    # first, which the second would then refuse.
+    cfg.eval.retain_predictions = "all"
     results = {}
     for workers in (1, 3):
         cfg.shadow.mask_workers = workers
@@ -379,3 +383,142 @@ def test_score_split_in_processes_matches_serial_in_key_order(tmp_path):
         results[workers] = (metrics, rows)
     assert [row["key"] for row in results[3][1]] == keys
     assert results[3] == results[1]
+
+
+# ------------------------------------------------- what survives scoring
+#
+# Every shadow-removal number is in `per_image_<split>.json`; the prediction PNGs are the
+# scorer's input and used to stay on disk afterwards (45 GB per split). These tests pin the
+# policy that replaced that: the metrics and a preview survive in every mode, the retained
+# image is small, a few scenes stay at full resolution, and a downsampled split can never be
+# scored again by accident.
+
+
+def _scored_run(tmp_path, keys, fractions=None, size=640):
+    """A staged split plus full-resolution predictions, ready for `score_split`."""
+    import numpy as np
+    from PIL import Image
+
+    rng = np.random.default_rng(0)
+    for i, key in enumerate(keys):
+        target = rng.integers(0, 256, (size, size, 3), np.uint8)
+        noisy = np.clip(target.astype(int) + rng.integers(-30, 31, target.shape), 0, 255).astype(np.uint8)
+        mask = np.zeros((size, size), np.uint8)
+        mask[: int(size * (0.3 + 0.1 * i))] = 255  # different shadow fractions per scene
+        for folder, image in (("input", target), ("target", target), ("mask", mask)):
+            path = tmp_path / "staging" / "test" / folder / f"{key}.png"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(image).save(path)
+        prediction = tmp_path / "predictions" / "test" / f"{key}.png"
+        prediction.parent.mkdir(parents=True, exist_ok=True)
+        Image.fromarray(noisy).save(prediction)
+
+
+def _sized(path):
+    from PIL import Image
+
+    with Image.open(path) as image:
+        return image.size
+
+
+@requires_numpy
+@requires_pil
+def test_retain_predictions_downsampled_keeps_rows_previews_and_one_scene_per_height(tmp_path):
+    import json
+
+    from symtrs.config import RunConfig
+    from symtrs.model.shadow import runner
+
+    keys = [
+        "loc001_rot000deg_h00_x+000001_y+000001_z+007000",
+        "loc002_rot000deg_h00_x+000002_y+000002_z+007000",
+        "loc003_rot000deg_h01_x+000003_y+000003_z+010000",
+        "loc004_rot000deg_h01_x+000004_y+000004_z+010000",
+    ]
+    _scored_run(tmp_path, keys)
+    cfg = RunConfig.from_yaml(str(REPO_ROOT / "configs/shadow_removal/shadowformer.yaml"))
+    cfg.shadow.mask_workers = 1  # default is "downsample": the policy under test
+    metrics = runner.score_split(cfg, tmp_path, "test")
+
+    rows = json.loads((tmp_path / "per_image_test.json").read_text(encoding="utf-8"))
+    assert [row["key"] for row in rows] == keys
+    # The summary carries the distribution, not only the mean: the per-image file is the only
+    # place those numbers survive the downsampling below.
+    for suffix in ("", "_std", "_median", "_p05", "_p95"):
+        assert f"psnr{suffix}" in metrics
+
+    full = sorted((tmp_path / "preview" / "full").glob("*.png"))
+    assert len(full) == 2, "one scene per camera height is kept at full resolution"
+    assert all(_sized(path) == (640, 640) for path in full)
+
+    retained = list((tmp_path / "predictions" / "test").glob("*.png"))
+    assert len(retained) == len(keys) - len(full)
+    assert all(_sized(path) == (runner.RETAINED_SIZE, runner.RETAINED_SIZE) for path in retained)
+    assert (tmp_path / "preview" / f"test_{full[0].name[len('test_'):]}").is_file()
+
+    record = json.loads(
+        (tmp_path / "predictions" / "test" / runner.RETAIN_MARKER).read_text(encoding="utf-8")
+    )
+    assert record["size"] == runner.RETAINED_SIZE and record["mode"] == "downsample"
+
+    with pytest.raises(RuntimeError, match="Re-run prediction"):
+        runner.score_split(cfg, tmp_path, "test")
+
+
+@requires_numpy
+@requires_pil
+def test_retain_predictions_none_keeps_every_metric_and_the_preview(tmp_path):
+    import json
+
+    from symtrs.config import RunConfig
+    from symtrs.model.shadow import runner
+
+    keys = ["loc001_rot000deg_h00_x+000001_y+000001_z+007000"]
+    _scored_run(tmp_path, keys)
+    cfg = RunConfig.from_yaml(str(REPO_ROOT / "configs/shadow_removal/shadowformer.yaml"))
+    cfg.shadow.mask_workers = 1
+    cfg.eval.retain_predictions = "none"
+    metrics = runner.score_split(cfg, tmp_path, "test")
+
+    assert not (tmp_path / "predictions" / "test").exists()
+    assert (tmp_path / "per_image_test.json").is_file()
+    assert len(json.loads((tmp_path / "per_image_test.json").read_text())) == 1
+    assert metrics["images"] == 1.0
+    assert list((tmp_path / "preview").glob("test_*.png")), "the preview strip is what a figure shows"
+
+
+def test_preview_keys_picks_one_typical_scene_per_height():
+    from symtrs.model.shadow.runner import preview_keys
+
+    rows = [
+        {"key": "loc001_rot000deg_h00_x+0_y+0_z+007000", "shadow_fraction": 0.10},
+        {"key": "loc002_rot000deg_h00_x+0_y+0_z+007000", "shadow_fraction": 0.40},
+        {"key": "loc003_rot000deg_h00_x+0_y+0_z+007000", "shadow_fraction": 0.70},
+        {"key": "loc004_rot000deg_h01_x+0_y+0_z+010000", "shadow_fraction": 0.25},
+        {"key": "loc005_rot000deg_h01_x+0_y+0_z+010000", "shadow_fraction": 0.55},
+    ]
+    chosen = preview_keys(rows, count=4)
+    assert [key.split("_")[0] for key in chosen] == ["loc002", "loc004"], (
+        "one scene per altitude, the one nearest that altitude's median shadow fraction"
+    )
+
+
+@requires_numpy
+def test_aggregate_reports_the_spread_not_only_the_mean():
+    from symtrs.metrics.shadow import aggregate
+
+    rows = [{"psnr": v} for v in (10.0, 20.0, 30.0)]
+    out = aggregate(rows)
+    assert out["psnr"] == 20.0
+    assert out["psnr_median"] == 20.0
+    assert out["psnr_std"] == pytest.approx(8.164966, rel=1e-5)
+    assert out["psnr_p05"] < out["psnr_p95"]
+
+
+def test_unknown_retain_mode_is_refused_with_the_options():
+    from symtrs.config import ConfigError, RunConfig
+
+    cfg = RunConfig.from_yaml(str(REPO_ROOT / "configs/shadow_removal/shadowformer.yaml"))
+    cfg.eval.retain_predictions = "shrink"
+    with pytest.raises(ConfigError, match="downsample"):
+        cfg.validate()

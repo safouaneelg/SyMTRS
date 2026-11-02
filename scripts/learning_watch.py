@@ -61,18 +61,25 @@ def _epochs_and_times(run: Path):
 
 def _non_finite(run: Path) -> int:
     """Non-finite-loss warnings in the run's newest log, if the queue wrote one for it."""
-    count = 0
-    for log in (REPO / "logs").glob(f"*{run.name}*.log"):
-        text = log.read_text(encoding="utf-8", errors="replace")
-        # Only the newest launch: the queue appends every restart to the same log under a
-        # "=== <time> <command>" header, and a crashed earlier attempt's warnings (7074 from
-        # the float16 MiDaS run) must not flag the run that replaced it.
-        text = text.rsplit("\n=== ", 1)[-1]
-        # Only this run's section of a shared group log: the lines that name it.
-        count += sum(1 for line in text.splitlines()
-                     if "non-finite" in line and (f"[{run.name.rsplit('_', 1)[0]}]" in line
-                                                  or "+" not in log.name))
-    return count
+    logs = [p for p in (REPO / "logs").glob(f"*{run.name}*.log") if p.is_file()]
+    if not logs:
+        return 0
+    # Only the newest log file, not the sum over every file the name matches: a run keeps a
+    # log per day it was launched on, so summing them re-counted the float16 warnings of
+    # 2026-10-22 against the bfloat16 runs that replaced them and flagged two healthy runs
+    # every four hours for days (midas_dpt_beit_large_512: 114 hits, all in _20261022.log;
+    # the 2048 group: 12052, all in its 10-22 section). A log that stopped being written is
+    # history, not evidence about the run as it stands.
+    log = max(logs, key=lambda p: p.stat().st_mtime)
+    text = log.read_text(encoding="utf-8", errors="replace")
+    # Only the newest launch inside that file: the queue appends every restart to the same log
+    # under a "=== <time> <command>" header, and a crashed earlier attempt's warnings (7074
+    # from the float16 MiDaS run) must not flag the run that replaced it.
+    text = text.rsplit("\n=== ", 1)[-1]
+    # Only this run's section of a shared group log: the lines that name it.
+    return sum(1 for line in text.splitlines()
+               if "non-finite" in line and (f"[{run.name.rsplit('_', 1)[0]}]" in line
+                                            or "+" not in log.name))
 
 
 def check(root: Path) -> list:

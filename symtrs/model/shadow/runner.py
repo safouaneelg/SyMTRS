@@ -21,6 +21,8 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
+import statistics
 import subprocess
 import sys
 from pathlib import Path
@@ -126,6 +128,16 @@ def score_split(cfg, run_dir: Path, split: str) -> Dict[str, float]:
     staging = run_dir / "staging" / split
     keys = staged_keys(staging)
     predictions = run_dir / "predictions" / split
+    marker = predictions / RETAIN_MARKER
+    if marker.is_file():
+        record = json.loads(marker.read_text(encoding="utf-8"))
+        raise RuntimeError(
+            f"the {split} predictions in {predictions} were reduced to {record.get('size')} px "
+            "when they were last scored (eval.retain_predictions="
+            f"{record.get('mode')!r}); scoring them now would measure them against "
+            f"{staging / 'target'} at the ground-truth size. Re-run prediction first: "
+            f"`symtrs eval <config> --eval-split {split}` regenerates them from the checkpoint."
+        )
     missing = [k for k in keys if not (predictions / f"{k}.png").is_file()]
     if missing:
         raise RuntimeError(
@@ -153,7 +165,8 @@ def score_split(cfg, run_dir: Path, split: str) -> Dict[str, float]:
         with ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context("spawn")) as pool:
             rows = list(pool.map(_score_files, jobs, chunksize=8))
     per_image = [{"key": key, **row} for key, row in zip(keys, rows)]
-    for key in keys[: cfg.eval.num_visualizations]:
+    scene_keys = preview_keys(per_image, cfg.eval.num_visualizations)
+    for key in scene_keys:
         prediction = np.asarray(Image.open(predictions / f"{key}.png").convert("RGB"), np.float32) / 255.0
         mask = np.asarray(Image.open(staging / "mask" / f"{key}.png").convert("L")) > 127
         _write_preview(run_dir / "preview" / f"{split}_{key}.png", staging, key, prediction, mask)
@@ -166,6 +179,9 @@ def score_split(cfg, run_dir: Path, split: str) -> Dict[str, float]:
         f"mae_lab={metrics['mae_lab']:.3f} | shadow psnr={metrics.get('psnr_shadow', float('nan')):.3f} "
         f"non-shadow psnr={metrics.get('psnr_nonshadow', float('nan')):.3f} ({len(keys)} images)"
     )
+    # Last, and only once every row, preview and CSV line above is on disk: the images are
+    # the input to scoring, not an output of it.
+    retain_predictions(cfg, run_dir, split, keys, scene_keys)
     return metrics
 
 
@@ -206,6 +222,151 @@ def _write_preview(path: Path, staging: Path, key: str, prediction, mask) -> Non
         strip.paste(tile, (512 * i, 0))
     path.parent.mkdir(parents=True, exist_ok=True)
     strip.save(path)
+
+
+# --------------------------------------------------------- what survives scoring
+
+#: Longest side of the copy kept when `eval.retain_predictions` is "downsample".
+RETAINED_SIZE = 512
+
+#: Written into a downsampled `<run_dir>/predictions/<split>/` so `score_split` refuses to
+#: measure it: the files are still named `<key>.png`, but they are not the size the metrics
+#: assume. Kept in the directory itself, where whoever re-runs scoring will see it.
+RETAIN_MARKER = "_retained.json"
+
+_HEIGHT = re.compile(r"_h(\d{2})_")
+
+
+def preview_keys(rows: List[Dict[str, Any]], count: int) -> List[str]:
+    """Up to `count` scenes to preview and to keep at full resolution: one per camera height,
+    each the one whose shadow fraction is closest to that height's median.
+
+    These used to be the first `count` keys. The keys sort by location first, so that was the
+    same location at one altitude `count` times over - a preview strip that showed one scene
+    four times, and, once the rest are downsampled, the only scene a figure could zoom into.
+    "Typical" rather than "best" for the same reason the figures choose that way: a reader of
+    the paper should see what the table's mean looks like.
+    """
+    if count <= 0 or not rows:
+        return []
+    fraction = {row["key"]: row.get("shadow_fraction") for row in rows}
+    by_height: Dict[str, List[str]] = {}
+    for row in rows:
+        match = _HEIGHT.search(row["key"])
+        if match:
+            by_height.setdefault(match.group(1), []).append(row["key"])
+    if not by_height:
+        # No altitude in the key (a synthetic dataset): spread along the split instead.
+        step = max(1, len(rows) // count)
+        return [row["key"] for row in rows[::step][:count]]
+    heights = sorted(by_height)
+    if len(heights) > count:
+        # Evenly across the altitudes, keeping order and never repeating one.
+        pick = sorted({int(round(i * (len(heights) - 1) / (count - 1))) for i in range(count)}) if count > 1 else [0]
+        heights = [heights[i] for i in pick]
+    chosen: List[str] = []
+    for height in heights:
+        group = [key for key in by_height[height] if fraction.get(key) is not None]
+        if not group:
+            chosen.append(by_height[height][0])
+            continue
+        median = statistics.median(fraction[key] for key in group)
+        chosen.append(min(group, key=lambda key: abs(fraction[key] - median)))
+    return chosen
+
+
+def retain_predictions(cfg, run_dir: Path, split: str, keys: List[str], scene_keys: List[str]) -> None:
+    """Apply `eval.retain_predictions` to the PNGs `score_split` just read.
+
+    Only the shadow and domain scorers write predictions to disk, and one 2048 px lossless
+    PNG is ~15 MB: the four shadow-removal runs held 170 GB of them for numbers that are all
+    in `per_image_<split>.json`. The images are the scorer's input, not its output, so what
+    a reader needs afterwards is a look at any scene ("downsample"), the scenes the figures
+    zoom into, and the metrics. Deleting more is safe: re-scoring re-runs prediction.
+    """
+    mode = cfg.eval.retain_predictions
+    if mode == "all":
+        return
+    import shutil
+
+    predictions = run_dir / "predictions" / split
+    kept: List[str] = []
+    if mode == "downsample":
+        full = run_dir / "preview" / "full"
+        for key in scene_keys:
+            full.mkdir(parents=True, exist_ok=True)
+            source = predictions / f"{key}.png"
+            if source.is_file():
+                source.replace(full / f"{split}_{key}.png")
+                kept.append(f"preview/full/{split}_{key}.png")
+    if mode == "none":
+        # Every file in it is a prediction image; nothing else is written there.
+        shutil.rmtree(predictions)
+        print(
+            f"[symtrs] {split}: removed {len(keys)} prediction images "
+            "(eval.retain_predictions=none); metrics and previews are kept"
+        )
+        return
+
+    todo = [str(predictions / f"{key}.png") for key in keys if key not in set(scene_keys)]
+    workers = max(1, min(SCORE_WORKERS_MAX, cfg.shadow.mask_workers, len(todo)))
+    if workers == 1:
+        freed = sum(_shrink_file(path) for path in todo)
+    else:
+        import multiprocessing
+        from concurrent.futures import ProcessPoolExecutor
+
+        with ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context("spawn")) as pool:
+            freed = sum(pool.map(_shrink_file, todo, chunksize=8))
+    (predictions / RETAIN_MARKER).write_text(
+        json_dumps_safe(
+            {
+                "mode": mode,
+                "size": RETAINED_SIZE,
+                "split": split,
+                "full_resolution": kept,
+                "note": "these are 512 px copies; re-run prediction before scoring them again",
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    print(
+        f"[symtrs] {split}: predictions downsampled to {RETAINED_SIZE} px, {freed / 2**30:.1f} GB "
+        f"freed, {len(kept)} scene(s) kept at full resolution in preview/full/"
+    )
+
+
+def _shrink_file(path: str) -> int:
+    """Rewrite one prediction PNG at `RETAINED_SIZE`, returning the bytes it gave back.
+
+    Top-level and path-based so a spawned process can run it; it reads its own image rather
+    than receiving a 2048 px array through a pipe.
+    """
+    from PIL import Image
+
+    path = Path(path)
+    before = path.stat().st_size
+    with Image.open(path) as image:
+        image = image.convert("RGB")
+        image.thumbnail((RETAINED_SIZE, RETAINED_SIZE), Image.LANCZOS)
+        image.save(path)
+    return before - path.stat().st_size
+
+
+def retention_record(cfg, run_dir: Path) -> Dict[str, Any]:
+    """What `summary.json` says about the images this run kept, and where to look."""
+    full = run_dir / "preview" / "full"
+    mode = cfg.eval.retain_predictions
+    return {
+        "retain": mode,
+        "retained_size": RETAINED_SIZE if mode == "downsample" else None,
+        "full_resolution": sorted(str(path.relative_to(run_dir)) for path in full.glob("*.png")),
+        "note": (
+            "every metric is in per_image_<split>.json; re-scoring re-runs prediction from "
+            "the checkpoint, so deleting prediction images costs GPU time, never a number"
+        ),
+    }
 
 
 # ------------------------------------------------------------------ the entry point
@@ -308,6 +469,13 @@ def run_shadow_removal(
         }
 
     if not shadow.skip_final_eval:
+        # Start prediction from an empty folder: the predictor rewrites every key, but a
+        # leftover from an earlier pass - a downsampled file, a retention marker, a key the
+        # split no longer has - would either be scored as if it were fresh or refuse to be.
+        import shutil
+
+        for name in scored:
+            shutil.rmtree(run_dir / "predictions" / name, ignore_errors=True)
         _launch(
             worker_command(str(config_path), "predict", ",".join(scored), checkpoint),
             arch.repo_path,
@@ -315,17 +483,23 @@ def run_shadow_removal(
         for name in scored:
             label = "test" if name == cfg.data.test_split else "val" if name == cfg.data.val_split else name
             summary[label] = score_split(cfg, run_dir, name)
+        summary["predictions"] = retention_record(cfg, run_dir)
     (run_dir / "summary.json").write_text(json_dumps_safe(summary, indent=2), encoding="utf-8")
     return summary
 
 
 __all__ = [
     "CSV_FIELDS",
+    "RETAINED_SIZE",
+    "RETAIN_MARKER",
     "ShadowRemoval",
     "WORKER_MODULE",
     "append_metrics_row",
     "check_config",
     "describe",
+    "preview_keys",
+    "retain_predictions",
+    "retention_record",
     "run_shadow_removal",
     "score_split",
     "worker_command",

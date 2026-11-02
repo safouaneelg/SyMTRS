@@ -141,6 +141,11 @@ REQUIRED_FILES = (
 #: The SyMTRS splits, and the folder inside each split that each domain lives in.
 SPLITS = ("train", "val", "test")
 
+#: Records, inside a pix2pix pair folder, the half-size the pairs were written at (`0` for
+#: native). Switching sizes has to rebuild the folder: mixing native and resized halves would
+#: train on two different rescalings of the same scene.
+PAIR_SIZE_MARKER = ".pair_size"
+
 
 class UpstreamError(RuntimeError):
     """The vendored upstream tree is missing, incomplete, or could not be prepared."""
@@ -397,6 +402,7 @@ def build_staging_dir(
     require_all: bool = False,
     direction: str = "day2night",
     aligned: bool = False,
+    pair_size: int = 0,
 ) -> Path:
     """Stage `trainA/trainB/valA/valB/testA/testB` as folders of per-file links.
 
@@ -405,6 +411,7 @@ def build_staging_dir(
 
     `aligned=True` (pix2pix) also writes `<staging>/<split>/<split>/<key>.png`, each A image
     next to its B image: see `write_aligned_pairs` for why the links alone are not enough.
+    `pair_size` is the side of each half in that file; 0 keeps the native size.
 
     `dataroot` is then the staging directory and upstream's `--phase` selects the split
     as it always did. Links mean (normally) no image is copied, and because the
@@ -479,12 +486,12 @@ def build_staging_dir(
                     "domains; pix2pix (aligned) will fail on the others"
                 )
             if aligned:
-                write_aligned_pairs(staging, name, sorted(shared))
+                write_aligned_pairs(staging, name, sorted(shared), size=pair_size)
 
     return staging
 
 
-def write_aligned_pairs(staging: Path, name: str, keys: List[str]) -> int:
+def write_aligned_pairs(staging: Path, name: str, keys: List[str], size: int = 0) -> int:
     """Write `<staging>/<name>/<key>.png` as `[A | B]` side by side, for pix2pix.
 
     The vendored `AlignedDataset` never looks at `<phase>A` / `<phase>B`. It reads
@@ -496,14 +503,37 @@ def write_aligned_pairs(staging: Path, name: str, keys: List[str]) -> int:
     that keeps the split intact, and unlike the links it costs disk: one lossless PNG per
     scene. A file is reused when it is newer than both of its sources, so a second phase or a
     re-score does not pay for it again.
+
+    `size` is the side of each half, and it is worth setting. Upstream resizes every image to
+    `--load_size` (286) and crops `--crop_size` (256) before the network sees it, so a native
+    pair carries ~50x the pixels upstream will read: at 2048 the train split is ~200 GB and
+    ~9 h of single-core PNG encoding per direction (measured 2026-10-25: 2292 pairs in 87
+    min, 14.3 MB each), against ~5 GB and ~20 min at 286. Because the pair is resized with the
+    same BICUBIC filter upstream's `transforms.Resize` uses, an image staged at 286 reaches
+    the network *identical* to a native one - the option changes what is stored, not what is
+    trained on. The folder records the size it was built at, so switching sizes rewrites it
+    instead of mixing wide and narrow halves in one dataset.
     """
     from PIL import Image
 
+    size = int(size or 0)
     folder = staging / name
     folder.mkdir(parents=True, exist_ok=True)
+    marker = folder / PAIR_SIZE_MARKER
     wanted = {Path(key).stem + ".png" for key in keys}
+    previous = marker.read_text(encoding="utf-8").strip() if marker.is_file() else ""
+    if previous != str(size):
+        # A dataset half native and half resized would train on two different rescalings of
+        # the same scene, so a size change starts the folder again.
+        if previous:
+            print(f"[symtrs] {folder} was staged at {previous or 'native'} px; rebuilding at "
+                  f"{size or 'native'} px")
+        for stale in folder.iterdir():
+            if stale.is_file() and stale.name != PAIR_SIZE_MARKER:
+                stale.unlink()
+        marker.write_text(str(size), encoding="utf-8")
     for stale in folder.iterdir():  # a pair whose source left the split must not be trained on
-        if stale.is_file() and stale.name not in wanted:
+        if stale.is_file() and stale.name not in wanted and stale.name != PAIR_SIZE_MARKER:
             stale.unlink()
     written = 0
     for key in keys:
@@ -520,12 +550,17 @@ def write_aligned_pairs(staging: Path, name: str, keys: List[str]) -> int:
                     f"{key}: the A image is {left.size[0]}x{left.size[1]} but the B image is "
                     f"{right.size[0]}x{right.size[1]}; pix2pix needs aligned pairs of one size"
                 )
+            if size and left.size != (size, size):
+                left = left.resize((size, size), Image.BICUBIC)
+                right = right.resize((size, size), Image.BICUBIC)
             pair = Image.new("RGB", (left.width * 2, left.height))
             pair.paste(left, (0, 0))
             pair.paste(right, (left.width, 0))
         pair.save(target, format="PNG")
         written += 1
-    print(f"[symtrs] staged {folder.name}/: {len(keys)} A|B pairs for pix2pix ({written} written)")
+    detail = f" at {size}x{size} per half" if size else ""
+    print(f"[symtrs] staged {folder.name}/: {len(keys)} A|B pairs for pix2pix{detail} "
+          f"({written} written)")
     return written
 
 

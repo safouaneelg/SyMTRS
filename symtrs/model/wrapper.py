@@ -173,6 +173,12 @@ class SymTRSModel:
 
         if not batched and prediction.shape[0] == 1:
             prediction = prediction[0]
+            # Depth adapters work in `[B, 1, H, W]` all the way through the loss and the
+            # metrics, so dropping the batch dim leaves `[1, H, W]`, not the `HxW` this
+            # method documents. Without this, `_save_depth` hands a 3-D array to PIL, which
+            # refuses it with "Cannot handle this data type: (1, 1, W), <u2>".
+            if self.task == "depth" and prediction.ndim == 3 and prediction.shape[0] == 1:
+                prediction = prediction[0]
 
         if not as_numpy:
             return prediction

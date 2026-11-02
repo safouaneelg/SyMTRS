@@ -15,6 +15,7 @@ Passing a run directory works too; `weights/best.pt` is found inside it.
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 from symtrs.commands._common import add_common_args, build_config, should_stop_early
 
@@ -33,9 +34,27 @@ def add_parser(subparsers) -> None:
     parser.set_defaults(handler=_run)
 
 
+def _is_checkpoint_positional(value: str) -> bool:
+    """Whether the positional argument is a weight file or a run directory, not a YAML.
+
+    `looks_like_a_checkpoint_path` is too loose here: it answers a different question (is
+    this `--model` a registry key?) and calls every path a checkpoint, which would eat
+    `configs/depth/256/midas_small.yaml`. A YAML is a YAML; anything else in the positional
+    slot is a checkpoint. Read as a config, a `.pt` fails with `UnicodeDecodeError: byte
+    0x80` out of the pickle header, which names neither the flag nor the file.
+    """
+    path = Path(value)
+    if path.suffix.lower() in {".pt", ".pth", ".ckpt"}:
+        return True
+    return path.is_dir() and (path / "weights").is_dir()
+
+
 def _run(args: argparse.Namespace) -> int:
     if args.config_positional and not args.config:
-        args.config = args.config_positional
+        if _is_checkpoint_positional(args.config_positional):
+            args.checkpoint = args.checkpoint or args.config_positional
+        else:
+            args.config = args.config_positional
 
     cfg = build_config(args)
     if should_stop_early(args, cfg):
