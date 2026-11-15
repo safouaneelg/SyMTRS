@@ -232,8 +232,21 @@ function loadPLYWithFallback(loader, urls, onLoad, onError) {
   tryNext();
 }
 
+function setupComparisons() {
+  document.querySelectorAll(".ba").forEach((figure) => {
+    const frame = figure.querySelector(".ba-frame");
+    const range = figure.querySelector(".ba-range");
+    if (!frame || !range) return;
+
+    const place = (value) => frame.style.setProperty("--pos", `${value}%`);
+    place(range.value);
+    range.addEventListener("input", () => place(range.value));
+  });
+}
+
 mountIcons();
 setupCitationTabs();
+setupComparisons();
 
 const viewers = Array.from(document.querySelectorAll(".ply-viewer"));
 viewers.forEach((container) => {

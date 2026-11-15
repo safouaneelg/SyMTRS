@@ -56,6 +56,7 @@
           <a class="btn-academic" href="https://github.com/safouaneelg/SyMTRS" target="_blank" rel="noopener noreferrer"><span data-icon="github"></span>Code</a>
           <a class="btn-academic" href="https://huggingface.co/datasets/safouaneelg/SyMTRS" target="_blank" rel="noopener noreferrer"><span data-icon="database"></span>HF Dataset</a>
           <a class="btn-academic" href="#tasks"><span data-icon="layers"></span>Samples</a>
+          <a class="btn-academic" href="#benchmark"><span data-icon="check"></span>Benchmark</a>
           <a class="btn-academic" href="#citation"><span data-icon="file"></span>Citation</a>
         </nav>
       </header>
@@ -63,21 +64,23 @@
       <section class="stats-section reveal delay-6">
         <div class="stats-card">
           <div class="stats-grid">
-            <div class="stat"><span>Total Size</span><strong>65GB</strong></div>
-            <div class="stat"><span>Total Images</span><strong>12,420</strong><small>2,070 per subset</small></div>
-            <div class="stat"><span>Img Ext</span><strong>.png</strong></div>
-            <div class="stat"><span>Depth Ext</span><strong>.npy</strong></div>
-            <div class="stat"><span>Depth Type</span><strong>Scaled</strong></div>
+            <div class="stat"><span>Total Size</span><strong>767GB</strong></div>
+            <div class="stat"><span>Frames</span><strong>20,000</strong><small>14k train · 3k val · 3k test</small></div>
+            <div class="stat"><span>Resolution</span><strong>2048²</strong><small>+ ×2 · ×4 · ×8 LR</small></div>
+            <div class="stat"><span>Depth</span><strong>.exr</strong><small>metric, metres</small></div>
+            <div class="stat"><span>Aligned Modalities</span><strong>5</strong><small>RGB · night · shadow-free · depth · semantic</small></div>
             <div class="stat"><span>License</span><strong>Apache 2.0</strong></div>
           </div>
           <div class="task-bar">
             <div class="task-list">
               <span class="task-label">Tasks</span>
-              <span>Monocular Depth Estimation</span>
+              <span>Monocular Depth</span>
+              <span>Semantic Segmentation</span>
               <span>Domain Adaptation</span>
+              <span>Shadow Removal</span>
               <span>Super-Resolution</span>
             </div>
-            <div class="resolution-note"><span data-icon="layers"></span>Pairs of low resolutions (x2, x4, x8) included</div>
+            <div class="resolution-note"><span data-icon="layers"></span>All five tasks read one aligned capture</div>
           </div>
         </div>
       </section>
@@ -96,10 +99,10 @@
             <h2>UE5-Powered High Fidelity</h2>
             <p>
               Our dataset leverages <strong>Unreal Engine 5</strong> to create physically accurate, multi-task ground truth for aerial remote sensing.
-              From densely populated cities to rural landscapes, we provide perfectly aligned RGB, depth, and segmentation masks.
+              From densely populated cities to rural landscapes, we provide perfectly aligned RGB, night, shadow-free, depth and semantic captures.
             </p>
             <div class="mini-stats">
-              <div><strong>10k+</strong><span>Frames</span></div>
+              <div><strong>20,000</strong><span>Frames</span></div>
               <i></i>
               <div><strong>UE5</strong><span>Engine</span></div>
             </div>
@@ -112,6 +115,24 @@
         <div class="abstract-box">
           Recent advances in deep learning for remote sensing rely heavily on large annotated datasets, yet acquiring high-quality ground truth for geometric, radiometric, and multi-domain tasks remains costly and often infeasible. In particular, the lack of accurate depth annotations, controlled illumination variations, and multi-scale paired imagery limits progress in monocular depth estimation, domain adaptation, and super-resolution for aerial scenes. We present SyMTRS, a large-scale synthetic dataset generated using a high-fidelity urban simulation pipeline. The dataset provides high-resolution RGB aerial imagery (2048 &times; 2048), pixel-perfect depth maps, night-time counterparts for domain adaptation, and aligned low-resolution variants for super-resolution at &times;2, &times;4, and &times;8 scales. Unlike existing remote sensing datasets that focus on a single task or modality, SyMTRS is designed as a unified multi-task benchmark enabling joint research in geometric understanding, cross-domain robustness, and resolution enhancement. We describe the dataset generation process, its statistical properties, and its positioning relative to existing benchmarks. SyMTRS aims to bridge critical gaps in remote sensing research by enabling controlled experiments with perfect geometric ground truth and consistent multi-domain supervision.
         </div>
+      </section>
+
+      <section class="media-band" id="modalities">
+        <div class="section-heading">
+          <span>The capture</span>
+          <h3>Five modalities, one geometry</h3>
+          <p>Every camera position is rendered as RGB by day and by night, with the direct sun removed, as metric depth and as a five-class mask. The registration is exact — the same frame, five times — so a task is a choice of folders rather than a separate dataset.</p>
+        </div>
+        <div class="reel-frame reveal">
+          <video autoplay loop muted playsinline poster="./assets/media/hero.gif">
+            <source src="./assets/media/hero.webm" type="video/webm" />
+          </video>
+        </div>
+        <p class="reel-note">RGB · day → night → shadow-free → metric depth → five classes, on one held-out test scene. Generated by <code>scripts/make_media.py</code>.</p>
+        <div class="grid-frame reveal">
+          <img src="./assets/media/pipeline.png" alt="SyMTRS generation pipeline: split map, camera pose, per-pose render with fixed exposure, five render passes at 2048 and three low-resolution levels" />
+        </div>
+        <p class="reel-note">Each pose is rendered once, with the environment frozen, so exposure, geometry and filename are shared by all five outputs. The ×2/×4/×8 levels are separate render passes, which is what makes the super-resolution pairs real pairs.</p>
       </section>
 
       <section class="tasks" id="tasks">
@@ -131,11 +152,19 @@
           <div class="section-heading">
             <span>Task 02</span>
             <h3>Super-Resolution (x2, x4, x8)</h3>
-            <p>SyMTRS includes multi-scale paired imagery. Below is a full-resolution comparison showing the ground truth 2048x2048 RGB against various downsampled levels, optimized for training robust SR models.</p>
+            <p>SyMTRS includes multi-scale paired imagery rendered at each level, not blurred in post. Drag the divider to compare a bicubic upsample with the SwinIR x8 checkpoint on the same 63 px input.</p>
           </div>
-          <div class="image-frame">
-            <img src="https://raw.githubusercontent.com/safouaneelg/SyMTRS/beb59c3f21d1aa931bcc8025e96a9b55cb80462c/sample_content/super-resolution.png" alt="Super Resolution Comparison" />
-          </div>
+          <figure class="ba">
+            <div class="ba-frame">
+              <img class="ba-img" src="./assets/media/pairs/superresolution-a.jpg" alt="Bicubic x8 upsample" />
+              <img class="ba-img ba-b" src="./assets/media/pairs/superresolution-b.jpg" alt="SwinIR x8 output" />
+              <span class="ba-chip left">Bicubic x8</span>
+              <span class="ba-chip right">SwinIR x8</span>
+              <span class="ba-handle"></span>
+              <input class="ba-range" type="range" min="0" max="100" value="50" aria-label="Compare bicubic and SwinIR x8" />
+            </div>
+            <figcaption class="ba-caption"><strong>Super-resolution x8.</strong> The same 63 px input, the 504 px outputs shown. The low-resolution level is the same scene sampled coarser — the pairs are rendered, not simulated by a degradation kernel.</figcaption>
+          </figure>
         </div>
 
         <div class="task-block">
@@ -148,14 +177,85 @@
             <div class="dark-copy">
               <div class="overline"><i></i><span>Day to Night Generation</span></div>
               <h4>Full-Resolution Comparison</h4>
-              <p>The MatrixCity simulation environment allows for deterministic camera placements with variable astrophysical time, facilitating the creation of large-scale domain adaptation benchmarks.</p>
-              <div class="badges"><span>Active Task</span><span>Sim-to-Real</span></div>
+              <p>The MatrixCity simulation allows for deterministic camera placements with variable astrophysical time, so a CycleGAN or pix2pix model does not have to fight misalignment on top of the domain gap.</p>
+              <div class="badges"><span>CycleGAN</span><span>pix2pix</span><span>FID / KID</span></div>
             </div>
             <div class="dark-image">
-              <img src="https://raw.githubusercontent.com/safouaneelg/SyMTRS/beb59c3f21d1aa931bcc8025e96a9b55cb80462c/sample_content/day_2_night.png" alt="Day to Night Domain Adaptation Comparison" />
+              <figure class="ba">
+                <div class="ba-frame">
+                  <img class="ba-img" src="./assets/media/pairs/daynight-a.jpg" alt="Daytime aerial scene" />
+                  <img class="ba-img ba-b" src="./assets/media/pairs/daynight-b.jpg" alt="Nighttime aerial scene" />
+                  <span class="ba-chip left">Day</span>
+                  <span class="ba-chip right">Night</span>
+                  <span class="ba-handle"></span>
+                  <input class="ba-range" type="range" min="0" max="100" value="50" aria-label="Compare day and night imagery" />
+                </div>
+              </figure>
             </div>
           </div>
         </div>
+
+        <div class="task-block">
+          <div class="section-heading">
+            <span>Task 04</span>
+            <h3>Semantic Segmentation (5 Classes)</h3>
+            <p>Background, building, green, road and car, stored as a graylevel class id; pixels off the class grid decode to the ignore index rather than being guessed. Drag to compare the RGB frame with its mask.</p>
+          </div>
+          <figure class="ba">
+            <div class="ba-frame">
+              <img class="ba-img" src="./assets/media/pairs/segmentation-a.jpg" alt="Aerial RGB scene" />
+              <img class="ba-img ba-b" src="./assets/media/pairs/segmentation-b.jpg" alt="Five-class semantic mask" />
+              <span class="ba-chip left">RGB</span>
+              <span class="ba-chip right">5 classes</span>
+              <span class="ba-handle"></span>
+              <input class="ba-range" type="range" min="0" max="100" value="50" aria-label="Compare RGB and semantic mask" />
+            </div>
+            <figcaption class="ba-caption"><strong>Semantic segmentation.</strong> Five classes, ignore index 255; U-Net, DeepLabV3 and SegFormer decoders are benchmarked at every resolution. The model output for this scene is in the benchmark grid below.</figcaption>
+          </figure>
+        </div>
+
+        <div class="task-block">
+          <div class="section-heading">
+            <span>Task 05</span>
+            <h3>Shadow Removal</h3>
+            <p>SyMTRS ships the shadow-free render as ground truth; the shadow mask itself is derived at train time, because the dataset has none. Drag to compare the shadowed and shadow-free captures.</p>
+          </div>
+          <figure class="ba">
+            <div class="ba-frame">
+              <img class="ba-img" src="./assets/media/pairs/shadow-a.jpg" alt="Aerial scene with cast shadows" />
+              <img class="ba-img ba-b" src="./assets/media/pairs/shadow-b.jpg" alt="Shadow-free render" />
+              <span class="ba-chip left">With shadow</span>
+              <span class="ba-chip right">Shadow-free</span>
+              <span class="ba-handle"></span>
+              <input class="ba-range" type="range" min="0" max="100" value="50" aria-label="Compare shadowed and shadow-free imagery" />
+            </div>
+            <figcaption class="ba-caption"><strong>Shadow removal.</strong> Four upstream networks (ShadowFormer, Restormer, Uformer, ShadowMaskFormer) are scored on all, shadow and non-shadow pixels separately.</figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section class="benchmark" id="benchmark">
+        <div class="section-heading">
+          <span>Benchmark</span>
+          <h3>Input, model and ground truth</h3>
+          <p>One held-out scene per task, from the <code>test/</code> split: the input, a benchmark checkpoint's prediction, and the ground truth. Every panel is regenerated by <code>scripts/make_media.py</code>; the run directories it reads are recorded in <code>docs/assets/media/media.json</code>.</p>
+        </div>
+        <div class="grid-frame">
+          <img src="./assets/media/grid-tasks.png" alt="Five tasks by input, model prediction and ground truth" />
+        </div>
+        <table class="results-table">
+          <thead>
+            <tr><th>Task</th><th>Model</th><th>Protocol</th><th>Test metric</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Monocular depth</td><td>MiDaS DPT-Hybrid, 2048 px</td><td>fine-tuned, 20 epochs</td><td class="metric">RMSE 18.66 m · δ¹ 0.881</td></tr>
+            <tr><td>Semantic segmentation</td><td>SegFormer-B2, 2048 px</td><td>fine-tuned, 40 epochs</td><td class="metric">mIoU 0.976 · pix. acc 0.994</td></tr>
+            <tr><td>Day → night</td><td>CycleGAN</td><td>fine-tuned, 40 epochs</td><td class="metric">FID 43.4 · KID 0.0149</td></tr>
+            <tr><td>Shadow removal</td><td>Restormer</td><td>fine-tuned, 50 epochs</td><td class="metric">PSNR 23.00 dB · SSIM-Y 0.788</td></tr>
+            <tr><td>Super-resolution ×8</td><td>SwinIR, 2048 px target</td><td>fine-tuned, 40 epochs</td><td class="metric">PSNR 20.02 dB · SSIM 0.469</td></tr>
+          </tbody>
+        </table>
+        <p class="results-note">3,000 test images per row, seed 42, from the campaign runs under <code>runs/campaign2/</code>. The dataset is being regenerated in response to reviewer comments; these numbers will be refreshed with the released revision and are not final.</p>
       </section>
 
       <section class="citation" id="citation">
@@ -163,7 +263,7 @@
           <div class="citation-head">
             <div>
               <h2>Citation</h2>
-              <p>If you use FusionVision in your research, please cite the following paper.</p>
+              <p>If you use SyMTRS in your research, please cite the following paper.</p>
             </div>
             <button class="copy-btn" type="button" id="copyCitation"><span data-icon="copy"></span><span id="copyLabel">Copy BibTeX</span></button>
           </div>

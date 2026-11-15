@@ -1,0 +1,19 @@
+{
+  "data_root": "/mnt/ssd1/SyMTRS",
+  "split": "test",
+  "scenes": {
+    "hero": "rgb_day_2048_loc439_rot120deg_h00_x+049937_y-032621_z+007060.png",
+    "daynight": "rgb_day_2048_loc461_rot274deg_h02_x+049266_y-005273_z+013063.png",
+    "shadow": "rgb_day_2048_loc439_rot256deg_h02_x+049937_y-032621_z+013060.png",
+    "depth": "rgb_day_2048_loc470_rot319deg_h02_x+056284_y+031034_z+015570.png",
+    "segmentation": "rgb_day_2048_loc439_rot108deg_h02_x+049937_y-032621_z+013060.png",
+    "superresolution": "rgb_day_2048_loc461_rot274deg_h02_x+049266_y-005273_z+013063.png"
+  },
+  "checkpoints": {
+    "seg": "runs/campaign2/segformer_b2_2048/weights/best.pt",
+    "depth": "runs/campaign2/midas_dpt_hybrid_2048/weights/best.pt",
+    "sr": "runs/campaign2/swinir_x8",
+    "shadow": "runs/campaign2/restormer",
+    "cyclegan": "runs/campaign2/cyclegan_day2night"
+  }
+}
