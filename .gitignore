@@ -3,6 +3,7 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+factsheet*/
 # C extensions
 *.so
 sr_runs*
