@@ -15,5 +15,10 @@
     "sr": "runs/campaign2/swinir_x8",
     "shadow": "runs/campaign2/restormer",
     "cyclegan": "runs/campaign2/cyclegan_day2night"
-  }
+  },
+  "point_clouds": [
+    "hero-cloud.ply",
+    "daynight-cloud.ply",
+    "depth-cloud.ply"
+  ]
 }

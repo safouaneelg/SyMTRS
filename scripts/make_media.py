@@ -14,6 +14,8 @@ Writes under `docs/assets/media/`:
   slider-*.gif / .webm         A/B wipes: day/night, shadow, depth, segmentation, SR
   grid-tasks.png               5 tasks x (input, model, ground truth)
   pairs/*.jpg                  the same A/B pairs as stills, for the web sliders
+  <scene>-cloud.ply            RGB back-projected through metric depth, for the 3D viewer
+  <scene>-still.jpg            the poster the 3D viewer shows until the cloud has loaded
   media.json                   which scenes, split and checkpoints were used
 
 The A/B clips are wipes rather than cross-fades on purpose: a cross-fade of a day and a
@@ -184,6 +186,10 @@ def colorize_depth(depth: np.ndarray, vmin: float | None = None,
 #: 22-78 m. Reading it straight and aligning a disparity against it clamps the whole map to
 #: `1 / max_depth` and draws one flat colour, which is how this was found.
 DEPTH_SCALE = 0.01
+
+#: The capture camera's horizontal FOV, confirmed by the dataset owner and recorded as
+#: `data.camera_hfov_deg`. The point clouds are back-projected with it.
+HFOV_DEG = 60.0
 
 
 def read_depth(path: Path) -> np.ndarray:
@@ -577,6 +583,65 @@ def _clip(a: Image.Image, b: Image.Image, tag: str, title: str,
             "label_a": label_a, "label_b": label_b, "subtitle": subtitle}
 
 
+def build_cloud(root: Path, scene: str, out: Path, size: int = 512) -> Path:
+    """A binary PLY of one test scene's RGB back-projected through its metric depth.
+
+    This is the dataset's own depth, not a model's, so the relief a reader orbits is the
+    ground truth the benchmark scores against. The camera is a pinhole at the capture's
+    60 deg horizontal FOV (`data.camera_hfov_deg`), which is what turns the depth map back
+    into a metric 3D cloud rather than an arbitrary surface.
+    """
+    from math import radians, tan
+
+    paths = scene_paths(root, "test", SCENES[scene])
+    rgb = np.asarray(load_rgb(paths["day"]).resize((size, size), Image.Resampling.LANCZOS))
+    depth = np.asarray(
+        Image.fromarray(read_depth(paths["depth"])).resize((size, size), Image.Resampling.BILINEAR),
+        np.float32,
+    )
+    focal = (size / 2.0) / tan(radians(HFOV_DEG / 2.0))
+
+    u, v = np.meshgrid(np.arange(size, dtype=np.float32), np.arange(size, dtype=np.float32))
+    u = u.reshape(-1)
+    v = v.reshape(-1)
+    d = depth.reshape(-1)
+    valid = np.isfinite(d) & (d > 0)
+    # Camera looks down: z is negative in front of it, x right and y up, which is the
+    # convention `three` uses for a camera at the origin looking along -z.
+    x = (u[valid] - (size - 1) / 2.0) * d[valid] / focal
+    y = -(v[valid] - (size - 1) / 2.0) * d[valid] / focal
+    z = -d[valid]
+    colours = rgb.reshape(-1, 3)[valid]
+
+    record = np.empty(
+        x.size,
+        dtype=[("x", "<f4"), ("y", "<f4"), ("z", "<f4"),
+               ("red", "u1"), ("green", "u1"), ("blue", "u1")],
+    )
+    record["x"], record["y"], record["z"] = x, y, z
+    record["red"], record["green"], record["blue"] = colours[:, 0], colours[:, 1], colours[:, 2]
+
+    path = out / f"{scene}-cloud.ply"
+    header = (
+        "ply\nformat binary_little_endian 1.0\n"
+        f"element vertex {x.size}\n"
+        "property float x\nproperty float y\nproperty float z\n"
+        "property uchar red\nproperty uchar green\nproperty uchar blue\n"
+        "end_header\n"
+    )
+    with path.open("wb") as handle:
+        handle.write(header.encode("ascii"))
+        record.tofile(handle)
+
+    # A still of the same crop, used as the poster until the cloud has loaded (and as the
+    # fallback on a machine without WebGL).
+    fit(crop_vertical(load_rgb(paths["day"]), 0.18, 0.82), (1600, 900)).save(
+        out / f"{scene}-still.jpg", quality=88, optimize=True
+    )
+    print(f"[cloud] {scene}: {x.size} points -> {path.name}")
+    return path
+
+
 def build_grid(root: Path) -> Image.Image:
     """5 tasks x 3 columns: what goes in, what the model says, what is true."""
     cell, gap, margin, label_w = 300, 10, 28, 26
@@ -658,8 +723,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--data-root", type=Path, default=Path("/mnt/ssd1/SyMTRS"))
     parser.add_argument("--out", type=Path, default=REPO / "docs" / "assets" / "media")
-    parser.add_argument("--only", default="hero,sliders,grid,pairs",
-                        help="comma-separated subset of: hero,sliders,grid,pairs")
+    parser.add_argument("--only", default="hero,sliders,grid,pairs,clouds",
+                        help="comma-separated subset of: hero,sliders,grid,pairs,clouds")
     parser.add_argument("--fps", type=int, default=12)
     args = parser.parse_args()
     only = {part.strip() for part in args.only.split(",") if part.strip()}
@@ -672,6 +737,7 @@ def main() -> None:
         "scenes": SCENES,
         "checkpoints": {"seg": SEG_CKPT, "depth": DEPTH_CKPT, "sr": SR_RUN,
                         "shadow": SHADOW_RUN, "cyclegan": CYCLEGAN_RUN},
+        "point_clouds": ["hero-cloud.ply", "daynight-cloud.ply", "depth-cloud.ply"],
     }
 
     clips: Dict[str, Dict[str, Any]] = {}
@@ -707,6 +773,9 @@ def main() -> None:
             clips = build_sliders(args.data_root)
         write_pairs(clips, out)
         print(f"[pairs] {len(clips) * 2} stills")
+    if "clouds" in only:
+        for scene in ("hero", "daynight", "depth"):
+            build_cloud(args.data_root, scene, out)
     (out / "media.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
 
