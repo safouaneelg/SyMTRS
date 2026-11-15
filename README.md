@@ -81,10 +81,11 @@ checkpoints — the scene stems and exact checkpoints are recorded in
       non-shadow pixels separately.</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img width="100%" src="docs/assets/media/slider-superresolution.gif" alt="Bicubic and SwinIR x8"><br>
-      <sub><b>Super-resolution ×8</b> — the same 63 px input through bicubic interpolation and
-      through the SwinIR ×8 checkpoint. The LR/HR pairs are rendered, not simulated by a
-      blur kernel: the low-resolution level is the same scene at a coarser sampling.</sub></td>
+    <td width="50%"><img width="100%" src="docs/assets/media/slider-superresolution.gif" alt="The x8 input and the 2048 px ground truth"><br>
+      <sub><b>Super-resolution ×8</b> — the 63 px input against the native 2048 px render.
+      The target is always the high-resolution image, never a bicubic upsample; the SwinIR
+      ×8 prediction is the middle column of the grid above. The LR level is its own render
+      pass at a coarser sampling, not a blur of the 2048 frame.</sub></td>
     <td width="50%"><img src="docs/assets/media/hero.gif" alt="The five modalities of one scene"><br>
       <sub><b>One capture, five modalities</b> — RGB day → night → shadow-free → metric depth
       → semantics, with the geometry held fixed throughout.</sub></td>
@@ -791,7 +792,7 @@ If you use our dataset please cite the paper:
 ```bibtex
 @misc{elghazoualisymtrs,
       title={SyMTRS: Benchmark Multi-Task Synthetic Dataset for Depth, Domain Adaptation and Super-Resolution in Aerial Imagery}, 
-      author={Safouane El Ghazouali and Nicola Venturi and Michael Rueegsegger and Umberto Michelucci},
+      author={Safouane El Ghazouali and Baptiste Lucas and Nicola Venturi and Michael Rueegsegger and Umberto Michelucci},
       year={2026},
       eprint={2604.21801},
       archivePrefix={arXiv},

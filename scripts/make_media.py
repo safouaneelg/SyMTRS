@@ -558,16 +558,17 @@ def build_sliders(root: Path) -> Dict[str, Dict[str, Any]]:
         "background · building · green · road · car · ignore = 255",
     )
 
-    # Bicubic x8 <-> SwinIR x8 from a 63 px LR input (9 x the 7 px window: SwinIR cannot
-    # process a mask for any other size). 63 x 8 = 504 HR pixels.
+    # The benchmark's super-resolution target is always the native render, so the wipe
+    # compares the upsampled input with the 2048 px ground truth. A bicubic upsample is an
+    # input baseline ("what you get for free"), never the target; the model prediction is
+    # the middle column of the grid.
     paths = scene_paths(root, "test", SCENES["superresolution"])
     hr = detailed_window(load_rgb(paths["day"]), 504)
     lr = hr.resize((63, 63), Image.Resampling.BICUBIC)
-    sr = sr_prediction(REPO / SR_RUN, lr)
     clips["superresolution"] = _clip(
-        bicubic(lr, sr.size), sr, "super-resolution", "Bicubic x8 / SwinIR x8",
-        "bicubic x8", "SwinIR x8",
-        "same 63 px input · 504 px output",
+        bicubic(lr, hr.size), hr, "super-resolution", "Input ×8 / ground truth",
+        "input · 63 px", "ground truth · 2048 px",
+        "target = the native render, never a bicubic upsample",
     )
     return clips
 
@@ -643,34 +644,41 @@ def build_cloud(root: Path, scene: str, out: Path, size: int = 512) -> Path:
 
 
 def build_grid(root: Path) -> Image.Image:
-    """5 tasks x 3 columns: what goes in, what the model says, what is true."""
+    """5 tasks x 3 columns: what goes in, what the model says, what is true.
+
+    On a light plate: this figure is printed beside the (white) pipeline diagram and shown
+    on a white project page, and a dark plate reads as a widget rather than a figure there.
+    The A/B clips keep their dark chips because those sit on photographs, where a light chip
+    disappears on a bright road.
+    """
+    bg, fg, muted, line = (255, 255, 255), (13, 21, 32), (120, 134, 148), (228, 232, 238)
     cell, gap, margin, label_w = 300, 10, 28, 26
     rows = [
         ("depth", "Depth", ["RGB", "MiDaS DPT-Hybrid", "ground truth"]),
         ("segmentation", "Segmentation", ["RGB", "SegFormer-B2", "ground truth"]),
         ("daynight", "Day / night", ["RGB · day", "CycleGAN", "RGB · night"]),
         ("shadow", "Shadow removal", ["RGB · day", "Restormer", "shadow-free"]),
-        ("superresolution", "Super-resolution x8", ["bicubic x8", "SwinIR x8", "2048 px"]),
+        ("superresolution", "Super-resolution x8", ["input x8", "SwinIR x8", "ground truth · 2048 px"]),
     ]
     width = margin * 2 + label_w + 3 * cell + 2 * gap
     height = 44 + len(rows) * (cell + 40 + gap) + margin
-    sheet = Image.new("RGB", (width, height), BG)
+    sheet = Image.new("RGB", (width, height), bg)
     draw = ImageDraw.Draw(sheet)
     f_head, f_row, f_small = font(15, bold=True), font(18, bold=True), font(12)
 
     for col, name in enumerate(["input", "model", "ground truth"]):
         x = margin + label_w + col * (cell + gap)
-        draw.text((x, 14), name.upper(), font=f_head, fill=MUTED)
+        draw.text((x, 14), name.upper(), font=f_head, fill=muted)
 
     for r, (scene, title, labels) in enumerate(rows):
         y = 44 + r * (cell + 40 + gap)
-        draw.text((margin, y + 6), title, font=f_row, fill=FG)
-        draw.line([(margin, y + 30), (width - margin, y + 30)], fill=(42, 48, 55), width=1)
+        draw.text((margin, y + 6), title, font=f_row, fill=fg)
+        draw.line([(margin, y + 30), (width - margin, y + 30)], fill=line, width=1)
         for c, image in enumerate(_grid_cells(root, scene)):
             x = margin + label_w + c * (cell + gap)
             sheet.paste(fit(image, (cell, cell)), (x, y + 38))
-            draw.rectangle([x, y + 38, x + cell - 1, y + 38 + cell - 1], outline=(38, 44, 50))
-            draw.text((x, y + 38 + cell + 5), labels[c], font=f_small, fill=MUTED)
+            draw.rectangle([x, y + 38, x + cell - 1, y + 38 + cell - 1], outline=line)
+            draw.text((x, y + 38 + cell + 5), labels[c], font=f_small, fill=muted)
     return sheet
 
 

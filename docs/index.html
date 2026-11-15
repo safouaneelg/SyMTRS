@@ -16,7 +16,7 @@
     />
     <meta property="og:image" content="./assets/media/hero-still.jpg" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="theme-color" content="#05070a" />
+    <meta name="theme-color" content="#ffffff" />
     <link rel="preload" as="image" href="./assets/media/hero-still.jpg" />
     <link rel="stylesheet" href="./assets/styles.css" />
     <script type="importmap">
@@ -100,10 +100,12 @@
           </dl>
 
           <p class="authors">
-            <a href="https://orcid.org/0000-0002-5403-3911" target="_blank" rel="noopener noreferrer">Safouane El Ghazouali</a>,
+            <a href="https://orcid.org/0000-0002-5403-3911" target="_blank" rel="noopener noreferrer">Safouane El Ghazouali</a><sup>*</sup>,
+            Baptiste Lucas<sup>*</sup>,
             Nicola Venturi, Michael Rueegsegger,
             <a href="https://orcid.org/0000-0002-6060-5365" target="_blank" rel="noopener noreferrer">Umberto Michelucci</a>
-            <span class="authors-orgs">TOELT LLC · HSLU · armasuisse S+T</span>
+            <span class="authors-orgs">TOELT LLC · HSLU · Swiss Smart Factory · armasuisse S+T</span>
+            <span class="authors-note"><sup>*</sup> equal contribution</span>
           </p>
         </div>
 
@@ -337,12 +339,12 @@
               <div class="panel-media">
                 <figure class="ba">
                   <div class="ba-frame">
-                    <img class="ba-img" src="./assets/media/pairs/superresolution-a.jpg" alt="Bicubic x8 upsample" />
-                    <img class="ba-img ba-b" src="./assets/media/pairs/superresolution-b.jpg" alt="SwinIR x8 output" />
-                    <span class="ba-chip left">bicubic ×8</span>
-                    <span class="ba-chip right">SwinIR ×8</span>
+                    <img class="ba-img" src="./assets/media/pairs/superresolution-a.jpg" alt="Upsampled x8 input from a 63 pixel source" />
+                    <img class="ba-img ba-b" src="./assets/media/pairs/superresolution-b.jpg" alt="Native 2048 pixel ground truth" />
+                    <span class="ba-chip left">input · 63 px</span>
+                    <span class="ba-chip right">ground truth · 2048 px</span>
                     <span class="ba-handle" aria-hidden="true"></span>
-                    <input class="ba-range" type="range" min="0" max="100" value="50" aria-label="Compare bicubic and SwinIR x8" />
+                    <input class="ba-range" type="range" min="0" max="100" value="50" aria-label="Compare the x8 input and the 2048 px ground truth" />
                   </div>
                 </figure>
               </div>
@@ -351,8 +353,9 @@
                 <h3>×2, ×4, ×8 — rendered, not blurred.</h3>
                 <p>
                   The low-resolution level is its own render pass at a coarser sampling, not a
-                  downsample of the 2048 frame. The panel compares a bicubic upsample with the
-                  SwinIR ×8 checkpoint on the same 63 px input.
+                  downsample of the 2048 frame. The target is always the native high-resolution
+                  render: the panel shows the input and that target, while the SwinIR ×8
+                  prediction is the middle column of the grid below.
                 </p>
                 <dl class="facts">
                   <div><dt>Models</dt><dd>SRCNN · autoencoder · SRGAN · SwinIR</dd></div>
@@ -485,7 +488,7 @@
         </div>
       </div>
       <div class="footer-bottom">
-        <p>© 2026 TOELT LLC · HSLU · armasuisse S+T · Apache-2.0</p>
+        <p>© 2026 TOELT LLC · HSLU · Swiss Smart Factory · armasuisse S+T · Apache-2.0</p>
         <p>
           Page by <a href="https://safouaneelghazouali.me/" target="_blank" rel="noopener noreferrer">Safouane El Ghazouali</a>
           · <a href="https://github.com/safouaneelg/SyMTRS" target="_blank" rel="noopener noreferrer">source</a>

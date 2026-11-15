@@ -11,7 +11,7 @@ const icons = {
 const citations = {
   BibTeX: `@misc{elghazoualisymtrs,
       title={SyMTRS: Benchmark Multi-Task Synthetic Dataset for Depth, Domain Adaptation and Super-Resolution in Aerial Imagery},
-      author={Safouane El Ghazouali and Nicola Venturi and Michael Rueegsegger and Umberto Michelucci},
+      author={Safouane El Ghazouali and Baptiste Lucas and Nicola Venturi and Michael Rueegsegger and Umberto Michelucci},
       year={2026},
       eprint={2604.21801},
       archivePrefix={arXiv},
@@ -19,9 +19,10 @@ const citations = {
       url={https://arxiv.org/abs/2604.21801},
 }`,
   PlainText:
-    "El Ghazouali, S., Venturi, N., Rueegsegger, M., & Michelucci, U. (2026). SyMTRS: Benchmark Multi-Task Synthetic Dataset for Depth, Domain Adaptation and Super-Resolution in Aerial Imagery. arXiv preprint arXiv:2604.21801.",
+    "El Ghazouali, S., Lucas, B., Venturi, N., Rueegsegger, M., & Michelucci, U. (2026). SyMTRS: Benchmark Multi-Task Synthetic Dataset for Depth, Domain Adaptation and Super-Resolution in Aerial Imagery. arXiv preprint arXiv:2604.21801.",
   RIS: `TY  - JOUR
 AU  - El Ghazouali, Safouane
+AU  - Lucas, Baptiste
 AU  - Venturi, Nicola
 AU  - Rueegsegger, Michael
 AU  - Michelucci, Umberto
