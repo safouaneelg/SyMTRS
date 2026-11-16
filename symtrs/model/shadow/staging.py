@@ -40,7 +40,7 @@ class ShadowStagingError(RuntimeError):
 
 def pairs_for(root: str, split: str) -> List[Tuple[str, Path, Path]]:
     """`(key, rgb_day, rgb_noshadow)` for every matched pair of a split, in key order."""
-    from symtrs.data.io import list_images, match_by_stem, normalize_stem
+    from symtrs.data.io import match_by_stem, normalize_stem
     from symtrs.data.splits import resolve_split_dirs
 
     directories = resolve_split_dirs(root, split, 2048)
@@ -52,8 +52,8 @@ def pairs_for(root: str, split: str) -> List[Tuple[str, Path, Path]]:
                 f"rgb_day and rgb_noshadow at 2048; run `symtrs doctor --data-root {root}` "
                 "for a coverage report."
             )
-    day = list_images(directories.day)
-    clean = list_images(directories.noshadow)
+    day = directories.files_for("day")
+    clean = directories.files_for("noshadow")
     matched = match_by_stem(day, clean)
     if not matched:
         raise ShadowStagingError(

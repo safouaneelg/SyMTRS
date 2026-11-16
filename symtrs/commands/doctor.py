@@ -179,7 +179,6 @@ def _report_dataset(root: str, backend: str) -> None:
     from symtrs.data.exr import read_depth_file
     import numpy as np
 
-    from symtrs.data.io import list_images
     from symtrs.data.splits import available_resolutions, describe_layout, resolve_split_dirs
 
     print(describe_layout(root))
@@ -197,15 +196,15 @@ def _report_dataset(root: str, backend: str) -> None:
         print(f"  could not resolve the 2048 training split: {exc}")
         return
 
-    rgb = list_images(dirs.day)
-    depth_files = [p for p in dirs.depth.iterdir()] if dirs.depth.is_dir() else []
-    labels = list_images(dirs.semantic)
+    rgb = dirs.files_for("day")
+    depth_files = dirs.files_for("depth")
+    labels = dirs.files_for("semantic")
     print(f"  rgb_day files    {len(rgb)}")
     print(f"  depth files      {len(depth_files)}")
     print(f"  semantic files   {len(labels)}")
     for role in ("night", "noshadow"):
         folder = getattr(dirs, role)
-        count = len(list_images(folder)) if folder is not None and folder.is_dir() else 0
+        count = len(dirs.files_for(role)) if folder is not None and folder.is_dir() else 0
         print(f"  rgb_{role:<9}   {count}")
 
     # Pairing is by the key after the `rgb_day_2048_`-style prefix. Say how well each
@@ -219,7 +218,7 @@ def _report_dataset(root: str, backend: str) -> None:
     for role in ("night", "noshadow"):
         folder = getattr(dirs, role)
         if folder is not None and folder.is_dir():
-            coverage[role] = coverage_report(rgb, list_images(folder))
+            coverage[role] = coverage_report(rgb, dirs.files_for(role))
     for name, report in coverage.items():
         flag = "" if report["matched"] == report["primary"] == report["secondary"] else "  <-- MISMATCH"
         print(

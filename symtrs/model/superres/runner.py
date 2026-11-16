@@ -114,6 +114,9 @@ def expected_test_dirs(root: str, split: str, resolution: int) -> "tuple[Path, P
     `test/`, and a training run should say so rather than die on it.
     """
     split_root = Path(root) / split
+    view_root = Path(root) / "views" / split
+    if not split_root.is_dir() and view_root.is_dir():
+        return view_root, view_root
     return (
         split_root / subdir_for("day", resolution),
         split_root / subdir_for("day", 2048),
@@ -233,6 +236,8 @@ class SuperResolution:
             "--save_samples_every", str(cfg.train.save_samples_every),
             "--adv_weight", str(self.adv_weight),
         ]
+        if resolve_split_dirs(root, cfg.data.split, cfg.resolution).view_root is not None:
+            command.append("--view_layout")
 
         # Crops are for every model: a 2048 px frame does not fit a 12 GB card for any of
         # them (SRCNN's first activation alone was 31.75 GiB at batch 16), and the trainer

@@ -14,7 +14,7 @@ import torch
 from torch.utils.data import Dataset
 
 from symtrs.data.exr import read_depth_file, depth_to_tensor
-from symtrs.data.io import list_images, check_pairing, match_by_stem, read_image, coverage_report
+from symtrs.data.io import check_pairing, match_by_stem, read_image, coverage_report
 from symtrs.data.splits import SplitDirs, resolve_split_dirs
 from symtrs.data.transforms import (
     apply_crop,
@@ -23,9 +23,6 @@ from symtrs.data.transforms import (
     match_spatial,
     sample_crop_params,
 )
-
-DEPTH_EXTENSIONS = (".exr", ".npy")
-
 
 class DepthTaskDataset(Dataset):
     """Image -> metric depth pairs at one resolution.
@@ -69,8 +66,8 @@ class DepthTaskDataset(Dataset):
         day_dir = self.dirs.path_for("day")
         depth_dir = self.dirs.path_for("depth")
 
-        images = list_images(day_dir)
-        depths = _list_depth(depth_dir)
+        images = self.dirs.files_for("day")
+        depths = self.dirs.files_for("depth")
         pairs = match_by_stem(images, depths)
 
         check_pairing(pairs, images, depths, "image/depth", split, resolution)
@@ -146,13 +143,7 @@ class DepthTaskDataset(Dataset):
         }
 
 
-def _list_depth(root: Path) -> List[Path]:
-    if not root.is_dir():
-        return []
-    return sorted(p for p in root.iterdir() if p.suffix.lower() in DEPTH_EXTENSIONS)
-
-
 def depth_coverage(root: str, split: str = "train", resolution: int = 2048) -> dict:
     """Stem-match report between images and depth, for `symtrs inspect`."""
     dirs = resolve_split_dirs(root, split, resolution)
-    return coverage_report(list_images(dirs.day), _list_depth(dirs.depth))
+    return coverage_report(dirs.files_for("day"), dirs.files_for("depth"))

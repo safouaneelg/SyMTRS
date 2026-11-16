@@ -38,6 +38,30 @@ def _flag(command, name):
     return command[command.index(name) + 1]
 
 
+def test_legacy_loader_selects_lr_and_hr_families_in_view_layout(tmp_path: Path) -> None:
+    from symtrs.legacy.dataloader.superres_dataset import SuperResDataset
+
+    root = tmp_path / "views" / "train"
+    loc = root / "loc000"
+    loc.mkdir(parents=True)
+    key = "loc000_rot103deg_h01_x-049013_y+035369_z+012230"
+    lr = loc / f"rgb_day_512_{key}.png"
+    hr = loc / f"rgb_day_2048_{key}.png"
+    (loc / f"seg_day_512_{key}.png").touch()
+    (loc / f"rgb_night_2048_{key}.png").touch()
+    lr.touch()
+    hr.touch()
+
+    dataset = SuperResDataset(
+        str(root),
+        str(root),
+        lr_prefix="rgb_day_512_",
+        hr_prefix="rgb_day_2048_",
+        recursive=True,
+    )
+    assert dataset.pairs == [(lr, hr)]
+
+
 # ------------------------------------------------------ a failed run must not look finished
 
 

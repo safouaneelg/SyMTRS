@@ -12,9 +12,13 @@ from PIL import Image
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 
 
-def list_images(root: str | Path) -> List[Path]:
+def list_images(root: str | Path, prefix: str = "", recursive: bool = False) -> List[Path]:
     root = Path(root)
-    files = [p for p in root.iterdir() if p.suffix.lower() in IMAGE_EXTS]
+    paths = root.rglob("*") if recursive else root.iterdir()
+    files = [
+        p for p in paths
+        if p.is_file() and p.suffix.lower() in IMAGE_EXTS and p.name.startswith(prefix)
+    ]
     return sorted(files)
 
 

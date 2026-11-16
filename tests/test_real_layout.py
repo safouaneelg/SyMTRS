@@ -193,6 +193,48 @@ def test_staged_day_and_night_names_match_so_pix2pix_can_pair_them(tmp_path: Pat
     assert (staging / "trainB" / b[0]).read_bytes() == b"night"
 
 
+@requires_torch
+def test_tensor_datasets_pair_files_in_the_view_organized_layout(tmp_path: Path):
+    from symtrs.data.depth_dataset import DepthTaskDataset
+    from symtrs.data.semantic_dataset import SemanticDataset
+
+    root = tmp_path / "view_tree"
+    view = root / "views" / "train" / "loc000"
+    view.mkdir(parents=True)
+    key = KEY
+    day = view / f"rgb_day_512_{key}.png"
+    depth = view / f"depth_day_512_{key}.exr"
+    semantic = view / f"seg_day_512_{key}.png"
+    for path in (day, depth, semantic):
+        path.write_bytes(b"fixture")
+
+    depth_data = DepthTaskDataset(str(root), "train", resolution=512)
+    semantic_data = SemanticDataset(str(root), "train", resolution=512)
+    assert len(depth_data) == len(semantic_data) == 1
+    assert depth_data.pairs[0] == (day, depth)
+    assert semantic_data.pairs[0] == (day, semantic)
+
+
+def test_domain_and_shadow_staging_find_pairs_in_the_view_organized_layout(tmp_path: Path):
+    from symtrs.model.domain.upstream import build_staging_dir
+    from symtrs.model.shadow.staging import pairs_for
+
+    root = tmp_path / "view_tree"
+    view = root / "views" / "train" / "loc000"
+    view.mkdir(parents=True)
+    key = KEY
+    day = view / f"rgb_day_2048_{key}.png"
+    night = view / f"rgb_night_2048_{key}.png"
+    noshadow = view / f"rgb_noshadow_2048_{key}.png"
+    for path in (day, night, noshadow):
+        path.write_bytes(b"fixture")
+
+    staged = build_staging_dir(str(root), str(tmp_path / "domain-run"), "train")
+    assert len(list((staged / "trainA").iterdir())) == 1
+    assert len(list((staged / "trainB").iterdir())) == 1
+    assert pairs_for(str(root), "train") == [(key, day, noshadow)]
+
+
 def test_staging_with_no_matching_names_names_the_doctor(tmp_path: Path):
     from symtrs.model.domain.upstream import UpstreamError, build_staging_dir
 

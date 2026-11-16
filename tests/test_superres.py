@@ -82,6 +82,22 @@ def test_x1_reads_the_same_folder_twice(layout: Path) -> None:
     assert lr_dir(str(layout), "train", 2048) == hr_dir(str(layout), "train")
 
 
+def test_view_organized_layout_passes_family_filters_to_the_trainer(tmp_path: Path) -> None:
+    root = tmp_path / "view_tree"
+    for split in ("train", "val", "test"):
+        (root / "views" / split / "loc000").mkdir(parents=True)
+
+    assert lr_dir(str(root), "train", 512) == root / "views" / "train"
+    assert hr_dir(str(root), "train") == root / "views" / "train"
+    assert runner.expected_test_dirs(str(root), "test", 512) == (
+        root / "views" / "test",
+        root / "views" / "test",
+    )
+
+    command = build_model("srcnn").train_command(_config(root, resolution=512), root / "run")
+    assert "--view_layout" in command
+
+
 # ------------------------------------------------------------------------- the command
 
 
