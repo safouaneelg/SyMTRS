@@ -14,6 +14,7 @@ from typing import Dict
 #: Subcommand -> module. Insertion order is the order `symtrs --help` lists them, which
 #: is roughly the order you would use them in.
 COMMANDS: Dict[str, str] = {
+    "get": "symtrs.commands.get",
     "train": "symtrs.commands.train",
     "train-group": "symtrs.commands.train_group",
     "eval": "symtrs.commands.evaluate",

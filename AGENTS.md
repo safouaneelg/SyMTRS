@@ -24,6 +24,17 @@ aerial dataset benchmark with five tasks.
 | `shadow_removal` | 4 (ShadowFormer, Restormer, Uformer, ShadowMaskFormer), 2048 only | `rgb_day` → `rgb_noshadow` |
 | `superresolution` | 4 (SRCNN, autoencoder, SRGAN, SwinIR) × 4 scales | `rgb_day_lr/xN` → native `rgb_day` |
 
+`symtrs` with no subcommand opens the **launcher** (`symtrs get` is the same selection
+without a terminal): it reads the release's catalog, lets a user select task groups, splits
+and model checkpoints, prices the selection, and downloads only the union of the files those
+choices need. The release is **several HF projects** - the catalog plus metadata in
+`SyMTRS-metadata`, the images once in `SyMTRS-views`, one table repo per task vertical, and
+one model repo per vertical; `docs/hub.md` is the contract and `symtrs/hub/repos.py` holds
+the placeholder URLs. Selecting a dataset vertical pulls `metadata` by default (a table
+without the camera/class metadata cannot be interpreted); the view project is pulled
+transitively by the task tables. It copies each published file to its published path and never
+re-shapes the dataset: the release format is the maintainer's, and a download is a copy.
+
 Two of the five are not trained by this package at all and are driven as subprocesses (shadow
 removal is a third case, below):
 
@@ -223,6 +234,7 @@ changing anything.
 python -m venv .venv && source .venv/bin/activate
 pip install -e '.[dev,timm]'          # core + tests; add exr, da3 as needed
 pip install -e '.[adapt]'             # domain adaptation: dominate + wandb
+pip install -e '.[launcher]'          # the interactive launcher: textual + huggingface_hub
 symtrs doctor                         # what is installed, which models can build
 symtrs models                         # every registry key, protocol and requirement
 ```
@@ -250,6 +262,14 @@ fail against the real dataset. `--size` must be ≥ the largest patch a config c
 ## 4. Cheat sheet
 
 ```bash
+# pull only what a project needs (bare `symtrs` opens the interactive launcher)
+symtrs
+symtrs get --list
+symtrs get --preset depth-2048 --data-root /data/SyMTRS --yes
+symtrs get --task segmentation --resolutions 2048 --splits train,val --data-root /data/SyMTRS --yes
+symtrs get --models midas_dpt_hybrid@1024 --models-dir runs/ --yes
+symtrs get --verify --data-root /data/SyMTRS
+
 # one run, from a config, with a dry run first
 symtrs train configs/depth/2048/midas_dpt_hybrid_2048.yaml --data-root /data/SyMTRS --dry-run
 symtrs train configs/depth/2048/midas_dpt_hybrid_2048.yaml --data-root /data/SyMTRS
@@ -300,7 +320,12 @@ symtrs/
   config.py            RunConfig: the single schema every front-end builds
   registry.py          model keys -> spec (task, protocol, requires, default kwargs)
   cli.py, commands/    one module per subcommand; _common.py holds the shared flags
+  hub/                 the release launcher: manifest.py (schema), plan.py (selection ->
+                       exact files, dedupe, sizes), state.py (lockfile, verify), fetch.py
+                       (Hub / local mirror), install.py,
+                       viewmodel.py (pure TUI state), tui.py (Textual), render.py
   data/                splits.py (the resolution mapping), factory.py, exr.py, datasets
+                       naming.py (the release's file-name grammar, shared with the publisher)
   engine/              trainer.py (routing), loop.py (train/eval loops, metrics)
   model/
     base.py            the model interface the adapters implement
@@ -314,6 +339,7 @@ symtrs/legacy/          the SR implementation and datasets: moved inside, then e
 train_superresolution.py, dataloader/   shims that re-export from symtrs/legacy/
 pytorch-CycleGAN-and-pix2pix/                           vendored upstream, pinned
 tests/                 pytest; conftest.py holds the layout and data fixtures
+docs/hub.md            the release manifest/table contract the launcher reads
 ```
 
 Run artefacts, uniformly for every task: `<run_dir>/weights/best.pt`, `weights/last.pt`,
@@ -353,6 +379,13 @@ enough — and changing it anywhere else is a bug.
 descriptor in `symtrs/model/<task>/` with `describe()`, `task` and `requires`, and the
 routing branch in `engine/trainer.py` (`train` and `evaluate_run`) if it is driven as a
 subprocess. Add it to §1 of this file and to the table in `configs/README.md`.
+
+**Change the release contract.** `symtrs/hub/manifest.py` is the only reader of
+`symtrs-hub.json` and `symtrs/data/naming.py` is the only copy of the file-name grammar;
+`docs/hub.md` is what the publisher must produce. A schema change bumps `SCHEMA`, updates
+that document, and adds a rejection test in `tests/test_hub_manifest.py` - an older
+package must refuse a newer release rather than half-read it. The publisher is expected to
+import `symtrs.data.naming`, not to parse names a second time.
 
 ## 7. Traps that have already bitten
 
@@ -418,6 +451,13 @@ subprocess. Add it to §1 of this file and to the table in `configs/README.md`.
   never resolve a user-typed path inside a launcher. `tests/test_relative_run_dir.py` covers
   the three subprocess tasks. Paths inside `upstream_args`/`model_kwargs.extra_args` are
   passed through verbatim: give them absolute.
+- **The launcher copies a release; it does not format one.** `symtrs get` writes every
+  downloaded file at the repo-relative path the manifest/table names, and nothing else -
+  no renames, no symlink farm, no "converted" tree. The dataset format is the maintainer's
+  (the current release is the flat `<split>/rgb_day` tree; a future one may be task-first),
+  and the loader reads whatever was published. A group is recorded in
+  `.symtrs/install.json` only when every file its table lists is present at the advertised
+  size - a partial download is visible, not claimed.
 
 ## 8. Testing
 
@@ -440,6 +480,12 @@ conventions matter when adding one:
   mistake (the protocol pairing, the ×1 row not being super-resolution, the zero-shot
   exclusion for SR), assert the message or the guard, so removing the protection fails a
   test rather than quietly changing a number.
+- **The hub tests are offline.** `tests/test_hub_*.py` drive the launcher against the
+  `hub_mirror` fixture (a complete little multi-repo release under `tmp_path`), so
+  dedupe, repo routing, path-preserving installs, locking and verification are pinned
+  without a network or either optional extra.
+  `tests/test_hub_tui.py` skips when `textual` is absent; the selection rules it exercises
+  live in `viewmodel.py` and are covered without it.
 
 ## 9. Style
 

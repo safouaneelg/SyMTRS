@@ -50,6 +50,13 @@ timm = ["timm"]
 # SegFormer's MiT encoder comes from `transformers` (timm has never shipped MiT). This extra
 # used to be an alias of `timm`; MiDaS still needs the `timm` extra on its own.
 segformer = ["transformers"]
+# `symtrs get` from the Hugging Face Hub. Only the downloader needs it; `--mirror` and a
+# local `--manifest` work without, and the core planner never imports it.
+hub = ["huggingface_hub>=0.23"]
+# The interactive launcher (bare `symtrs`). Textual is a front-end dependency only; the
+# flag-driven `symtrs get --plan/--yes` path works without it, and nothing here imports
+# textual at package import time.
+launcher = ["textual>=0.80", "huggingface_hub>=0.23"]
 dev = ["pytest"]
 
 [project.scripts]

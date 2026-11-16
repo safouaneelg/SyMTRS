@@ -23,20 +23,33 @@ Reproducibility guide for the `SyMTRS` workspace. The dataset is 20,000 frames
 (14,000 train / 3,000 val / 3,000 test) and 767 GB; every command in this guide also runs
 against `symtrs make-dummy`, so an install can be checked without it.
 
-You first need to download the dataset from our huggingface repo `https://huggingface.co/datasets/safouaneelg/SyMTRS`
+You first need the dataset from our huggingface repo
+`https://huggingface.co/datasets/safouaneelg/SyMTRS`. The release is organised by task, so
+you can pull only the groups your work needs instead of the whole 767 GB:
 
-you can either git clone it:
+```sh
+pip install -e '.[launcher]'     # textual + huggingface_hub; [hub] is enough for flags only
+symtrs                           # interactive: pick tasks, splits and models, review the size
+```
+
+or the same selection without a terminal:
+
+```sh
+symtrs get --list
+symtrs get --preset depth-2048 --data-root /data/SyMTRS --yes
+symtrs get --task segmentation --resolutions 2048 --splits train,val --yes
+symtrs get --models midas_dpt_hybrid@1024 --models-dir runs/ --yes
+symtrs get --verify --data-root /data/SyMTRS
+```
+
+The release is split across several Hugging Face projects — metadata, the image store, one
+project per task vertical and one per model vertical — and the launcher copies the files you
+select at the paths the release publishes, without reshaping the dataset. `docs/hub.md`
+documents the repository map and the manifest. While the split release is still rolling out,
+`git clone` remains the fallback:
 
 ```sh
 git clone https://huggingface.co/datasets/safouaneelg/SyMTRS
-```
-
-or load it via `datasets` HF framework:
-
-```python
-from datasets import load_dataset
-
-ds = load_dataset("safouaneelg/SyMTRS")
 ```
 
 ## Five tasks, one capture

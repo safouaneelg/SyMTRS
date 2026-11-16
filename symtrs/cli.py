@@ -60,7 +60,12 @@ def reported_errors() -> tuple:
     return _REPORTED
 
 EPILOG = """\
+bare `symtrs` opens the interactive launcher (download only the groups and models you need).
+
 examples:
+  symtrs
+  symtrs get --list
+  symtrs get --preset depth-2048 --data-root /data/SyMTRS --yes
   symtrs models
   symtrs make-dummy --out /tmp/SyMTRS_dummy --size 256
   symtrs doctor --data-root /data/SyMTRS
@@ -78,10 +83,31 @@ run `symtrs <command> --help` for the flags of one command.
 """
 
 
+def _interactive() -> bool:
+    """Whether there is a terminal to draw a TUI in (and a person to press space)."""
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _launcher_installed() -> bool:
+    """Whether the optional launcher stack is present, without importing either package."""
+    import importlib.util
+
+    for module in ("textual", "huggingface_hub"):
+        try:
+            if importlib.util.find_spec(module) is None:
+                return False
+        except (ImportError, ValueError):
+            return False
+    return True
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="symtrs",
-        description="Train and evaluate depth, segmentation and domain-adaptation models on SyMTRS.",
+        description=(
+            "Download the SyMTRS groups you need, then train and evaluate depth, "
+            "segmentation and domain-adaptation models on them."
+        ),
         epilog=EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -104,8 +130,20 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     parser = build_parser()
     if not argv:
-        parser.print_help()
-        return 0
+        # Bare `symtrs` is the launcher. Without a terminal (a CI log, a pipe) there is
+        # nobody to press space, and without the optional extra the right answer is the
+        # help plus the install line, not an error from a package the user never asked for.
+        if _interactive() and _launcher_installed():
+            argv = ["get"]
+        else:
+            parser.print_help()
+            if _interactive():
+                print(
+                    "\n[symtrs] the interactive launcher is not installed: "
+                    "pip install -e '.[launcher]'",
+                    file=sys.stderr,
+                )
+            return 0
 
     args = parser.parse_args(argv)
     if getattr(args, "command", None) is None:

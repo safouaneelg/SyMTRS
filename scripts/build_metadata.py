@@ -36,51 +36,25 @@ from __future__ import annotations
 import argparse
 import csv
 import math
-import re
 from collections import Counter
 from pathlib import Path
 
 import yaml
 
 from symtrs.config import DataConfig
+# The grammar and the completeness set live in the package because the hub launcher needs
+# the same parse to build its flat compatibility view. Re-exported under the old names so
+# this script's readers (and its test) keep one import surface.
+from symtrs.data.naming import EXPECTED_VIEW_FILES as EXPECTED
+from symtrs.data.naming import MASK_ALIASES
+from symtrs.data.naming import parse_view_name as parse_name
 
 RESOLUTIONS = (2048, 1024, 512, 256)
 CLASS_NAMES = ("background", "building", "green", "road", "car")
 
 SPLITS = ("train", "val", "test")
 
-#: `<modality>_<light>_<resolution>_loc<NNN>_rot<NNN>deg_h<NN>_x<sign><cm>_y<...>_z<...>`
-NAME = re.compile(
-    r"^(?P<modality>rgb|depth|seg|semantic)_(?P<light>day|night|noshadow)_(?P<resolution>\d+)_"
-    r"(?P<key>loc(?P<location>\d+)_rot(?P<rotation>\d+)deg_h(?P<altitude>\d+)_"
-    r"x(?P<x>[+-]\d+)_y(?P<y>[+-]\d+)_z(?P<z>[+-]\d+))$"
-)
-
-#: The fourteen files a complete view carries (Sect. 3 of the manuscript): one native render
-#: per lighting state, three low-resolution day renders, four depth maps, four masks.
-EXPECTED = {
-    ("rgb", "day", "2048"), ("rgb", "day", "1024"), ("rgb", "day", "512"), ("rgb", "day", "256"),
-    ("rgb", "night", "2048"), ("rgb", "noshadow", "2048"),
-    ("depth", "day", "2048"), ("depth", "day", "1024"), ("depth", "day", "512"),
-    ("depth", "day", "256"),
-    ("seg", "day", "2048"), ("seg", "day", "1024"), ("seg", "day", "512"), ("seg", "day", "256"),
-}
-
-#: `seg` is also exported as `semantic` in some trees; either name fills the mask slots.
-MASK_ALIASES = {"seg", "semantic"}
-
 DATA = DataConfig()
-
-
-def parse_name(stem: str) -> dict | None:
-    """The fields of one filename, or None when it is not a SyMTRS export name."""
-    match = NAME.match(stem)
-    if not match:
-        return None
-    fields = match.groupdict()
-    for axis in ("x", "y", "z"):
-        fields[axis] = int(fields[axis]) / 100.0  # the export stores centimetres
-    return fields
 
 
 def gsd_cm(height_m: float, resolution: int) -> float:
