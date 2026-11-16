@@ -418,7 +418,6 @@ def build_staging_dir(
     directories exist, upstream never reaches its auto-splitting branch. Each file is linked
     under its normalised key (`staged_name`) so day and night names match for pix2pix.
     """
-    from symtrs.data.io import list_images
     from symtrs.data.splits import resolve_split_dirs
 
     a_role, b_role, _ = direction_spec(direction)
@@ -435,8 +434,9 @@ def build_staging_dir(
             continue
 
         keys = {}
-        for domain, folder in (
-            ("A", getattr(directories, a_role)), ("B", getattr(directories, b_role))
+        for domain, role, folder in (
+            ("A", a_role, getattr(directories, a_role)),
+            ("B", b_role, getattr(directories, b_role)),
         ):
             link = staging / f"{name}{domain}"
             if folder is None:
@@ -454,7 +454,7 @@ def build_staging_dir(
 
             methods = set()
             names = set()
-            for image in list_images(folder):
+            for image in directories.files_for(role):
                 target = staged_name(image)
                 # Absolute source: the run directory is typically moved (or written to
                 # shared storage and read from a different mount) after training, and a

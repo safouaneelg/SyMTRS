@@ -73,6 +73,27 @@ def test_resolve_split_dirs_points_at_real_directories(layout: Path, resolution:
         assert directories.path_for("day") == directories.day
 
 
+def test_view_organized_layout_resolves_role_files_and_resolutions(tmp_path: Path):
+    root = tmp_path / "view_tree"
+    view = root / "views" / "train" / "loc000"
+    view.mkdir(parents=True)
+    key = "loc000_rot103deg_h01_x-049013_y+035369_z+012230"
+    day = view / f"rgb_day_512_{key}.png"
+    depth = view / f"depth_day_512_{key}.exr"
+    semantic = view / f"seg_day_512_{key}.png"
+    for path in (day, depth, semantic):
+        path.touch()
+
+    directories = resolve_split_dirs(str(root), "train", 512)
+    assert directories.view_root == root / "views" / "train"
+    assert directories.files_for("day") == [day]
+    assert directories.files_for("depth") == [depth]
+    assert directories.files_for("semantic") == [semantic]
+    assert directories.filename_prefix("day") == "rgb_day_512_"
+    assert available_resolutions(str(root), "train") == (512,)
+    assert "day=ok" in describe_layout(str(root))
+
+
 def test_night_is_none_below_native(layout: Path):
     assert resolve_split_dirs(str(layout), "train", 1024).night is None
     assert resolve_split_dirs(str(layout), "train", 2048).night is not None

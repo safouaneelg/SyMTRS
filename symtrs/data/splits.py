@@ -1,10 +1,17 @@
-"""Resolution-to-directory mapping for the revised SyMTRS layout.
+"""Resolution-to-directory mapping for the revised SyMTRS layouts.
 
+Flat layout:
     <root>/train/ | val/ | test/
         rgb_day/            rgb_night/          rgb_noshadow/
         rgb_day_lr/x2|x4|x8
         depth/              depth_lr/x2|x4|x8
         semantic/           semantic_lr/x2|x4|x8
+
+View-organized layout:
+    <root>/views/train/loc<NNN>/
+        rgb_day_<resolution>_<key>.png
+        depth_day_<resolution>_<key>.exr
+        seg_day_<resolution>_<key>.png
 
 A resolution names the *pixel* size of the data, which is what the benchmark cares
 about, and maps to a directory suffix:
@@ -15,11 +22,10 @@ about, and maps to a directory suffix:
      256 -> _lr/x8
 
 `rgb_night` and `rgb_noshadow` have no low-resolution variant, which is why domain
-adaptation (and any shadow-removal task) is 2048-only.
-
-Every accessor raises `MissingDirectoryError` naming the exact path it looked for.
-There is deliberately no fallback to a different resolution: silently training at
-1024 when you asked for 2048 is worse than stopping.
+adaptation (and any shadow-removal task) is 2048-only. `path_for` validates the split
+container, and `files_for` selects the requested family in either layout. There is
+deliberately no fallback to a different resolution: silently training at 1024 when you
+asked for 2048 is worse than stopping.
 """
 
 from __future__ import annotations
@@ -123,6 +129,7 @@ class SplitDirs:
     depth: Optional[Path]
     semantic: Optional[Path]
     noshadow: Optional[Path] = None
+    view_root: Optional[Path] = None
 
     @property
     def scale(self) -> int:
@@ -133,7 +140,7 @@ class SplitDirs:
         return self.resolution == max(RESOLUTIONS)
 
     def path_for(self, role: str) -> Path:
-        """The path for `role`, raising if the directory is missing on disk."""
+        """The role directory, or its shared view container, if it exists."""
         path = getattr(self, role, None)
         if path is None:
             # subdir_for raises its own ValueError for a native-only role below 2048.
@@ -141,6 +148,59 @@ class SplitDirs:
         if not path.is_dir():
             raise MissingDirectoryError(role, path, self.resolution, self.split)
         return path
+
+    def files_for(self, role: str) -> List[Path]:
+        """List files for one role in either supported on-disk layout."""
+        folder = self.path_for(role)
+        if self.view_root is None:
+            extensions = {".exr", ".npy"} if role == "depth" else {
+                ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"
+            }
+            return sorted(
+                path for path in folder.iterdir()
+                if path.is_file() and path.suffix.lower() in extensions
+            )
+
+        if role not in ("day", "night", "noshadow", "depth", "semantic"):
+            raise ValueError(f"unknown role {role!r}")
+        if role in ("night", "noshadow") and self.resolution != 2048:
+            return []
+
+        resolution = 2048 if role in ("night", "noshadow") else self.resolution
+        modality, condition = {
+            "day": ("rgb", "day"),
+            "night": ("rgb", "night"),
+            "noshadow": ("rgb", "noshadow"),
+            "depth": ("depth", "day"),
+            "semantic": ("seg", "day"),
+        }[role]
+        extensions = (".exr",) if role == "depth" else (".png",)
+        modalities = ("seg", "semantic") if role == "semantic" else (modality,)
+        return sorted(
+            path
+            for name in modalities
+            for extension in extensions
+            for path in self.view_root.glob(
+                f"loc*/{name}_{condition}_{resolution}_*{extension}"
+            )
+            if path.is_file()
+        )
+
+    def filename_prefix(self, role: str) -> str:
+        """Filename prefix for a role in the view-organized layout."""
+        if self.view_root is None:
+            raise ValueError("filename prefixes are only used by the view-organized layout")
+        if role not in ("day", "night", "noshadow", "depth", "semantic"):
+            raise ValueError(f"unknown role {role!r}")
+        resolution = 2048 if role in ("night", "noshadow") else self.resolution
+        modality, condition = {
+            "day": ("rgb", "day"),
+            "night": ("rgb", "night"),
+            "noshadow": ("rgb", "noshadow"),
+            "depth": ("depth", "day"),
+            "semantic": ("seg", "day"),
+        }[role]
+        return f"{modality}_{condition}_{resolution}_"
 
     def as_dict(self) -> dict:
         return {
@@ -153,10 +213,10 @@ class SplitDirs:
 
 
 def resolve_split_dirs(root: str, split: str, resolution: int) -> SplitDirs:
-    """Map (root, split, resolution) to concrete directories.
+    """Map (root, split, resolution) to directories in either supported layout.
 
-    This does not require the directories to exist; call `SplitDirs.path_for` when
-    you need one and want a clear error if it is absent.
+    Flat roots retain role-specific directories. View-organized roots use the split's
+    `views/<split>` directory and select role files through `SplitDirs.files_for`.
     """
     root_path = Path(root)
     if not root_path.is_dir():
@@ -164,11 +224,26 @@ def resolve_split_dirs(root: str, split: str, resolution: int) -> SplitDirs:
     if split not in SPLITS:
         raise ValueError(f"unknown split {split!r}; expected one of {SPLITS}")
 
+    scale_for_resolution(resolution)
     split_root = root_path / split
-    if not split_root.is_dir():
+    view_root = root_path / "views" / split
+    if not split_root.is_dir() and not view_root.is_dir():
         raise FileNotFoundError(
             f"split directory does not exist: {split_root}\n"
-            f"  the revised layout expects {root_path}/{{train,val,test}}"
+            f"  expected {root_path}/{{train,val,test}} or {root_path}/views/{{train,val,test}}"
+        )
+
+    if not split_root.is_dir():
+        return SplitDirs(
+            root=root_path,
+            split=split,
+            resolution=resolution,
+            day=view_root,
+            night=view_root if resolution == max(RESOLUTIONS) else None,
+            noshadow=view_root if resolution == max(RESOLUTIONS) else None,
+            depth=view_root,
+            semantic=view_root,
+            view_root=view_root,
         )
 
     night = (split_root / subdir_for("night", resolution)) if resolution == max(RESOLUTIONS) else None
@@ -190,7 +265,7 @@ def resolve_split_dirs(root: str, split: str, resolution: int) -> SplitDirs:
 
 
 def available_resolutions(root: str, split: str = "train") -> Tuple[int, ...]:
-    """Which resolutions are actually present, by looking for the day directory.
+    """Which resolutions are actually present, by looking for day files.
 
     Used by `symtrs inspect` and to let `sweep` skip grid cells that cannot run.
     """
@@ -200,7 +275,8 @@ def available_resolutions(root: str, split: str = "train") -> Tuple[int, ...]:
             dirs = resolve_split_dirs(root, split, resolution)
         except (FileNotFoundError, ValueError):
             continue
-        if dirs.day.is_dir():
+        has_day = bool(dirs.files_for("day")) if dirs.view_root else dirs.day.is_dir()
+        if has_day:
             present.append(resolution)
     return tuple(present)
 
@@ -218,7 +294,8 @@ def describe_layout(root: str) -> str:
     lines = [f"dataset root: {root}"]
     for split in SPLITS:
         split_root = Path(root) / split
-        if not split_root.is_dir():
+        view_root = Path(root) / "views" / split
+        if not split_root.is_dir() and not view_root.is_dir():
             lines.append(f"  {split}/  MISSING")
             continue
         lines.append(f"  {split}/")
@@ -232,9 +309,8 @@ def describe_layout(root: str) -> str:
                 path = getattr(dirs, role)
                 if path is None:
                     marks.append(f"{role}=-")
-                elif path.is_dir():
-                    marks.append(f"{role}=ok")
                 else:
-                    marks.append(f"{role}=missing")
+                    present = bool(dirs.files_for(role)) if dirs.view_root else path.is_dir()
+                    marks.append(f"{role}={'ok' if present else 'missing'}")
             lines.append(f"    {resolution:>5}: " + "  ".join(marks))
     return "\n".join(lines)

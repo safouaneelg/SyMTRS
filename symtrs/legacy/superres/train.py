@@ -60,6 +60,8 @@ def parse_args():
     p = argparse.ArgumentParser(description="Train super-resolution models")
     p.add_argument("--lr_root", type=str, required=True, help="LR images root")
     p.add_argument("--hr_root", type=str, required=True, help="HR images root")
+    p.add_argument("--view_layout", action="store_true",
+                   help="read per-view files under views/<split>/loc*/")
     p.add_argument("--model", type=str, default="srcnn", choices=["srcnn", "autoencoder", "srgan", "swinir"])
     p.add_argument("--scale", type=int, default=4, help="Upscale factor for SRGAN/SwinIR")
     p.add_argument("--batch_size", type=int, default=4)
@@ -111,6 +113,18 @@ def parse_args():
     p.add_argument("--swinir_mlp_ratio", type=float, default=4.0)
     p.add_argument("--swinir_upsampler", type=str, default="pixelshuffle")
     return p.parse_args()
+
+
+def _make_dataset(args, lr_root, hr_root):
+    if args.view_layout:
+        return SuperResDataset(
+            lr_root,
+            hr_root,
+            lr_prefix=f"rgb_day_{2048 // args.scale}_",
+            hr_prefix="rgb_day_2048_",
+            recursive=True,
+        )
+    return SuperResDataset(lr_root, hr_root)
 
 
 def swinir_img_size(args, sample_lr):
@@ -418,7 +432,7 @@ def evaluate_on_test(args, device):
         print(f"[test] no checkpoint at {best_path}; skipping the test evaluation")
         return {}
 
-    test_dataset = SuperResDataset(args.test_lr_root, args.test_hr_root)
+    test_dataset = _make_dataset(args, args.test_lr_root, args.test_hr_root)
     test_loader = DataLoader(
         test_dataset,
         batch_size=1,
@@ -547,11 +561,11 @@ def main_worker(rank, world_size, args):
         weights_dir.mkdir(parents=True, exist_ok=True)
         samples_dir.mkdir(parents=True, exist_ok=True)
 
-    dataset = SuperResDataset(args.lr_root, args.hr_root)
+    dataset = _make_dataset(args, args.lr_root, args.hr_root)
     if args.val_lr_root and args.val_hr_root:
         # The split lives in the dataset (ground rule 6): train on all of train/, validate on
         # val/. Two datasets, so the index lists are into different datasets.
-        val_dataset = SuperResDataset(args.val_lr_root, args.val_hr_root)
+        val_dataset = _make_dataset(args, args.val_lr_root, args.val_hr_root)
         train_idx = list(range(len(dataset)))
         # The per-epoch pass only picks best.pt; at 2048 the whole 3000-image split was ~20 of
         # each epoch's ~67 min. The test pass below reads its own loader and is never subsampled.

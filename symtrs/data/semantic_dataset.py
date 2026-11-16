@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 from torch.utils.data import Dataset
 
-from symtrs.data.io import list_images, check_pairing, match_by_stem, read_image, read_label_map, coverage_report
+from symtrs.data.io import check_pairing, match_by_stem, read_image, read_label_map, coverage_report
 from symtrs.data.splits import SplitDirs, resolve_split_dirs
 from symtrs.data.transforms import (
     apply_crop,
@@ -92,8 +92,8 @@ class SemanticDataset(Dataset):
         day_dir = self.dirs.path_for("day")
         semantic_dir = self.dirs.path_for("semantic")
 
-        images = list_images(day_dir)
-        labels = list_images(semantic_dir)
+        images = self.dirs.files_for("day")
+        labels = self.dirs.files_for("semantic")
         pairs = match_by_stem(images, labels)
 
         check_pairing(pairs, images, labels, "image/semantic", split, resolution)
@@ -172,7 +172,7 @@ def detect_class_values(
     when the configured `num_classes` disagrees with the data.
     """
     dirs = resolve_split_dirs(root, split, resolution)
-    labels = list_images(dirs.path_for("semantic"))
+    labels = dirs.files_for("semantic")
     if not labels:
         return Counter()
 
@@ -236,4 +236,4 @@ def check_num_classes(
 
 def semantic_coverage(root: str, split: str = "train", resolution: int = 2048) -> dict:
     dirs = resolve_split_dirs(root, split, resolution)
-    return coverage_report(list_images(dirs.day), list_images(dirs.semantic))
+    return coverage_report(dirs.files_for("day"), dirs.files_for("semantic"))

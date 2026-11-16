@@ -18,6 +18,9 @@ class SuperResDataset(Dataset):
         image_transform: Optional[Callable] = None,
         lr_transform: Optional[Callable] = None,
         hr_transform: Optional[Callable] = None,
+        lr_prefix: str = "",
+        hr_prefix: str = "",
+        recursive: bool = False,
     ) -> None:
         self.lr_root = Path(lr_root)
         self.hr_root = Path(hr_root)
@@ -25,8 +28,8 @@ class SuperResDataset(Dataset):
         self.lr_transform = lr_transform
         self.hr_transform = hr_transform
 
-        lr_files = list_images(self.lr_root)
-        hr_files = list_images(self.hr_root)
+        lr_files = list_images(self.lr_root, prefix=lr_prefix, recursive=recursive)
+        hr_files = list_images(self.hr_root, prefix=hr_prefix, recursive=recursive)
         pairs = match_by_stem(lr_files, hr_files)
         self.pairs = pairs
 

@@ -275,6 +275,27 @@ tasks read the same folders and would otherwise be easy to confuse:
 If a folder for the requested resolution is absent, it is an error rather than a fallback
 to a coarser level, because a silent fallback would change what the reported number means.
 
+The loaders also support a view-organized dataset tree:
+
+```text
+/path/to/SyMTRS/
+├── views/
+│   ├── train/loc<NNN>/<rgb, depth and seg files for each view>
+│   ├── val/loc<NNN>/...
+│   └── test/loc<NNN>/...
+├── tasks/
+└── metadata/
+```
+
+Pass the dataset root itself to `--data-root`; the loaders select the requested modality
+and resolution by filename. For example:
+
+```bash
+symtrs doctor --data-root /path/to/SyMTRS
+symtrs train --task segmentation --model unet_small --resolution 256 \
+  --data-root /path/to/SyMTRS
+```
+
 ## Quickstart
 
 The whole pipeline runs offline against a synthetic dataset, which is the fastest way to
