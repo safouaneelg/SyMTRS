@@ -115,7 +115,9 @@ def _configs() -> list[Path]:
 
 
 def test_the_grid_is_not_empty() -> None:
-    assert len(_configs()) >= 88
+    # 80 generated files (7 depth, 6 segmentation, 4 SR x 4 levels; 8 domain; 4 shadow) since
+    # ZoeDepth's 12 and Depth Pro's 4 were removed on 2026-10-22, plus the quick-start.
+    assert len(_configs()) >= 80
 
 
 @pytest.mark.parametrize("path", _configs(), ids=lambda p: str(p.relative_to(REPO_ROOT)))
@@ -163,18 +165,34 @@ def test_domain_adaptation_has_both_directions_for_every_model() -> None:
         direction = raw["model_kwargs"]["direction"]
         assert path.stem.endswith(direction), path.name
         directions.add(direction)
-    assert directions == {"day2night", "night2day"}
+    assert directions == {"day2night", "night2day", "shadow2noshadow", "noshadow2shadow"}
     stems = {path.stem for path in folder.glob("*.yaml")}
     assert stems == {
-        "cyclegan_day2night",
-        "cyclegan_night2day",
-        "pix2pix_day2night",
-        "pix2pix_night2day",
+        f"{model}_{direction}"
+        for model in ("cyclegan", "pix2pix")
+        for direction in directions
     }
 
 
+def test_the_generator_and_the_runtime_agree_on_which_folders_a_direction_stages() -> None:
+    """`generate_grid.py` cannot import the package, so it keeps a copy of the pair table."""
+    grid = _grid_module()
+    assert set(grid.DOMAIN_DIRECTIONS) == set(upstream.DIRECTION_ROLES)
+    for direction, (a_role, b_role, _) in upstream.DIRECTION_ROLES.items():
+        assert grid.DOMAIN_FOLDERS[direction] == (a_role, b_role), direction
+
+
 def test_depth_protocol_is_consistent_down_each_row() -> None:
-    """A relative model is align: scale at every resolution, or the row is not comparable."""
+    """Loss and alignment follow (protocol, output space) at EVERY resolution - rule 3.
+
+    The expected pair comes from `symtrs.registry.depth_pairing`, not from a table in this
+    test, so the generator (which keeps its own copy because it cannot import the package),
+    the registry and the committed YAMLs are all held to one statement. MiDaS emits
+    disparity `s / z + t`, so it needs a disparity-space scale-and-shift fit; DA3 relative
+    emits depth, so a scale is enough; metric models take none.
+    """
+    from symtrs.registry import depth_pairing
+
     folder = REPO_ROOT / "configs" / "depth"
     seen: dict[str, set[tuple[str, str]]] = {}
     for path in sorted(folder.rglob("*.yaml")):
@@ -185,15 +203,40 @@ def test_depth_protocol_is_consistent_down_each_row() -> None:
     assert seen, "no depth configs found"
     for model, protocols in seen.items():
         assert len(protocols) == 1, f"{model} switches protocol between resolutions: {protocols}"
-        loss, align = next(iter(protocols))
-        expected_align = "scale" if get_spec(model).protocol == "relative" else "none"
-        assert align == expected_align, f"{model}: {loss}/{align} against {get_spec(model).protocol}"
+        spec = get_spec(model)
+        expected = depth_pairing(spec.protocol, spec.output_space)
+        assert next(iter(protocols)) == expected, (
+            f"{model} ({spec.protocol}, {spec.output_space}) should be (loss, align) = {expected}, "
+            f"configs say {next(iter(protocols))}"
+        )
+
+
+def test_midas_is_aligned_in_disparity_space_at_every_resolution() -> None:
+    """The reason, not just the value: a scale alignment on `1 / (s / z + t)` cannot remove
+    the shift `t`, which dominates on narrow-depth nadir views. All five MiDaS rows at all four
+    resolutions must say so, and nothing else may use the disparity fit."""
+    folder = REPO_ROOT / "configs" / "depth"
+    for path in sorted(folder.rglob("*.yaml")):
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        is_midas = raw["model"].startswith("midas_")
+        assert (raw["eval"]["align"] == "scale_shift_disparity") == is_midas, path.name
+        assert (raw["train"]["loss"] == "ssi") == is_midas, path.name
+
+
+def test_da3_metric_configs_state_the_camera() -> None:
+    """DA3-metric needs the camera's field of view to give metres; it is written into the
+    generated files."""
+    for resolution in (2048, 1024, 512, 256):
+        base = REPO_ROOT / "configs" / "depth" / str(resolution)
+        da3 = yaml.safe_load((base / f"da3_metric_large_{resolution}.yaml").read_text(encoding="utf-8"))
+        assert da3["data"]["camera_hfov_deg"] == 60.0, resolution
 
 
 def test_segmentation_always_states_the_class_count_and_ignore_index() -> None:
     for path in sorted((REPO_ROOT / "configs" / "segmentation").rglob("*.yaml")):
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-        assert raw["data"]["num_classes"] == 6, path
+        assert raw["data"]["num_classes"] == 5, path
+        assert raw["data"]["label_step"] == 63, path
         assert raw["data"]["ignore_index"] == 255, path
 
 
@@ -209,3 +252,28 @@ def test_the_committed_tree_matches_the_generator() -> None:
         assert path.read_text(encoding="utf-8") == text, (
             f"{path} differs from configs/generate_grid.py; re-run it"
         )
+
+
+def test_da3_crops_to_512_wherever_the_image_is_larger_than_that() -> None:
+    """DA3-Large is fully fine-tuned (411M parameters, ~6.5GB of weights, grads and Adam
+    state), and a 1024px frame is 4x the tokens of a 512px one: with patch_size 0 at 1024 it
+    ran out of memory on a 12GB card even at batch 1, while the 512px crop used at 2048 fit.
+    A crop never exceeds the image (nothing is upsampled), so 512 and 256 use the whole frame."""
+    expected = {"2048": 512, "1024": 512, "512": 0, "256": 0}
+    for model in ("da3_large", "da3_metric_large"):
+        for resolution, patch in expected.items():
+            path = REPO_ROOT / "configs" / "depth" / resolution / f"{model}_{resolution}.yaml"
+            raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+            assert raw["train"]["patch_size"] == patch, f"{model} at {resolution}"
+            assert raw["train"]["patch_size"] <= int(resolution)
+
+
+def test_every_midas_row_trains_in_bfloat16_and_only_those() -> None:
+    """BEiT-Large, Swin-V2 and then DPT-Hybrid overflowed float16 in the 2048 run and skipped
+    thousands of batches, so the whole MiDaS family runs in bfloat16; DA3 keeps the float16
+    default, so this is the whole list."""
+    for path in sorted((REPO_ROOT / "configs" / "depth").rglob("*.yaml")):
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        want = "bfloat16" if raw["model"].startswith("midas_") else None
+        assert raw["train"].get("amp_dtype") == want, path
+        assert raw["eval"].get("amp_dtype") == want, path

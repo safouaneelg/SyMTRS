@@ -26,6 +26,8 @@ FLAG_TO_PATH: Dict[str, str] = {
     "val_split": "data.val_split",
     "test_split": "data.test_split",
     "depth_scale": "data.depth_scale",
+    "max_depth": "data.max_depth",
+    "label_step": "data.label_step",
     "depth_channel": "data.depth_channel",
     "depth_backend": "data.depth_backend",
     "num_classes": "data.num_classes",
@@ -51,6 +53,7 @@ FLAG_TO_PATH: Dict[str, str] = {
     "log_every": "train.log_every",
     "save_samples_every": "train.save_samples_every",
     "resume": "train.resume",
+    "init_weights": "train.init_weights",
     "device": "train.device",
     "eval_batch_size": "eval.batch_size",
     "tile_size": "eval.tile_size",
@@ -79,11 +82,15 @@ def add_common_args(parser: argparse.ArgumentParser, training: bool = True) -> N
 
     data = parser.add_argument_group("data")
     data.add_argument("--depth-scale", dest="depth_scale", type=float, default=None,
-                      help="multiply raw depth values by this (0.01 for millimetres stored as uint16)")
+                      help="multiply raw depth values by this to get metres (default 0.01: the real EXRs hold centimetres)")
+    data.add_argument("--max-depth", dest="max_depth", type=float, default=None,
+                      help="metres after --depth-scale; farther pixels (sky) are invalid")
     data.add_argument("--depth-channel", dest="depth_channel", type=int, default=None)
     data.add_argument("--depth-backend", dest="depth_backend",
                       choices=list(VALID_BACKENDS), default=None)
     data.add_argument("--num-classes", dest="num_classes", type=int, default=None)
+    data.add_argument("--label-step", dest="label_step", type=int, default=None,
+                      help="grey-level step of the semantic masks (real data: 63; 1 = raw class ids)")
     data.add_argument("--ignore-index", dest="ignore_index", type=int, default=None)
     data.add_argument("--num-workers", dest="num_workers", type=int, default=None)
     data.add_argument("--max-samples", dest="max_samples", type=int, default=None)
@@ -96,7 +103,8 @@ def add_common_args(parser: argparse.ArgumentParser, training: bool = True) -> N
                             help="sliding-window inference; 0 runs the whole image at once")
     evaluation.add_argument("--tile-overlap", dest="tile_overlap", type=int, default=None)
     evaluation.add_argument("--align", default=None,
-                            help="depth alignment: none | median | scale | scale_shift")
+                            help="depth alignment: none | median | scale | scale_shift | scale_shift_disparity "
+                                 "(the last only for MiDaS-style disparity output)")
     evaluation.add_argument("--num-visualizations", dest="num_visualizations", type=int, default=None)
 
     if training:
@@ -120,6 +128,9 @@ def add_common_args(parser: argparse.ArgumentParser, training: bool = True) -> N
         optimiser.add_argument("--log-every", dest="log_every", type=int, default=None)
         optimiser.add_argument("--save-samples-every", dest="save_samples_every", type=int, default=None)
         optimiser.add_argument("--resume", default=None)
+        optimiser.add_argument("--init-weights", dest="init_weights", default=None,
+                               help="start a NEW run from another run's weights (a fine-tune; "
+                                    "use --resume to continue an interrupted one)")
 
     misc = parser.add_argument_group("misc")
     misc.add_argument("--set", action="append", default=None, metavar="KEY=VALUE",
@@ -232,6 +243,8 @@ def adopt_checkpoint_settings(cfg: RunConfig, args: argparse.Namespace, override
     # A 6-class head scored against a 21-class label space reads every label as wrong.
     if "num_classes" not in overrides and metadata.get("num_classes"):
         adopted["data.num_classes"] = metadata["num_classes"]
+    if "label_step" not in overrides and metadata.get("label_step"):
+        adopted["data.label_step"] = metadata["label_step"]
     if "ignore_index" not in overrides and metadata.get("ignore_index") is not None:
         adopted["data.ignore_index"] = metadata["ignore_index"]
 
@@ -273,10 +286,28 @@ def should_stop_early(args: argparse.Namespace, cfg: RunConfig) -> bool:
     if getattr(args, "dry_run", False):
         if cfg.task == "superresolution":
             print_superresolution_command(cfg)
+        elif cfg.task == "shadow_removal":
+            print_shadow_commands(cfg)
         else:
             print_preflight(cfg)
         return True
     return False
+
+
+def print_shadow_commands(cfg: RunConfig) -> None:
+    """The two worker launches a shadow-removal run makes, and whether upstream is there."""
+    from symtrs.model.shadow import arch_for, worker_command
+    from symtrs.model.shadow.archs import upstream_missing
+    from symtrs.model.shadow.runner import check_config
+
+    print("[symtrs] dry run - nothing will be staged or trained")
+    check_config(cfg, "finetune")
+    cfg = cfg.anchored()  # what the real run hands the worker: absolute paths
+    config_path = cfg.resolved_out_dir / "config.yaml"
+    print(f"[symtrs] cwd: {arch_for(cfg.model).repo_path}")
+    for phase, splits in (("train", ""), ("predict", f"{cfg.data.val_split},{cfg.data.test_split}")):
+        print("[symtrs] " + " ".join(worker_command(str(config_path), phase, splits)))
+    print(f"[symtrs] {upstream_missing(cfg.model) or 'upstream checkout present'}")
 
 
 def print_superresolution_command(cfg: RunConfig) -> None:
@@ -309,7 +340,7 @@ def print_superresolution_command(cfg: RunConfig) -> None:
 def print_preflight(cfg: RunConfig) -> None:
     """What a run would do, before any weights are downloaded or GPU is touched.
 
-    Deliberately does not build the model: constructing a MiDaS or Depth Pro checkpoint
+    Deliberately does not build the model: constructing a MiDaS or DA3 checkpoint
     downloads hundreds of megabytes, and the point of a dry run is to find out that the
     dataset path is wrong *without* that.
     """

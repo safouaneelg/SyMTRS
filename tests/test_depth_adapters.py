@@ -29,19 +29,12 @@ torch = pytest.importorskip("torch", reason="torch is not installed")
 #:              `backbones.beit`, which does `import timm` at module level. So it is needed
 #:              to load the weights at all, not just to use our own encoders. The upstream
 #:              `hubconf.py` declares `dependencies = ["torch"]`, so nothing warns you.
-#:              ZoeDepth needs it for the same reason: its entrypoint builds that same MiDaS
-#:              core, so a ZoeDepth build fails without timm even though `zoedepth/` contains
-#:              no `import timm` of its own. Verified by blocking timm in `sys.meta_path` and
-#:              watching `ZoeD_N` fail at the `backbones/beit.py` import.
 #:   cv2      - the hub's `transforms()` entry point imports cv2, and the MiDaS adapter calls
-#:              it, deliberately, so that the normalisation matches the checkpoint. ZoeDepth
-#:              does *not* list it: it never calls `transforms()`, and a pretrained ZoeD_N
-#:              forward pass was measured to run with cv2 blocked from `sys.meta_path`.
-#: The timm gap was invisible: `symtrs doctor` reported every MiDaS and ZoeDepth entry as
+#:              it, deliberately, so that the normalisation matches the checkpoint.
+#: The timm gap was invisible: `symtrs doctor` reported every MiDaS entry as
 #: "dependencies ok" on a machine where none of them could be built.
 _REQUIRED_BY_UPSTREAM = {
     "symtrs.model.depth.midas:MiDaSAdapter": ("torch", "timm", "cv2"),
-    "symtrs.model.depth.zoedepth:ZoeDepthAdapter": ("torch", "timm"),
 }
 
 

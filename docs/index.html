@@ -3,7 +3,21 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>SyMTRS Project Page</title>
+    <title>SyMTRS — One capture, five aerial benchmarks</title>
+    <meta
+      name="description"
+      content="SyMTRS is a multi-task aerial benchmark from one Unreal Engine 5 capture: RGB day and night, shadow-free imagery, metric depth and five-class segmentation at 2048 x 2048, plus x2/x4/x8 super-resolution."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="SyMTRS — One capture, five aerial benchmarks" />
+    <meta
+      property="og:description"
+      content="Perfectly registered RGB, night, shadow-free, metric depth and semantic captures at 2048 x 2048, and the benchmark that scores five tasks on them."
+    />
+    <meta property="og:image" content="./assets/media/hero-still.jpg" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="theme-color" content="#ffffff" />
+    <link rel="preload" as="image" href="./assets/media/hero-still.jpg" />
     <link rel="stylesheet" href="./assets/styles.css" />
     <script type="importmap">
       {
@@ -15,191 +29,473 @@
     </script>
   </head>
   <body>
-    <main class="page">
-      <header class="hero">
-        <h1 class="reveal">SyMTRS: Synthetic Multi-Task<br />Remote Sensing Dataset</h1>
-        <p class="venue reveal delay-1">arXiv 2026</p>
+    <noscript>
+      <style>
+        .task-panel[hidden] { display: grid !important; }
+        .task-panel { margin-bottom: 32px; }
+        .reveal { opacity: 1; transform: none; }
+      </style>
+    </noscript>
+    <div class="scroll-progress" id="scrollProgress" aria-hidden="true"></div>
 
-        <div class="authors reveal delay-2">
-          <div class="author">
-            <a href="https://orcid.org/0000-0002-5403-3911" target="_blank" rel="noopener noreferrer">Safouane EL GHAZOUALI</a>
-            <span>*1, 2</span>
+    <header class="nav" id="nav">
+      <a class="brand" href="#top" aria-label="SyMTRS home">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span class="brand-name">SyMTRS</span>
+      </a>
+      <nav class="nav-links" id="navLinks" aria-label="Sections">
+        <a href="#overview">Overview</a>
+        <a href="#tasks">Tasks</a>
+        <a href="#three-d">3D ground truth</a>
+        <a href="#benchmark">Benchmark</a>
+        <a href="#citation">Citation</a>
+        <a class="nav-mobile-only" href="https://github.com/safouaneelg/SyMTRS" target="_blank" rel="noopener noreferrer">GitHub</a>
+        <a class="nav-mobile-only" href="https://huggingface.co/datasets/safouaneelg/SyMTRS" target="_blank" rel="noopener noreferrer">Dataset</a>
+      </nav>
+      <div class="nav-actions">
+        <a class="icon-btn" href="https://github.com/safouaneelg/SyMTRS" target="_blank" rel="noopener noreferrer" aria-label="GitHub repository" data-icon="github"></a>
+        <a class="icon-btn" href="https://huggingface.co/datasets/safouaneelg/SyMTRS" target="_blank" rel="noopener noreferrer" aria-label="Hugging Face dataset" data-icon="database"></a>
+        <a class="btn btn-small btn-primary" href="https://arxiv.org/pdf/2604.21801" target="_blank" rel="noopener noreferrer">Paper</a>
+        <button class="menu-btn" id="menuBtn" type="button" aria-label="Open menu" aria-expanded="false">
+          <span></span><span></span>
+        </button>
+      </div>
+    </header>
+
+    <main id="top">
+      <section class="hero">
+        <div class="hero-glow" aria-hidden="true"></div>
+        <div class="hero-grid" aria-hidden="true"></div>
+
+        <div class="hero-copy">
+          <span class="pill">
+            <span class="pill-dot" aria-hidden="true"></span>
+            arXiv 2026 <span class="pill-sep">·</span> Apache-2.0
+          </span>
+          <h1 class="hero-title">
+            SyMTRS<span class="grad">.</span>
+            <span class="hero-title-sub">One capture. Five benchmarks.</span>
+          </h1>
+          <p class="hero-lede">
+            One Unreal Engine 5 city, rendered five ways — RGB by day and by night,
+            shadow-free, metric depth in metres, and a five-class mask — perfectly
+            registered at 2048 × 2048. The benchmark scores monocular depth,
+            segmentation, domain adaptation, shadow removal and super-resolution on
+            the very same frames.
+          </p>
+
+          <div class="hero-actions">
+            <a class="btn btn-primary" href="https://huggingface.co/datasets/safouaneelg/SyMTRS" target="_blank" rel="noopener noreferrer">
+              Get the dataset
+              <span class="arrow" aria-hidden="true">→</span>
+            </a>
+            <a class="btn btn-ghost" href="https://arxiv.org/abs/2604.21801" target="_blank" rel="noopener noreferrer">Read the paper</a>
           </div>
-          <div class="author">
-            <span class="author-name">Nicola Venturi</span>
-            <span>3</span>
-          </div>
-          <div class="author">
-            <span class="author-name">Michael Rueegsegger</span>
-            <span>3</span>
-          </div>
-          <div class="author">
-            <a href="https://orcid.org/0000-0002-6060-5365" target="_blank" rel="noopener noreferrer">Umberto MICHELUCCI</a>
-            <span>1, 2</span>
-          </div>
+
+          <dl class="hero-stats">
+            <div><dt>Frames</dt><dd><span data-count="20000">20,000</span></dd></div>
+            <div><dt>Tasks</dt><dd>5</dd></div>
+            <div><dt>Resolution</dt><dd>2048<sup>2</sup></dd></div>
+            <div><dt>Release</dt><dd>767 GB</dd></div>
+          </dl>
+
+          <p class="authors">
+            <a href="https://orcid.org/0000-0002-5403-3911" target="_blank" rel="noopener noreferrer">Safouane El Ghazouali</a><sup>*</sup>,
+            Baptiste Lucas<sup>*</sup>,
+            Nicola Venturi, Michael Rueegsegger,
+            <a href="https://orcid.org/0000-0002-6060-5365" target="_blank" rel="noopener noreferrer">Umberto Michelucci</a>
+            <span class="authors-orgs">TOELT LLC · HSLU · Swiss Smart Factory · armasuisse S+T</span>
+            <span class="authors-note"><sup>*</sup> equal contribution</span>
+          </p>
         </div>
 
-        <div class="affiliations reveal delay-3">
-          <p><sup>1</sup>TOELT LLC AI lab</p>
-          <p><sup>2</sup>HSLU (Lucerne University of Applied Sciences and Arts)</p>
-          <p><sup>3</sup>armasuisse S+T</p>
-        </div>
-
-        <div class="logos reveal delay-4">
-          <img src="https://images.squarespace-cdn.com/content/v1/65586a28d0d9246e85df8d8b/4a692f5d-c41c-4a69-9d03-2d01d21a5f8b/logo_combined.png" alt="TOELT Logo" />
-          <img src="https://upload.wikimedia.org/wikipedia/commons/a/a4/HSLU_Logo_DE_Schwarz_rgb.png" alt="HSLU Logo" />
-          <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/0/05/Logo_der_Schweizerischen_Eidgenossenschaft.svg/1280px-Logo_der_Schweizerischen_Eidgenossenschaft.svg.png" alt="armasuisse Logo" />
-        </div>
-
-        <nav class="actions reveal delay-5" aria-label="Project links">
-          <a class="btn-academic" href="https://arxiv.org/pdf/2604.21801" target="_blank" rel="noopener noreferrer"><span data-icon="file"></span>Paper (arXiv)</a>
-          <a class="btn-academic" href="https://github.com/safouaneelg/SyMTRS" target="_blank" rel="noopener noreferrer"><span data-icon="github"></span>Code</a>
-          <a class="btn-academic" href="https://huggingface.co/datasets/safouaneelg/SyMTRS" target="_blank" rel="noopener noreferrer"><span data-icon="database"></span>HF Dataset</a>
-          <a class="btn-academic" href="#tasks"><span data-icon="layers"></span>Samples</a>
-          <a class="btn-academic" href="#citation"><span data-icon="file"></span>Citation</a>
-        </nav>
-      </header>
-
-      <section class="stats-section reveal delay-6">
-        <div class="stats-card">
-          <div class="stats-grid">
-            <div class="stat"><span>Total Size</span><strong>65GB</strong></div>
-            <div class="stat"><span>Total Images</span><strong>12,420</strong><small>2,070 per subset</small></div>
-            <div class="stat"><span>Img Ext</span><strong>.png</strong></div>
-            <div class="stat"><span>Depth Ext</span><strong>.npy</strong></div>
-            <div class="stat"><span>Depth Type</span><strong>Scaled</strong></div>
-            <div class="stat"><span>License</span><strong>Apache 2.0</strong></div>
-          </div>
-          <div class="task-bar">
-            <div class="task-list">
-              <span class="task-label">Tasks</span>
-              <span>Monocular Depth Estimation</span>
-              <span>Domain Adaptation</span>
-              <span>Super-Resolution</span>
+        <div class="hero-visual">
+          <figure class="cloud-card hero-cloud">
+            <div class="cloud-viewer" data-url="./assets/media/hero-cloud.ply" data-poster="./assets/media/hero-still.jpg" data-title="Metric depth ground truth">
+              <img class="cloud-poster" src="./assets/media/hero-still.jpg" alt="Aerial intersection rendered as a 3D point cloud" />
+              <div class="cloud-status"><span class="spinner"></span><span>building the point cloud…</span></div>
             </div>
-            <div class="resolution-note"><span data-icon="layers"></span>Pairs of low resolutions (x2, x4, x8) included</div>
-          </div>
+            <figcaption>
+              <span class="mono">metric depth · 262k points</span>
+              <span>Drag to orbit · scroll to zoom</span>
+            </figcaption>
+          </figure>
         </div>
+
+        <a class="scroll-cue" href="#overview" aria-label="Scroll to the overview">
+          <span class="scroll-cue-line" aria-hidden="true"></span>
+          <span class="scroll-cue-text">scroll</span>
+        </a>
       </section>
 
-      <section class="teaser band">
-        <div class="two-column">
-          <div class="video-card reveal">
+      <div class="marquee" aria-hidden="true">
+        <div class="marquee-track">
+          <span>Monocular depth</span><i></i><span>Semantic segmentation</span><i></i><span>Day ⇄ night</span><i></i><span>Shadow removal</span><i></i><span>Super-resolution ×2 ×4 ×8</span><i></i><span>2048 × 2048</span><i></i>
+          <span>Monocular depth</span><i></i><span>Semantic segmentation</span><i></i><span>Day ⇄ night</span><i></i><span>Shadow removal</span><i></i><span>Super-resolution ×2 ×4 ×8</span><i></i><span>2048 × 2048</span><i></i>
+        </div>
+      </div>
+
+      <section class="section overview" id="overview">
+        <div class="section-head">
+          <span class="eyebrow">Overview</span>
+          <h2>Ground truth that is actually ground truth.</h2>
+          <p>
+            Remote-sensing benchmarks usually inherit one annotation and approximate the
+            rest — depth from stereo, masks from labels, low-resolution pairs from a blur
+            kernel. SyMTRS renders each camera pose once with the environment frozen, so
+            every modality is exact, aligned, and shares a filename.
+          </p>
+        </div>
+
+        <div class="overview-grid">
+          <article class="glass abstract-card">
+            <span class="card-label">Abstract</span>
+            <p>
+              Recent advances in deep learning for remote sensing rely heavily on large
+              annotated datasets, yet acquiring high-quality ground truth for geometric,
+              radiometric and multi-domain tasks remains costly and often infeasible. We
+              present SyMTRS, a large-scale synthetic dataset generated with a high-fidelity
+              urban simulation pipeline. It provides 2048 × 2048 RGB aerial imagery,
+              pixel-perfect depth, night-time counterparts for domain adaptation,
+              shadow-free renders, five-class masks, and aligned low-resolution variants at
+              ×2, ×4 and ×8. Unlike datasets that focus on a single task or modality, SyMTRS
+              is a unified multi-task benchmark for geometric understanding, cross-domain
+              robustness and resolution enhancement.
+            </p>
+            <div class="abstract-tags">
+              <span>UE5 · MatrixCity</span><span>20,000 frames</span><span>5 aligned modalities</span><span>Apache-2.0</span>
+            </div>
+          </article>
+
+          <figure class="glass video-card">
             <video autoplay loop muted playsinline poster="https://github.com/user-attachments/assets/c0146b98-2a13-4fc1-a20a-bba7835229da">
               <source src="https://github.com/user-attachments/assets/bd63b74d-fca5-452b-8f19-554341188614" type="video/webm" />
             </video>
-            <div class="video-overlay"></div>
-            <div class="caption">UE5 MatrixCity Simulation</div>
+            <figcaption><span class="mono">UE5 · MatrixCity</span> the simulation the captures are rendered with</figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section class="section modalities">
+        <div class="section-head center">
+          <span class="eyebrow">The capture</span>
+          <h2>Five modalities, one geometry.</h2>
+          <p>
+            Split map → camera pose → one frozen-exposure render per pose. The five outputs
+            and the three low-resolution levels come out of the same pass, which is what
+            makes the super-resolution pairs real pairs.
+          </p>
+        </div>
+        <figure class="glass pipeline-frame">
+          <img loading="lazy" src="./assets/media/pipeline.png" alt="SyMTRS generation pipeline: split map, camera pose, per-pose render with fixed exposure, five render passes at 2048 and three low-resolution levels" />
+        </figure>
+        <ul class="modality-chips">
+          <li><i class="swatch swatch-day"></i>RGB · day</li>
+          <li><i class="swatch swatch-night"></i>RGB · night</li>
+          <li><i class="swatch swatch-noshadow"></i>Shadow-free</li>
+          <li><i class="swatch swatch-depth"></i>Metric depth</li>
+          <li><i class="swatch swatch-seg"></i>Semantic mask</li>
+        </ul>
+      </section>
+
+      <section class="section tasks" id="tasks">
+        <div class="section-head">
+          <span class="eyebrow">Benchmark</span>
+          <h2>Five tasks, one folder layout.</h2>
+          <p>
+            A task is a choice of folders, not a separate dataset. Every panel below is a
+            held-out <code>test/</code> scene; drag the divider, or let it sweep.
+          </p>
+        </div>
+
+        <div class="task-shell">
+          <div class="task-tabs" role="tablist" aria-label="Tasks">
+            <button class="task-tab is-active" type="button" role="tab" aria-selected="true" data-target="task-depth">Depth</button>
+            <button class="task-tab" type="button" role="tab" aria-selected="false" data-target="task-segmentation">Segmentation</button>
+            <button class="task-tab" type="button" role="tab" aria-selected="false" data-target="task-daynight">Day / night</button>
+            <button class="task-tab" type="button" role="tab" aria-selected="false" data-target="task-shadow">Shadow removal</button>
+            <button class="task-tab" type="button" role="tab" aria-selected="false" data-target="task-superresolution">Super-resolution</button>
           </div>
 
-          <div class="teaser-copy reveal">
-            <h2>UE5-Powered High Fidelity</h2>
+          <div class="task-panels">
+            <article class="task-panel is-active" id="task-depth" role="tabpanel">
+              <div class="panel-media">
+                <figure class="ba">
+                  <div class="ba-frame">
+                    <img class="ba-img" src="./assets/media/pairs/depth-a.jpg" alt="Aerial RGB frame" />
+                    <img class="ba-img ba-b" src="./assets/media/pairs/depth-b.jpg" alt="Metric depth map of the same frame" />
+                    <span class="ba-chip left">RGB</span>
+                    <span class="ba-chip right">depth · metres</span>
+                    <span class="ba-handle" aria-hidden="true"></span>
+                    <input class="ba-range" type="range" min="0" max="100" value="50" aria-label="Compare RGB and metric depth" />
+                  </div>
+                </figure>
+              </div>
+              <div class="panel-copy">
+                <span class="card-label">01 · Monocular depth</span>
+                <h3>Metric depth, without stereo or LiDAR.</h3>
+                <p>
+                  The renderer writes a per-pixel distance in metres for every frame. The
+                  relative models (MiDaS, Depth Anything 3) are fitted per image in disparity
+                  space before scoring — scale only would leave the shift that dominates a
+                  nadir view.
+                </p>
+                <dl class="facts">
+                  <div><dt>Models</dt><dd>MiDaS ×5 · Depth Anything 3 ×2</dd></div>
+                  <div><dt>Protocol</dt><dd>scale + shift in disparity</dd></div>
+                  <div><dt>Best, test</dt><dd class="accent">RMSE 18.66 m · δ¹ 0.881</dd></div>
+                </dl>
+              </div>
+            </article>
+
+            <article class="task-panel" id="task-segmentation" role="tabpanel" hidden>
+              <div class="panel-media">
+                <figure class="ba">
+                  <div class="ba-frame">
+                    <img class="ba-img" src="./assets/media/pairs/segmentation-a.jpg" alt="Aerial RGB frame" />
+                    <img class="ba-img ba-b" src="./assets/media/pairs/segmentation-b.jpg" alt="Five-class semantic mask" />
+                    <span class="ba-chip left">RGB</span>
+                    <span class="ba-chip right">5 classes</span>
+                    <span class="ba-handle" aria-hidden="true"></span>
+                    <input class="ba-range" type="range" min="0" max="100" value="50" aria-label="Compare RGB and semantic mask" />
+                  </div>
+                </figure>
+              </div>
+              <div class="panel-copy">
+                <span class="card-label">02 · Semantic segmentation</span>
+                <h3>Five classes, pixel-perfect.</h3>
+                <p>
+                  Background, building, green, road, car — stored as a graylevel class id and
+                  decoded exactly. Off-grid values map to the ignore index rather than being
+                  guessed, so the metric cannot invent a class.
+                </p>
+                <dl class="facts">
+                  <div><dt>Models</dt><dd>U-Net · DeepLabV3 ×2 · SegFormer ×3</dd></div>
+                  <div><dt>Classes</dt><dd>5 · <span class="mono">ignore = 255</span></dd></div>
+                  <div><dt>Best, test</dt><dd class="accent">mIoU 0.976 · pixel acc. 0.994</dd></div>
+                </dl>
+              </div>
+            </article>
+
+            <article class="task-panel" id="task-daynight" role="tabpanel" hidden>
+              <div class="panel-media">
+                <figure class="ba">
+                  <div class="ba-frame">
+                    <img class="ba-img" src="./assets/media/pairs/daynight-a.jpg" alt="Daytime aerial scene" />
+                    <img class="ba-img ba-b" src="./assets/media/pairs/daynight-b.jpg" alt="Nighttime aerial scene" />
+                    <span class="ba-chip left">day</span>
+                    <span class="ba-chip right">night</span>
+                    <span class="ba-handle" aria-hidden="true"></span>
+                    <input class="ba-range" type="range" min="0" max="100" value="50" aria-label="Compare day and night imagery" />
+                  </div>
+                </figure>
+              </div>
+              <div class="panel-copy">
+                <span class="card-label">03 · Domain adaptation</span>
+                <h3>The same street at two o'clock in the morning.</h3>
+                <p>
+                  Identical cameras, identical geometry, different light. Unpaired (CycleGAN)
+                  and paired (pix2pix) translation are scored by FID and KID against real night
+                  imagery — there is no accuracy number for a generated image.
+                </p>
+                <dl class="facts">
+                  <div><dt>Models</dt><dd>CycleGAN · pix2pix · day ⇄ night</dd></div>
+                  <div><dt>Scoring</dt><dd>FID / KID vs. real night</dd></div>
+                  <div><dt>Best, test</dt><dd class="accent">FID 43.4 · KID 0.0149</dd></div>
+                </dl>
+              </div>
+            </article>
+
+            <article class="task-panel" id="task-shadow" role="tabpanel" hidden>
+              <div class="panel-media">
+                <figure class="ba">
+                  <div class="ba-frame">
+                    <img class="ba-img" src="./assets/media/pairs/shadow-a.jpg" alt="Aerial scene with cast shadows" />
+                    <img class="ba-img ba-b" src="./assets/media/pairs/shadow-b.jpg" alt="Shadow-free render" />
+                    <span class="ba-chip left">with shadow</span>
+                    <span class="ba-chip right">shadow-free</span>
+                    <span class="ba-handle" aria-hidden="true"></span>
+                    <input class="ba-range" type="range" min="0" max="100" value="50" aria-label="Compare shadowed and shadow-free imagery" />
+                  </div>
+                </figure>
+              </div>
+              <div class="panel-copy">
+                <span class="card-label">04 · Shadow removal</span>
+                <h3>Sun on, sun off.</h3>
+                <p>
+                  The shadow-free render is the target. The dataset ships no shadow mask, so
+                  the trainer derives one from the difference and scores every model on all,
+                  shadow and non-shadow pixels separately.
+                </p>
+                <dl class="facts">
+                  <div><dt>Models</dt><dd>ShadowFormer · Restormer · Uformer · ShadowMaskFormer</dd></div>
+                  <div><dt>Mask</dt><dd>derived at train time</dd></div>
+                  <div><dt>Best, test</dt><dd class="accent">PSNR 23.00 dB · SSIM-Y 0.788</dd></div>
+                </dl>
+              </div>
+            </article>
+
+            <article class="task-panel" id="task-superresolution" role="tabpanel" hidden>
+              <div class="panel-media">
+                <figure class="ba">
+                  <div class="ba-frame">
+                    <img class="ba-img" src="./assets/media/pairs/superresolution-a.jpg" alt="Upsampled x8 input from a 63 pixel source" />
+                    <img class="ba-img ba-b" src="./assets/media/pairs/superresolution-b.jpg" alt="Native 2048 pixel ground truth" />
+                    <span class="ba-chip left">input · 63 px</span>
+                    <span class="ba-chip right">ground truth · 2048 px</span>
+                    <span class="ba-handle" aria-hidden="true"></span>
+                    <input class="ba-range" type="range" min="0" max="100" value="50" aria-label="Compare the x8 input and the 2048 px ground truth" />
+                  </div>
+                </figure>
+              </div>
+              <div class="panel-copy">
+                <span class="card-label">05 · Super-resolution</span>
+                <h3>×2, ×4, ×8 — rendered, not blurred.</h3>
+                <p>
+                  The low-resolution level is its own render pass at a coarser sampling, not a
+                  downsample of the 2048 frame. The target is always the native high-resolution
+                  render: the panel shows the input and that target, while the SwinIR ×8
+                  prediction is the middle column of the grid below.
+                </p>
+                <dl class="facts">
+                  <div><dt>Models</dt><dd>SRCNN · autoencoder · SRGAN · SwinIR</dd></div>
+                  <div><dt>Scales</dt><dd>×1 control · ×2 · ×4 · ×8</dd></div>
+                  <div><dt>Best, ×8</dt><dd class="accent">PSNR 20.02 dB · SSIM 0.469</dd></div>
+                </dl>
+              </div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section clouds" id="three-d">
+        <div class="section-head center">
+          <span class="eyebrow">3D ground truth</span>
+          <h2>Step inside the depth map.</h2>
+          <p>
+            Each cloud is the test scene's own RGB back-projected through its own metric
+            depth with the capture's 60° field of view — the same map the depth models are
+            scored against, not a reconstruction.
+          </p>
+        </div>
+        <div class="cloud-grid">
+          <figure class="cloud-card">
+            <div class="cloud-viewer" data-url="./assets/media/daynight-cloud.ply" data-poster="./assets/media/daynight-still.jpg" data-title="Motorway interchange">
+              <img class="cloud-poster" src="./assets/media/daynight-still.jpg" alt="Aerial motorway interchange as a 3D point cloud" />
+              <div class="cloud-status"><span class="spinner"></span><span>building the point cloud…</span></div>
+            </div>
+            <figcaption>
+              <span class="mono">Motorway interchange</span>
+              <span>RGB · height from metric depth · 262k points</span>
+            </figcaption>
+          </figure>
+          <figure class="cloud-card">
+            <div class="cloud-viewer" data-url="./assets/media/depth-cloud.ply" data-poster="./assets/media/depth-still.jpg" data-title="Building canyon">
+              <img class="cloud-poster" src="./assets/media/depth-still.jpg" alt="Aerial building canyon as a 3D point cloud" />
+              <div class="cloud-status"><span class="spinner"></span><span>building the point cloud…</span></div>
+            </div>
+            <figcaption>
+              <span class="mono">Building canyon</span>
+              <span>RGB · height from metric depth · 262k points</span>
+            </figcaption>
+          </figure>
+        </div>
+        <p class="cloud-note">
+          Two scenes, two camera poses, the same rendering pass. Drag to orbit; scroll to
+          zoom. Built by <code>scripts/make_media.py</code> from the <code>test/</code> split.
+        </p>
+      </section>
+
+      <section class="section benchmark" id="benchmark">
+        <div class="section-head">
+          <span class="eyebrow">Results</span>
+          <h2>Input, model, ground truth.</h2>
+          <p>
+            One held-out scene per task: the input, a benchmark checkpoint's prediction, and
+            the map it is scored against. Same seed, same split, 3,000 test images per row.
+          </p>
+        </div>
+        <figure class="glass grid-frame">
+          <img loading="lazy" src="./assets/media/grid-tasks.png" alt="Five tasks by input, model prediction and ground truth" />
+        </figure>
+        <div class="glass table-wrap">
+          <table class="results-table">
+            <thead>
+              <tr><th>Task</th><th>Model</th><th>Protocol</th><th>Test metric</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Monocular depth</td><td>MiDaS DPT-Hybrid, 2048 px</td><td>fine-tuned, 20 epochs</td><td class="metric">RMSE 18.66 m · δ¹ 0.881</td></tr>
+              <tr><td>Semantic segmentation</td><td>SegFormer-B2, 2048 px</td><td>fine-tuned, 40 epochs</td><td class="metric">mIoU 0.976 · pix. acc 0.994</td></tr>
+              <tr><td>Day → night</td><td>CycleGAN</td><td>fine-tuned, 40 epochs</td><td class="metric">FID 43.4 · KID 0.0149</td></tr>
+              <tr><td>Shadow removal</td><td>Restormer</td><td>fine-tuned, 50 epochs</td><td class="metric">PSNR 23.00 dB · SSIM-Y 0.788</td></tr>
+              <tr><td>Super-resolution ×8</td><td>SwinIR, 2048 px target</td><td>fine-tuned, 40 epochs</td><td class="metric">PSNR 20.02 dB · SSIM 0.469</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="footnote">
+          Campaign runs under <code>runs/campaign2/</code>, seed 42. The dataset is being
+          regenerated in response to reviewer comments; these numbers will be refreshed with
+          the released revision and are not final.
+        </p>
+      </section>
+
+      <section class="section citation" id="citation">
+        <div class="citation-grid">
+          <div class="citation-copy">
+            <span class="eyebrow">Citation</span>
+            <h2>If SyMTRS helps your work, cite it.</h2>
             <p>
-              Our dataset leverages <strong>Unreal Engine 5</strong> to create physically accurate, multi-task ground truth for aerial remote sensing.
-              From densely populated cities to rural landscapes, we provide perfectly aligned RGB, depth, and segmentation masks.
+              The paper describes the rendering pipeline, the split geography, the per-task
+              protocols and the benchmark numbers shown above.
             </p>
-            <div class="mini-stats">
-              <div><strong>10k+</strong><span>Frames</span></div>
-              <i></i>
-              <div><strong>UE5</strong><span>Engine</span></div>
+            <div class="citation-links">
+              <a class="btn btn-ghost btn-small" href="https://arxiv.org/abs/2604.21801" target="_blank" rel="noopener noreferrer">arXiv:2604.21801</a>
+              <a class="btn btn-ghost btn-small" href="https://github.com/safouaneelg/SyMTRS" target="_blank" rel="noopener noreferrer">Code</a>
+              <a class="btn btn-ghost btn-small" href="https://huggingface.co/datasets/safouaneelg/SyMTRS" target="_blank" rel="noopener noreferrer">Dataset</a>
             </div>
+          </div>
+
+          <div class="glass citation-card">
+            <div class="citation-bar">
+              <div class="tabs" role="tablist" aria-label="Citation formats">
+                <button class="tab is-active" type="button" data-tab="BibTeX">BibTeX</button>
+                <button class="tab" type="button" data-tab="PlainText">Plain text</button>
+                <button class="tab" type="button" data-tab="RIS">RIS</button>
+              </div>
+              <button class="copy-btn" type="button" id="copyCitation">
+                <span data-icon="copy"></span><span id="copyLabel">Copy BibTeX</span>
+              </button>
+            </div>
+            <pre id="citationText"></pre>
           </div>
         </div>
       </section>
-
-      <section class="abstract" id="abstract">
-        <h2><span></span>Abstract<span></span></h2>
-        <div class="abstract-box">
-          Recent advances in deep learning for remote sensing rely heavily on large annotated datasets, yet acquiring high-quality ground truth for geometric, radiometric, and multi-domain tasks remains costly and often infeasible. In particular, the lack of accurate depth annotations, controlled illumination variations, and multi-scale paired imagery limits progress in monocular depth estimation, domain adaptation, and super-resolution for aerial scenes. We present SyMTRS, a large-scale synthetic dataset generated using a high-fidelity urban simulation pipeline. The dataset provides high-resolution RGB aerial imagery (2048 &times; 2048), pixel-perfect depth maps, night-time counterparts for domain adaptation, and aligned low-resolution variants for super-resolution at &times;2, &times;4, and &times;8 scales. Unlike existing remote sensing datasets that focus on a single task or modality, SyMTRS is designed as a unified multi-task benchmark enabling joint research in geometric understanding, cross-domain robustness, and resolution enhancement. We describe the dataset generation process, its statistical properties, and its positioning relative to existing benchmarks. SyMTRS aims to bridge critical gaps in remote sensing research by enabling controlled experiments with perfect geometric ground truth and consistent multi-domain supervision.
-        </div>
-      </section>
-
-      <section class="tasks" id="tasks">
-        <div class="task-block">
-          <div class="section-heading">
-            <span>Task 01</span>
-            <h3>Monocular Depth Estimation</h3>
-            <p>We provide pixel-perfect depth ground truth exported directly from UE5. Below are interactive point cloud visualizations reconstructed from our monocular depth maps, showcasing the high-density architectural detail preserved in our captures.</p>
-          </div>
-          <div class="viewer-grid">
-            <div class="ply-viewer" data-title="Sample Point Cloud A" data-url="https://cdn.jsdelivr.net/gh/safouaneelg/SyMTRS@beb59c3f21d1aa931bcc8025e96a9b55cb80462c/sample_content/RS.1078800.ply" data-fallback-url="https://raw.githubusercontent.com/safouaneelg/SyMTRS/beb59c3f21d1aa931bcc8025e96a9b55cb80462c/sample_content/RS.1078800.ply" data-pos="5.19,-1.28,36.42" data-rot="0.27,0.25,3.06"></div>
-            <div class="ply-viewer" data-title="Sample Point Cloud B" data-url="https://cdn.jsdelivr.net/gh/safouaneelg/SyMTRS@beb59c3f21d1aa931bcc8025e96a9b55cb80462c/sample_content/RS.1000200.ply" data-fallback-url="https://raw.githubusercontent.com/safouaneelg/SyMTRS/beb59c3f21d1aa931bcc8025e96a9b55cb80462c/sample_content/RS.1000200.ply" data-pos="16.68,11.98,-28.92" data-rot="-2.35,0.41,2.77"></div>
-          </div>
-        </div>
-
-        <div class="task-block">
-          <div class="section-heading">
-            <span>Task 02</span>
-            <h3>Super-Resolution (x2, x4, x8)</h3>
-            <p>SyMTRS includes multi-scale paired imagery. Below is a full-resolution comparison showing the ground truth 2048x2048 RGB against various downsampled levels, optimized for training robust SR models.</p>
-          </div>
-          <div class="image-frame">
-            <img src="https://raw.githubusercontent.com/safouaneelg/SyMTRS/beb59c3f21d1aa931bcc8025e96a9b55cb80462c/sample_content/super-resolution.png" alt="Super Resolution Comparison" />
-          </div>
-        </div>
-
-        <div class="task-block">
-          <div class="section-heading">
-            <span>Task 03</span>
-            <h3>Domain Adaptation (Day to Night)</h3>
-            <p>Enabling zero-overhead data generation for day-to-night translation. Our dataset features perfectly aligned imagery across divergent illumination cycles, critical for robust 24/7 autonomous monitoring.</p>
-          </div>
-          <div class="dark-comparison">
-            <div class="dark-copy">
-              <div class="overline"><i></i><span>Day to Night Generation</span></div>
-              <h4>Full-Resolution Comparison</h4>
-              <p>The MatrixCity simulation environment allows for deterministic camera placements with variable astrophysical time, facilitating the creation of large-scale domain adaptation benchmarks.</p>
-              <div class="badges"><span>Active Task</span><span>Sim-to-Real</span></div>
-            </div>
-            <div class="dark-image">
-              <img src="https://raw.githubusercontent.com/safouaneelg/SyMTRS/beb59c3f21d1aa931bcc8025e96a9b55cb80462c/sample_content/day_2_night.png" alt="Day to Night Domain Adaptation Comparison" />
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section class="citation" id="citation">
-        <div class="citation-inner">
-          <div class="citation-head">
-            <div>
-              <h2>Citation</h2>
-              <p>If you use FusionVision in your research, please cite the following paper.</p>
-            </div>
-            <button class="copy-btn" type="button" id="copyCitation"><span data-icon="copy"></span><span id="copyLabel">Copy BibTeX</span></button>
-          </div>
-
-          <div class="citation-card">
-            <div class="tabs" role="tablist" aria-label="Citation formats">
-              <button class="tab active" type="button" data-tab="BibTeX">BibTeX</button>
-              <button class="tab" type="button" data-tab="PlainText">PlainText</button>
-              <button class="tab" type="button" data-tab="RIS">RIS</button>
-            </div>
-            <pre id="citationText">@misc{elghazoualisymtrs,
-      title={SyMTRS: Benchmark Multi-Task Synthetic Dataset for Depth, Domain Adaptation and Super-Resolution in Aerial Imagery}, 
-      author={Safouane El Ghazouali and Nicola Venturi and Michael Rueegsegger and Umberto Michelucci},
-      year={2026},
-      eprint={2604.21801},
-      archivePrefix={arXiv},
-      primaryClass={cs.CV},
-      url={https://arxiv.org/abs/2604.21801}, 
-}</pre>
-          </div>
-        </div>
-      </section>
-
-      <footer class="footer">
-        <p>SyMTRS Research Project</p>
-        <div class="footer-links">
-          <a href="https://github.com/safouaneelg/SyMTRS" target="_blank" rel="noopener noreferrer" aria-label="GitHub"><span data-icon="github"></span></a>
-          <a href="https://huggingface.co/datasets/safouaneelg/SyMTRS" target="_blank" rel="noopener noreferrer" aria-label="Hugging Face Dataset"><span data-icon="database"></span></a>
-        </div>
-        <div class="footer-small">
-          <p>&copy; 2026 Toelt LLC & Partners &bull; Lucerne University (HSLU) &bull; armasuisse S+T</p>
-          <p>WebApp Author: <a href="https://safouaneelghazouali.me/" target="_blank" rel="noopener noreferrer">Safouane EL GHAZOUALI</a></p>
-        </div>
-      </footer>
     </main>
 
-    <script src="./assets/script.js" defer></script>
+    <footer class="footer">
+      <div class="footer-top">
+        <div class="footer-brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <div>
+            <strong>SyMTRS</strong>
+            <span>Synthetic Multi-Task Remote Sensing Dataset</span>
+          </div>
+        </div>
+        <div class="footer-logos">
+          <img src="https://images.squarespace-cdn.com/content/v1/65586a28d0d9246e85df8d8b/4a692f5d-c41c-4a69-9d03-2d01d21a5f8b/logo_combined.png" alt="TOELT" loading="lazy" />
+          <img src="https://upload.wikimedia.org/wikipedia/commons/a/a4/HSLU_Logo_DE_Schwarz_rgb.png" alt="HSLU" loading="lazy" />
+          <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/0/05/Logo_der_Schweizerischen_Eidgenossenschaft.svg/1280px-Logo_der_Schweizerischen_Eidgenossenschaft.svg.png" alt="armasuisse" loading="lazy" />
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <p>© 2026 TOELT LLC · HSLU · Swiss Smart Factory · armasuisse S+T · Apache-2.0</p>
+        <p>
+          Page by <a href="https://safouaneelghazouali.me/" target="_blank" rel="noopener noreferrer">Safouane El Ghazouali</a>
+          · <a href="https://github.com/safouaneelg/SyMTRS" target="_blank" rel="noopener noreferrer">source</a>
+        </p>
+      </div>
+    </footer>
+
+    <script type="module" src="./assets/script.js"></script>
   </body>
 </html>

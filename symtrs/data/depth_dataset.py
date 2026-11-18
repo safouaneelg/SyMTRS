@@ -14,9 +14,15 @@ import torch
 from torch.utils.data import Dataset
 
 from symtrs.data.exr import read_depth_file, depth_to_tensor
-from symtrs.data.io import list_images, match_by_stem, read_image, coverage_report
+from symtrs.data.io import list_images, check_pairing, match_by_stem, read_image, coverage_report
 from symtrs.data.splits import SplitDirs, resolve_split_dirs
-from symtrs.data.transforms import apply_crop, flip_tensors, match_spatial, sample_crop_params
+from symtrs.data.transforms import (
+    apply_crop,
+    center_crop_params,
+    flip_tensors,
+    match_spatial,
+    sample_crop_params,
+)
 
 DEPTH_EXTENSIONS = (".exr", ".npy")
 
@@ -36,7 +42,8 @@ class DepthTaskDataset(Dataset):
         root: str,
         split: str = "train",
         resolution: int = 2048,
-        depth_scale: float = 1.0,
+        depth_scale: float = 0.01,
+        max_depth: Optional[float] = None,
         depth_channel: int = 0,
         depth_backend: str = "auto",
         max_samples: int = 0,
@@ -50,6 +57,7 @@ class DepthTaskDataset(Dataset):
         self.split = split
         self.resolution = resolution
         self.depth_scale = float(depth_scale)
+        self.max_depth = None if max_depth is None else float(max_depth)
         self.depth_channel = int(depth_channel)
         self.depth_backend = depth_backend
         self.patch_size = int(patch_size)
@@ -65,6 +73,7 @@ class DepthTaskDataset(Dataset):
         depths = _list_depth(depth_dir)
         pairs = match_by_stem(images, depths)
 
+        check_pairing(pairs, images, depths, "image/depth", split, resolution)
         if not pairs:
             raise RuntimeError(
                 f"no image/depth pairs for split={split!r} resolution={resolution}.\n"
@@ -93,7 +102,9 @@ class DepthTaskDataset(Dataset):
                 raw = read_depth_file(
                     depth_path, channel=self.depth_channel, backend=self.depth_backend
                 )
-                metres, valid = depth_to_tensor(raw, scale=self.depth_scale)
+                metres, valid = depth_to_tensor(
+                    raw, scale=self.depth_scale, max_depth=self.max_depth
+                )
                 break
             except Exception as exc:
                 print(
@@ -114,7 +125,12 @@ class DepthTaskDataset(Dataset):
         image, depth, valid_t = match_spatial([image, depth, valid_t])
 
         height, width = image.shape[-2:]
-        box = sample_crop_params(height, width, self.patch_size, self.generator)
+        # Random crop only while augmenting. Anything else (validation, test) gets the
+        # centre crop, so a split is the same pixels on every pass.
+        if self.augment:
+            box = sample_crop_params(height, width, self.patch_size, self.generator)
+        else:
+            box = center_crop_params(height, width, self.patch_size)
         if self.augment:
             horizontal = self.horizontal_flip and torch.rand(1, generator=self.generator).item() < 0.5
             vertical = self.vertical_flip and torch.rand(1, generator=self.generator).item() < 0.5

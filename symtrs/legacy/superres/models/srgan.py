@@ -45,8 +45,10 @@ class SRGANGenerator(nn.Module):
         base_channels: int = 64,
     ) -> None:
         super().__init__()
-        if scale not in {2, 4, 8}:
-            raise ValueError("scale must be one of {2,4,8}")
+        # 1 is the x1 control row (LR == HR, no upsampling blocks): a refiner, not SR. It was
+        # refused here, so srgan_x1 could never run (see symtrs/legacy/README.md).
+        if scale not in {1, 2, 4, 8}:
+            raise ValueError("scale must be one of {1,2,4,8}")
 
         self.conv1 = nn.Conv2d(in_channels, base_channels, 9, padding=4)
         self.prelu = nn.PReLU()

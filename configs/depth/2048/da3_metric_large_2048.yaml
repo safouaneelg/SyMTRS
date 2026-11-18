@@ -12,6 +12,17 @@
 # and the command to run - `symtrs doctor --model da3_metric_large --build` - rather
 # than silently substituting some other normalisation.
 #
+# Metres need the camera: the metric head returns canonical depth (a 300 px camera)
+# and metres = canonical * focal_px / 300. Without focal_px it scored abs_rel 0.91-0.96
+# and d1 = 0 on the real data (predictions ~4% of the ground truth). The focal length
+# is derived, never typed: build_from_config sets model_kwargs.focal_px =
+# (resolution / 2) / tan(data.camera_hfov_deg / 2) - 1773.6 px at 2048, half that at
+# 1024, and so on - so it follows the resolution axis, and a crop or a tile keeps it
+# because it keeps the pixel size. data.camera_hfov_deg is 60 degrees, confirmed by
+# the dataset owner (2026-10-17: the SyMTRS capture camera is always 60). The dataset
+# does not store it and the actor property is editable per instance, so a capture
+# with another FOV must set data.camera_hfov_deg.
+#
 # The other three cells of this row are the same file at 1024, 512 and 256, in the
 # sibling folders. `symtrs sweep --task depth --models da3_metric_large` walks them.
 #
@@ -26,9 +37,15 @@ data:
   split: train
   val_split: val
   test_split: test
-  # Metres are what the metric models predict. Check the raw encoding before trusting
-  # it: 0.01 for millimetres stored as uint16, 1.0 for metres.
-  depth_scale: 1.0
+  # Metres are what the metric models predict. The real EXRs store CENTIMETRES (hence
+  # 0.01); `symtrs doctor --data-root` prints the median in metres to check it.
+  depth_scale: 0.01
+  # Metres, after depth_scale: the sky is a huge value, not zero, so it is cut here.
+  max_depth: 1000
+  # Horizontal field of view of the capture camera. ASSUMPTION: 60 degrees is the capture
+  # actor's default (FieldOfView = 60.f) and is editable per level - confirm it. It fixes
+  # the focal length in pixels the metric model needs: (resolution / 2) / tan(fov / 2).
+  camera_hfov_deg: 60.0
   depth_channel: 0
   depth_backend: auto
   num_workers: 8
@@ -47,6 +64,7 @@ train:
   # encoder can hold, and the crop still shows a representative slice of the scene
   # at this ground sampling distance.
   patch_size: 512
+  # 0 = the whole image at val and test, whatever patch_size is (see eval.tile_size).
   val_patch_size: 0
   amp: true
   gpus: 1
@@ -66,9 +84,11 @@ eval:
   metrics: [rmse, mae, abs_rel, sq_rel, d1, d2, d3, silog]
   batch_size: 1
   amp: true
-  # 0 runs the whole image in one forward pass, which is what the published numbers
-  # use. If you hit OOM, a sweep over 512/128 tiles scores the same metres.
-  tile_size: 0
+  # The whole 2048px image is scored (val and test alike), in 512px windows
+  # with 128px overlap: the size this row trained on, so the network sees the same
+  # field of view at evaluation. Never a crop - every pixel is covered and the result is
+  # deterministic.
+  tile_size: 512
   tile_overlap: 128
   align: none
   num_visualizations: 4

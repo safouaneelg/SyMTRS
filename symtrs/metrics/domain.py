@@ -16,6 +16,23 @@ Two conventions are implemented deliberately rather than taken from
     information about an aerial night scene.
 
 Both matter for numbers being comparable with anything published.
+
+Two further conventions exist because a SyMTRS comparison is *asymmetric* by construction:
+
+  * The real side is native 2048 px, the generated side is whatever upstream wrote (256 px
+    for CycleGAN/pix2pix `test.py`). Pushing both straight to 299 would hand the real set an
+    aliased downscale (x7) and the generated set a smooth upscale (x1.2), and Inception's
+    features are sensitive to exactly that, so FID would partly measure sharpness rather
+    than translation quality. `match_resolution` therefore brings the real images to the
+    generated size first (antialiased), and `inception_preprocess` then applies one
+    identical antialiased resize to 299 to both. The generated size is read from the
+    generated files by the caller, never hard-coded here.
+  * **KID is the primary number, FID is kept for reference.** The validation/test splits
+    hold tens of images (24 per split at the time of writing) against 2048 feature
+    dimensions: the covariance matrix has rank at most N-1, so FID is badly biased and
+    its sign of improvement is not trustworthy, whereas KID's MMD^2 estimator is unbiased
+    at any N (it can be slightly negative, which is not a bug). `PRIMARY_METRIC` names
+    it and `symtrs tables` orders `kid` before `fid`.
 """
 
 from __future__ import annotations
@@ -34,13 +51,37 @@ INCEPTION_STD = (0.229, 0.224, 0.225)
 #: FID resolution. Fixed by the Inception network's trained input size.
 FID_RESOLUTION = 299
 
+#: The distribution metric to quote. FID is still computed and reported, but its
+#: covariance is rank-deficient at the split sizes used here (see the module docstring).
+PRIMARY_METRIC = "kid"
+
+
+def match_resolution(images: torch.Tensor, size) -> torch.Tensor:
+    """Resize `[B, 3, H, W]` to `size` (int or `(h, w)`) with antialiasing.
+
+    Used on the real side so it reaches Inception through the same low-resolution path as
+    the generated images. A no-op when the size already matches, so generated images are
+    never resampled before the shared 299 resize.
+    """
+    target = (size, size) if isinstance(size, int) else (int(size[0]), int(size[1]))
+    if tuple(images.shape[-2:]) == target:
+        return images
+    return F.interpolate(
+        images.float(), size=target, mode="bilinear", align_corners=False, antialias=True
+    )
+
 
 def inception_preprocess(images: torch.Tensor, size: int = FID_RESOLUTION) -> torch.Tensor:
-    """`[B, 3, H, W]` in `[0, 1]` to Inception input, resizing only."""
+    """`[B, 3, H, W]` in `[0, 1]` to Inception input, resizing only.
+
+    `antialias=True` so a large image is low-passed before it is subsampled; it changes
+    nothing when upsampling (the generated 256 px side), which is why one call serves both.
+    """
     if images.dim() == 3:
         images = images.unsqueeze(0)
     resized = F.interpolate(
-        images.float(), size=(size, size), mode="bilinear", align_corners=False
+        images.float(), size=(size, size), mode="bilinear", align_corners=False,
+        antialias=True,
     )
     mean = torch.tensor(INCEPTION_MEAN, device=resized.device).view(1, 3, 1, 1)
     std = torch.tensor(INCEPTION_STD, device=resized.device).view(1, 3, 1, 1)
@@ -83,8 +124,13 @@ def extract_features(
     max_samples: int = 0,
     image_key: str = "image",
     progress: bool = True,
+    resize_to=None,
 ) -> np.ndarray:
-    """Inception features for every image a dataloader yields."""
+    """Inception features for every image a dataloader yields.
+
+    `resize_to` (int or `(h, w)`) first brings every image to that size with
+    `match_resolution`; pass the generated images' size for the real side.
+    """
     extractor = extractor or InceptionFeatures()
     features: List[np.ndarray] = []
     seen = 0
@@ -97,6 +143,8 @@ def extract_features(
             # A grayscale preview or a single-channel depth map would otherwise fail
             # deep inside Inception with a shape error nobody can trace.
             images = images.repeat(1, 3, 1, 1)
+        if resize_to is not None:
+            images = match_resolution(images, resize_to)
         features.append(extractor(images).cpu().numpy())
         seen += images.shape[0]
         if progress and len(features) % 20 == 0:
@@ -172,13 +220,19 @@ def compute_kid(
     num_subsets: int = 0,
     subset_size: int = 100,
     seed: int = 0,
-) -> Dict[str, float]:
+) -> Dict[str, Optional[float]]:
     """Kernel Inception Distance: an unbiased MMD^2 with a polynomial kernel.
 
     KID is reported instead of FID whenever the validation split is small, because FID's
     covariance estimate is badly biased below a few thousand images while KID is not.
     If `num_subsets > 0` the mean and standard deviation over random subsets are
     returned, which is how the original code reports a confidence interval.
+
+    With `num_subsets=0` (the default, and what the domain runner uses) there is one
+    full-set estimate and no spread was measured, so `kid_std` is `None` and lands in
+    `summary.json` as `null`. It used to be `0.0`, which reads as a measured zero spread
+    ("the estimate is exact") next to an N of 24; a quantity that was never estimated is
+    not zero (AGENTS.md rule 11: what cannot be computed is `null`, never a number).
     """
     if real_features.shape[0] < 2 or fake_features.shape[0] < 2:
         raise ValueError("KID needs at least 2 images per side")
@@ -194,7 +248,7 @@ def compute_kid(
         return float(sum_aa + sum_bb - 2.0 * k_ab.mean())
 
     if not num_subsets:
-        return {"kid": mmd2(real_features, fake_features), "kid_std": 0.0}
+        return {"kid": mmd2(real_features, fake_features), "kid_std": None}
 
     generator = np.random.default_rng(seed)
     values = []
@@ -211,15 +265,23 @@ def distribution_metrics(
     fake_features: np.ndarray,
     with_kid: bool = True,
     num_subsets: int = 0,
-) -> Dict[str, float]:
-    """FID, and optionally KID, in one call. KID is skipped below 2 images per side."""
-    results = {"fid": compute_fid(real_features, fake_features)}
+) -> Dict[str, Optional[float]]:
+    """KID (primary) and FID in one call. KID is skipped below 2 images per side.
+
+    The dict lists `kid` first on purpose: it is the number to quote when N is small.
+    """
+    results: Dict[str, Optional[float]] = {}
     if with_kid:
         try:
             results.update(compute_kid(real_features, fake_features, num_subsets=num_subsets))
         except ValueError as exc:
             results["kid"] = float("nan")
             print(f"[symtrs] KID not computable: {exc}")
+    results["fid"] = compute_fid(real_features, fake_features)
+    # With N <= 2048 the covariance is singular; say so next to the number.
+    results["fid_rank_deficient"] = float(
+        min(real_features.shape[0], fake_features.shape[0]) <= real_features.shape[1]
+    )
     results["n_real"] = float(real_features.shape[0])
     results["n_fake"] = float(fake_features.shape[0])
     return results
@@ -230,10 +292,12 @@ __all__ = [
     "INCEPTION_MEAN",
     "INCEPTION_STD",
     "InceptionFeatures",
+    "PRIMARY_METRIC",
     "compute_fid",
     "compute_kid",
     "distribution_metrics",
     "extract_features",
     "inception_preprocess",
+    "match_resolution",
     "polynomial_kernel",
 ]

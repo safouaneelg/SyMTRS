@@ -27,9 +27,11 @@ data:
   split: train
   val_split: val
   test_split: test
-  # Metres are what the metric models predict. Check the raw encoding before trusting
-  # it: 0.01 for millimetres stored as uint16, 1.0 for metres.
-  depth_scale: 1.0
+  # Metres are what the metric models predict. The real EXRs store CENTIMETRES (hence
+  # 0.01); `symtrs doctor --data-root` prints the median in metres to check it.
+  depth_scale: 0.01
+  # Metres, after depth_scale: the sky is a huge value, not zero, so it is cut here.
+  max_depth: 1000
   depth_channel: 0
   depth_backend: auto
   num_workers: 8
@@ -46,6 +48,7 @@ train:
   min_lr_ratio: 0.01
   # The whole image fits at this resolution, so no cropping is needed.
   patch_size: 0
+  # 0 = the whole image at val and test, whatever patch_size is (see eval.tile_size).
   val_patch_size: 0
   amp: true
   gpus: 1
@@ -65,8 +68,7 @@ eval:
   metrics: [rmse, mae, abs_rel, sq_rel, d1, d2, d3, silog]
   batch_size: 1
   amp: true
-  # 0 runs the whole image in one forward pass, which is what the published numbers
-  # use. If you hit OOM, a sweep over 512/128 tiles scores the same metres.
+  # Whole image in one forward pass: training did not crop at this resolution either.
   tile_size: 0
   tile_overlap: 128
   align: scale

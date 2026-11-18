@@ -217,3 +217,60 @@ def test_summarise_alignment_reports_the_mean_fit():
     assert summary["align_scale_mean"] == pytest.approx(3.0)
     assert summary["align_shift_mean"] == pytest.approx(0.0)
     assert summarise_alignment([]) == {}
+
+
+# ------------------------------------------------- non-positive predictions are scored
+
+
+def test_non_positive_predictions_are_scored_not_dropped():
+    """Dropping a pixel whose prediction is <= 0 rewarded the model for being wrong exactly where
+    it is wrong: the 4 remaining pixels are perfect, so the old rule reported rmse 0 and d1 1."""
+    target = _quad([2.0, 2.0, 2.0, 2.0, 2.0])
+    pred = _quad([2.0, 2.0, 2.0, 2.0, -3.0])
+    metrics = compute_depth_metrics(pred, target)
+
+    assert metrics["invalid_pred_fraction"] == pytest.approx(1 / 5)
+    # The bad pixel is scored at the 1 mm floor, i.e. an error of ~2 m on one pixel in five.
+    assert metrics["mae"] == pytest.approx((2.0 - 1e-3) / 5, abs=1e-6)
+    assert metrics["d1"] == pytest.approx(4 / 5)
+    assert metrics["abs_rel"] == pytest.approx(((2.0 - 1e-3) / 2.0) / 5, abs=1e-6)
+    assert math.isfinite(metrics["silog"])
+
+
+def test_nan_and_inf_predictions_count_as_invalid_and_keep_the_metrics_finite():
+    target = _quad([2.0, 2.0, 2.0, 2.0])
+    pred = _quad([2.0, float("nan"), float("inf"), 0.0])
+    metrics = compute_depth_metrics(pred, target)
+    assert metrics["invalid_pred_fraction"] == pytest.approx(3 / 4)
+    assert all(math.isfinite(value) for value in metrics.values())
+    assert metrics["d1"] == pytest.approx(1 / 4)
+
+
+def test_a_healthy_prediction_reports_zero_invalid_fraction_and_the_floor_is_configurable():
+    target = _quad([2.0, 4.0])
+    assert compute_depth_metrics(target.clone(), target)["invalid_pred_fraction"] == 0.0
+    low = compute_depth_metrics(_quad([2.0, 0.0]), target, min_depth=0.5)
+    # floor 0.5 m on a 4 m pixel: abs error 3.5 on one of two pixels.
+    assert low["mae"] == pytest.approx(3.5 / 2)
+
+
+def test_a_wholly_non_positive_prediction_is_a_bad_score_not_an_error():
+    """It used to raise AllInvalidError and the image was skipped: the worst model disappeared
+    from the average instead of lowering it."""
+    target = _quad([2.0, 4.0])
+    metrics = compute_depth_metrics(_quad([-1.0, -1.0]), target)
+    assert metrics["invalid_pred_fraction"] == 1.0
+    assert metrics["d1"] == 0.0 and metrics["abs_rel"] > 0.99
+
+
+def test_silog_never_returns_nan_on_a_constant_log_error():
+    """E[x^2] - E[x]^2 is a variance, yet it comes out as -2.2e-16 for this input (seed found by
+    search): the sqrt of that was NaN and made the whole epoch non-finite."""
+    generator = torch.Generator().manual_seed(528)
+    target = (torch.rand(407, generator=generator) * 50 + 0.5).view(1, 1, 1, -1)
+    pred = target * 2.7948475  # a perfect prediction up to a global scale: true silog is 0
+    log_difference = torch.log(pred.double()) - torch.log(target.double())
+    assert float((log_difference ** 2).mean() - log_difference.mean() ** 2) < 0, "premise of the test"
+
+    metrics = compute_depth_metrics(pred, target)
+    assert math.isfinite(metrics["silog"]) and metrics["silog"] == pytest.approx(0.0, abs=1e-4)

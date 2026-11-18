@@ -39,7 +39,8 @@ def add_parser(subparsers) -> None:
                         help="sliding-window inference for large images")
     parser.add_argument("--tile-overlap", dest="tile_overlap", type=int, default=128)
     parser.add_argument("--align", default="",
-                        help="depth alignment before saving: none | median | scale | scale_shift")
+                        help="depth alignment before saving: none | median | scale | scale_shift | "
+                             "scale_shift_disparity")
     parser.add_argument("--device", default=None)
     parser.add_argument("--save-npy", dest="save_npy", action="store_true",
                         help="also write the raw array next to the picture")
@@ -162,7 +163,9 @@ def _save_depth(prediction, target: Path, save_npy: bool) -> None:
     millimetres = np.clip(metres * 1000.0, 0, 65535).astype(np.uint16)
 
     target.parent.mkdir(parents=True, exist_ok=True)
-    Image.fromarray(millimetres, mode="I;16").save(target)
+    # No explicit mode: Pillow >= 13 rejects `mode="I;16"` for a uint16 array it would pick
+    # that mode for anyway ("Invalid mode for data type").
+    Image.fromarray(millimetres).save(target)
 
     finite = metres[metres > 0]
     if finite.size:

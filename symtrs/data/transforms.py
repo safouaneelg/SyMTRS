@@ -167,6 +167,26 @@ def sample_crop_params(
     return (top, left, min(size, height - top), min(size, width - left))
 
 
+def center_crop_params(
+    height: int,
+    width: int,
+    size: int,
+) -> Optional[Tuple[int, int, int, int]]:
+    """The `(top, left, h, w)` box of a centred `size` crop, or None for "whole image".
+
+    The deterministic counterpart of `sample_crop_params`. The task datasets use it for any
+    sample that is not being augmented: a validation or test image must be the same pixels
+    on every pass, or two evaluations of one checkpoint cannot be compared and "best" is
+    picked on noise. A random evaluation crop is exactly what scored the 2048px rows on a
+    different 512px window every time.
+    """
+    if size <= 0 or (height <= size and width <= size):
+        return None
+    top = max((height - size) // 2, 0)
+    left = max((width - size) // 2, 0)
+    return (top, left, min(size, height - top), min(size, width - left))
+
+
 def apply_crop(tensors: Sequence[torch.Tensor], box: Optional[Tuple[int, int, int, int]]):
     """Apply one crop box to every tensor in `tensors`."""
     if box is None:

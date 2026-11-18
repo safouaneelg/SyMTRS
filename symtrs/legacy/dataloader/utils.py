@@ -1,6 +1,7 @@
 ﻿# E:\dataloader\utils.py
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Iterable, List, Tuple
 
@@ -74,14 +75,26 @@ def load_depth_npy(path: str | Path, normalize: str = "raw") -> torch.Tensor:
     return torch.tensor(arr, dtype=torch.float32).contiguous()
 
 
+# The real export names files `{rgb|seg|depth}_{day|night|noshadow}_{pixels}_{key}`, and the
+# prefix differs between folders (an LR input is `rgb_day_512_<key>`, its target
+# `rgb_day_2048_<key>`), so exact-name pairing finds nothing. Only the key is compared.
+# Names without the prefix still match exactly, as before. (The one change to this file
+# since it moved here; see symtrs/legacy/README.md.)
+_REAL_PREFIX = re.compile(r"^(?:rgb|seg|depth)_(?:day|night|noshadow)_\d+_")
+
+
+def default_stem(path: Path) -> str:
+    return _REAL_PREFIX.sub("", path.stem)
+
+
 def match_by_stem(
     a_files: Iterable[Path],
     b_files: Iterable[Path],
     a_stem_fn=None,
     b_stem_fn=None,
 ) -> List[Tuple[Path, Path]]:
-    a_stem_fn = a_stem_fn or (lambda p: p.stem)
-    b_stem_fn = b_stem_fn or (lambda p: p.stem)
+    a_stem_fn = a_stem_fn or default_stem
+    b_stem_fn = b_stem_fn or default_stem
 
     b_map = {b_stem_fn(p): p for p in b_files}
     pairs = []

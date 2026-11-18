@@ -40,7 +40,9 @@ def test_the_task_list_is_exactly_what_the_pipeline_implements():
     model and calling it super-resolution; this assertion pins that arrangement so that
     adding a task to the list is a deliberate act.
     """
-    assert set(TASKS) == {"superresolution", "depth", "segmentation", "domain_adapt"}
+    assert set(TASKS) == {
+        "superresolution", "depth", "segmentation", "domain_adapt", "shadow_removal"
+    }
 
 
 def test_defaults_validate():

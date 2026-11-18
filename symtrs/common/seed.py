@@ -39,7 +39,39 @@ def resolve_device(requested: str = "cuda") -> torch.device:
             "falling back to CPU. Training will be very slow."
         )
         return torch.device("cpu")
-    return torch.device(requested)
+    device = torch.device(requested)
+    if device.type == "cuda":
+        apply_memory_guard(device)
+    return device
+
+
+# Environment, not RunConfig: this is a property of the machine, it never changes a number a
+# run produces, and it has to reach every process that picks a device (the trainer, the
+# shadow-removal worker) without each config carrying it.
+MEMORY_FRACTION_ENV = "SYMTRS_CUDA_MEM_FRACTION"
+
+
+def apply_memory_guard(device: torch.device) -> None:
+    """Cap this process's CUDA allocations at a fraction of the card, if asked to.
+
+    On Windows (WDDM) the NVIDIA driver does not raise out-of-memory when a run outgrows
+    the card: it silently spills into system RAM ("sysmem fallback"). A U-Net at batch 32
+    on a 12 GB laptop GPU wanted 18.6 GB and ran 100-500x slower instead of failing, which
+    reads as a broken data loader. With `SYMTRS_CUDA_MEM_FRACTION=0.92` the caching
+    allocator raises a plain OOM before the driver ever spills, so the fix (a smaller
+    `--batch-size`) is obvious from the log.
+    """
+    raw = os.environ.get(MEMORY_FRACTION_ENV, "").strip()
+    if not raw:
+        return
+    fraction = float(raw)
+    if not 0.0 < fraction <= 1.0:
+        raise ValueError(f"{MEMORY_FRACTION_ENV}={raw!r} must be in (0, 1]")
+    index = device.index if device.index is not None else torch.cuda.current_device()
+    torch.cuda.set_per_process_memory_fraction(fraction, index)
+    total = torch.cuda.get_device_properties(index).total_memory / 2**30
+    print(f"[symtrs] CUDA memory capped at {fraction:.0%} of {total:.1f} GiB "
+          f"({MEMORY_FRACTION_ENV}); exceeding it raises OOM instead of spilling to RAM")
 
 
 def describe_device(device: torch.device) -> str:

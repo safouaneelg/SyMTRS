@@ -14,28 +14,68 @@ root, and do not "fix" the code to make a dummy number look better.
 ## 1. What this is
 
 `symtrs` is the reproducibility package for the SyMTRS benchmark: a multi-task synthetic
-aerial dataset benchmark with four tasks.
+aerial dataset benchmark with five tasks.
 
 | Task | Registry models | Input → target |
 | --- | --- | --- |
-| `depth` | 11 (MiDaS ×5, ZoeDepth ×3, Depth Anything 3 ×2, Depth Pro) | `rgb_day{_lr}` → `depth{_lr}` |
+| `depth` | 7 (MiDaS ×5, Depth Anything 3 ×2) | `rgb_day{_lr}` → `depth{_lr}` |
 | `segmentation` | 6 (U-Net, DeepLabV3 ×2, SegFormer ×3) | `rgb_day{_lr}` → `semantic{_lr}` |
-| `domain_adapt` | 2 (CycleGAN, pix2pix) × 2 directions | `rgb_day` ⇄ `rgb_night`, native only |
+| `domain_adapt` | 2 (CycleGAN, pix2pix) × 4 directions | `rgb_day` ⇄ `rgb_night` (`day2night`, `night2day`) and `rgb_day` ⇄ `rgb_noshadow` (`shadow2noshadow`, `noshadow2shadow`), native only |
+| `shadow_removal` | 4 (ShadowFormer, Restormer, Uformer, ShadowMaskFormer), 2048 only | `rgb_day` → `rgb_noshadow` |
 | `superresolution` | 4 (SRCNN, autoencoder, SRGAN, SwinIR) × 4 scales | `rgb_day_lr/xN` → native `rgb_day` |
 
-Two of the four are not trained by this package at all and are driven as subprocesses:
+`symtrs` with no subcommand opens the **launcher** (`symtrs get` is the same selection
+without a terminal): it reads the release's catalog, lets a user select task groups, splits
+and model checkpoints, prices the selection, and downloads only the union of the files those
+choices need. The release is **several HF projects** - the catalog plus metadata in
+`SyMTRS-metadata`, the images once in `SyMTRS-views`, one table repo per task vertical, and
+one model repo per vertical; `docs/hub.md` is the contract and `symtrs/hub/repos.py` holds
+the placeholder URLs. Selecting a dataset vertical pulls `metadata` by default (a table
+without the camera/class metadata cannot be interpreted); the view project is pulled
+transitively by the task tables. It copies each published file to its published path and never
+re-shapes the dataset: the release format is the maintainer's, and a download is a copy.
 
-- **domain adaptation** runs the vendored `pytorch-CycleGAN-and-pix2pix/` tree.
+Two of the five are not trained by this package at all and are driven as subprocesses (shadow
+removal is a third case, below):
+
+- **domain adaptation** runs the vendored `pytorch-CycleGAN-and-pix2pix/` tree. The pair is
+  data (`DIRECTION_ROLES` in `symtrs/model/domain/upstream.py`): `rgb_day` is always A, B is
+  `rgb_night` or `rgb_noshadow`, and the direction only picks `AtoB`/`BtoA`. `shadow2noshadow`
+  is also scored like a shadow-removal result (the `shadow_removal` staging, mask and metrics,
+  after resampling upstream's 256 px output to the ground-truth size), so it sits beside
+  ShadowFormer / Restormer / Uformer / ShadowMaskFormer in `symtrs tables`.
 - **super-resolution** runs the trainer at `symtrs/legacy/superres/train.py` (launched as
   `python -m symtrs.legacy.superres.train`), which predates the package and was moved
-  inside it unchanged in 2026-10-15 — see `symtrs/legacy/README.md`.
+  inside it unchanged in 2026-10-15, then changed on purpose on 2026-10-17 (crops for every
+  model, whole-image tiled evaluation, `val/` as the validation set, SRGAN x1, SwinIR
+  `img_size`) — `symtrs/legacy/README.md`, "Changes after the move", lists every edit. A
+  failed trainer run exits non-zero and leaves `summary_failed.json`, never `summary.json`.
+
+**Shadow removal** takes only the network *class* from four upstream checkouts under
+`third_party/` (git submodules, pinned by their gitlinks and unmodified; `git submodule update
+--init third_party`, `python scripts/fetch_third_party.py --check` verifies; notes and licence in
+`third_party/PINS.md`). `symtrs/model/shadow/` stages `rgb_day`/`rgb_noshadow` pairs plus a *derived* shadow
+mask (the dataset has none; `shadow.mask_threshold`/`mask_open`; derived once per pair and settings into the shared,
+gitignored `shadow.mask_cache` (`.cache/shadow_masks`, valid while the sources' size/mtime match,
+filled by `shadow.mask_workers` processes, never inside the dataset) and only linked into each run,
+see `symtrs/model/shadow/mask_cache.py`; `python scripts/precompute_shadow_masks.py --data-root
+<root>` builds them upfront), runs one shared worker loop
+(`python -m symtrs.model.shadow.worker`, cwd = the upstream repo, so paths must be absolute),
+and scores the written PNGs with `symtrs/metrics/shadow.py` (PSNR/SSIM/LAB on all, shadow and
+non-shadow pixels). 2048 only; zero-shot is refused (the released weights are ISTD/SIDD, not
+SyMTRS); `shadow.init_weights` loads an upstream checkpoint. On a 12 GB card Restormer needs
+batch 1 (batch 2 spills). ShadowMaskFormer (the 2.28 M light model; ShadowFormer is 11.4 M) has
+**no released weights** and no licence file: it is always trained from scratch, so its rows are
+not like-for-like with ShadowFormer's (which starts from ISTD+). It is written for [-1, 1]
+inputs and the worker converts at the network boundary only (`Arch.input_range`, applied in
+`worker.forward`); do not convert anywhere else.
 
 For both, `symtrs` owns exactly three things: the folder mapping, the launch, and folding the
 result into the `summary.json` shape every task writes. Do not reimplement their models in
 `symtrs/` — a second copy is a second thing to keep in step with the checkpoints.
 
 The CLI, the YAML loader and the Python SDK all build the same `RunConfig` and reach the
-same entry points, so all four tasks are reachable from all three:
+same entry points, so all five tasks are reachable from all three:
 `autoloader("srcnn").train(...)` launches that trainer and
 `autoloader("cyclegan").train(...)` the vendored upstream, exactly as `symtrs train` does.
 
@@ -55,18 +95,53 @@ changing anything.
    `rgb_day`). `resolution: 2048` there means ×1 — LR and HR are the same folder, a refiner
    control row, explicitly *not* super-resolution. Never add a `scale:` key to a config.
 
-3. **Depth models have a protocol, and the loss and the alignment follow from it.**
-   `relative` → `loss: silog` + `eval.align: scale`; `metric` → `loss: berhu` +
-   `eval.align: none`. The registry is the source of truth (`spec.protocol`). A relative
-   model scored without alignment looks broken; a metric model scored with it looks
-   suspiciously good. Both mistakes have been made here; the tests in
-   `tests/test_vendored_and_grid.py` now assert the pairing holds at every resolution.
+3. **Depth models have a protocol and an output space, and the loss and the alignment follow
+   from both.** The single statement is `symtrs.registry.depth_pairing(protocol, output_space)`:
 
-4. **Six segmentation classes, `ignore_index: 255`.** Both are recorded in the checkpoint.
-   If the mask generator ever writes `0` for "no class", change `data.ignore_index` — never
-   make the metric guess which pixels to ignore.
+   | protocol | raw output | loss | `eval.align` | models |
+   | --- | --- | --- | --- | --- |
+   | `metric` | metres | `berhu` | `none` | DA3 metric |
+   | `relative` | depth up to a scale | `silog` | `scale` | DA3 relative |
+   | `relative` | **disparity** `s/z + t` | `ssi` | `scale_shift_disparity` | MiDaS x5 |
 
-5. **`rgb_night` is native-only.** There is no downsampled night imagery, which is why
+   `scale_shift_disparity` is the MiDaS protocol: scale **and shift** are fitted per image by
+   least squares in disparity space against `1 / ground truth`, the fitted disparity is clamped
+   to at least `1 / data.max_depth`, and only then inverted to metres. Inverting first and
+   aligning with a scale alone (the earlier setup) cannot remove the shift `t`, which dominates
+   on narrow-depth nadir views; the resulting MiDaS numbers were meaningless. `ssi` is the
+   matching scale-and-shift-invariant loss (the same closed-form fit as the metric, divided by
+   the target's spread so it is dimensionless). The registry is the source of truth
+   (`spec.protocol`, `spec.output_space`); adapters refuse a mismatched `align` at build time and
+   in `evaluate_depth` (`DepthAdapter.validate_alignment`), and the tests in
+   `tests/test_vendored_and_grid.py` and `tests/test_depth_conventions.py` assert the pairing at
+   every resolution. A relative model scored without alignment looks broken; a metric model
+   scored with one looks suspiciously good. Both mistakes have been made here.
+
+   Two more facts that decide whether a metric-model number means anything. *DA3 metric*
+   returns canonical depth, `metres = canonical * focal_px / 300`; `focal_px` is derived, not
+   typed: `build_from_config` sets it to `(resolution / 2) / tan(data.camera_hfov_deg / 2)`
+   (1773.6 px at 2048, halving per level; crops and tiles keep it because they keep the pixel
+   size). `data.camera_hfov_deg: 60` is **confirmed**: the dataset owner stated on 2026-10-17 that
+   the capture camera's horizontal FOV is always 60 deg for the SyMTRS capture (a car-size
+   estimate over 838 cars, 54-63 deg, agrees). The actor property (`FieldOfView = 60.f`) is
+   editable per instance and the dataset does not store it, so a future capture with another
+   FOV must set `data.camera_hfov_deg`.
+
+   Two families were dropped on 2026-10-22 (adapters, configs and tests removed; `git log` has
+   them). ZoeDepth (N/K/NK): its released configs froze the whole MiDaS core (`train_midas:
+   false`, forward under `set_grad_enabled(False)`), and even with the core released it did not
+   learn usefully on `scripts/overfit_check.py`. Depth Pro: even given the true focal length
+   its zero-shot scale was ~16x short on SyMTRS, and only full fine-tuning (952 M parameters,
+   ~3 h per 512px epoch) closed the gap.
+
+4. **Five segmentation classes, `ignore_index: 255`.** Background, building, green, road,
+   car (`data.num_classes: 5`); the masks store `class_id * data.label_step` (63) as 8-bit
+   gray, and an off-grid gray value decodes to the ignore index. All three are recorded in the
+   checkpoint. If the mask generator ever writes `0` for "no class", change
+   `data.ignore_index` — never make the metric guess which pixels to ignore.
+
+5. **`rgb_night` and `rgb_noshadow` are native-only.** There is no downsampled night or
+   shadow-free imagery, which is why
    domain adaptation is a 2048-only task and `symtrs sweep` drops the other resolutions for
    it rather than approximating.
 
@@ -74,7 +149,7 @@ changing anything.
    and `data.split` must differ from the evaluation splits. Never carve a validation set out
    of `train/` in code — upstream's loaders will happily do that if you let them (see §7).
 
-7. **`configs/` is generated output.** 88 of the YAML files are written by
+7. **`configs/` is generated output.** 80 of the YAML files are written by
    `configs/generate_grid.py` from one table per task. Change the table and re-run it;
    `python3 configs/generate_grid.py --check` and the test suite both fail if a committed
    file has drifted. `configs/train_sr_x2.yaml` is the one hand-written file (the
@@ -87,20 +162,79 @@ changing anything.
    other drift; `--check` verifies the tree is complete.
 
 9. **Dependencies stay inside torch + torchvision + timm + numpy/PIL/matplotlib/tqdm/yaml.**
-   Depth Anything 3 (`transformers`) and Depth Pro are optional extras, imported lazily
+   SegFormer (`transformers`), Depth Anything 3 (the `depth_anything_3` package, installed
+   with `pip install --no-deps depth-anything-3==0.1.1` because its wheel pins numpy<2) are
+   optional extras, imported lazily
    inside the adapter that needs them so `symtrs doctor` can report the model as unavailable
-   instead of the whole package failing to import.
+   instead of the whole package failing to import. The one addition this rule has taken:
+   the shadow-removal extra (`scipy`, `einops`, `[shadow]` in `pyproject.toml`). Those are
+   not `symtrs` requirements — the *vendored* ShadowFormer/Uformer/Restormer modules import
+   them at module level, so without them the upstream class cannot even be constructed.
+   Install them only in the environment that runs shadow removal. `uv pip install scipy`
+   pulls numpy 2 in as a side effect; keep the environment's `numpy==1.26.4` (pin it in the
+   same command) or the Depth Anything 3 adapter breaks.
 
-10. **timm cannot serve everything from one environment.** ZoeDepth's released weights need
-    `timm==0.6.12`; SegFormer needs a timm with `mit_b0`, which 0.6.12 does not have. MiDaS
-    works on both. `symtrs doctor` reports which side you are on. Plan on two environments.
+10. **timm cannot serve everything from one environment.** The MiDaS Swin-V2 checkpoint needs
+    `timm==0.6.12` (`midas_dpt_swin2_tiny`: timm
+    >= 0.9 moved the Swin-V2 patch-merging between stages, so its state_dict loads with a
+    missing `downsample.reduction` key), and so does MiDaS DPT-BEiT-Large
+    (`midas_dpt_beit_large`: MiDaS patches timm's `Block.forward` with a copy that calls
+    `self.drop_path`, which timm >= 0.9 split into `drop_path1`/`drop_path2`, so it builds and
+    then fails at the first forward; the adapter refuses at build time and names `.venv-zoe`).
+    The other MiDaS models (small, DPT-Hybrid, DPT-Large) work on both: they patch only the
+    top-level ViT's forward, never a timm `Block`. SegFormer is no
+    longer part of the conflict: timm has never shipped MiT, so its encoder comes from
+    `transformers` (`nvidia/mit-b{0,1,2}`). `symtrs doctor` reports which side you are on.
+    Plan on two environments (`.venv` and `.venv-zoe` - the name is left from ZoeDepth, its
+    first user); `scripts/run_queue.py` takes the environment per job.
+
+11. **Evaluation scores the whole image, with the same path for val and test.** `train.val_patch_size: 0`
+    means the full image, never `train.patch_size` (the crop is a memory device; inheriting it
+    scored the 2048 rows on one random 512px window). A row that trains on crops smaller than its
+    images is evaluated in sliding windows of that crop (`eval.tile_size`, set by
+    `eval_tiling` in the generator); relative-depth windows are fitted onto each other before
+    blending and the alignment is computed once per stitched image. A NaN/inf validation metric is
+    never "best", and non-finite metrics are written as `null`, never as a bare `NaN`. mIoU
+    averages the classes with a non-empty union (`miou_classes` says how many; class 0 is absent
+    from the current capture).
+
+12. **Co-training is an execution strategy, never a protocol.** `symtrs train-group` (and a
+    `group` line in a queue file, §3's `scripts/run_queue.py`) runs several member configs in
+    one process on one loader, handing every member the *same* decoded batch: at 2048 one
+    sample costs ~0.2 s of CPU to decode and ~0.15 s of GPU per depth model on an A6000, so a
+    solo run spends most of its wall clock waiting for images. The sharing unit is the
+    **optimiser window**, not the forward pass: the loader is built at the members' largest
+    effective batch (`batch_size × grad_accum`, `shared_window`), every member's effective
+    batch must divide it, and each member cuts a shared batch into its own windows and
+    micro-batches (`Trainee.split`, driven by `train_one_epoch_many(..., windows=True)`). So a
+    `batch_size: 4, grad_accum: 2` member and a `batch_size: 8, grad_accum: 1` member share the
+    same 8 images per optimiser step while keeping their own memory footprint, and a
+    `batch_size: 4, grad_accum: 1` member beside them takes two optimiser steps per shared
+    batch (DeepLabV3 beside SegFormer at every resolution). In a group a window closes only
+    where `split` says: the solo `(step + 1) % grad_accum` rule counts shared batches there and
+    once gave a 2x2 member six steps for four windows. What a member must not lose:
+    its own optimiser, schedule (`steps_per_epoch = len(shared loader) × windows per shared
+    batch`, never divided by `grad_accum` again — that split is inside the window), checkpoints, `metrics.csv`,
+    previews and `summary.json`
+    (which records `cogroup`), and the same validation/test path a solo run uses
+    (`_finish_epoch` / `_score_and_summarise` — a group must never grow its own eval pass;
+    `tests/test_eval_protocol.py` pins this). Members therefore have to agree on everything
+    that shapes the window, which is `symtrs.engine.trainer.group_conflicts` (task, resolution,
+    data root/splits and the data semantics, patch size, workers, an effective batch that divides the window); a
+    disagreement is refused, never resolved in favour of the first member's loader.
+    `train.epochs` is per member: one that finishes early leaves the shared pass and the
+    others keep going. Only depth and segmentation co-train: domain adaptation, shadow removal
+    and super-resolution are subprocesses and read their own data. A group's `--set` applies
+    to every member, which is why a per-member resume is a flag (`--resume-existing`) rather
+    than a config value.
 
 ## 3. Setup
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -e '.[dev,timm]'          # core + tests; add exr, da3, depthpro as needed
+pip install -e '.[dev,timm]'          # core + tests; add exr, da3 as needed
 pip install -e '.[adapt]'             # domain adaptation: dominate + wandb
+pip install -e '.[launcher]'          # the interactive launcher: textual + huggingface_hub
 symtrs doctor                         # what is installed, which models can build
 symtrs models                         # every registry key, protocol and requirement
 ```
@@ -128,6 +262,14 @@ fail against the real dataset. `--size` must be ≥ the largest patch a config c
 ## 4. Cheat sheet
 
 ```bash
+# pull only what a project needs (bare `symtrs` opens the interactive launcher)
+symtrs
+symtrs get --list
+symtrs get --preset depth-2048 --data-root /data/SyMTRS --yes
+symtrs get --task segmentation --resolutions 2048 --splits train,val --data-root /data/SyMTRS --yes
+symtrs get --models midas_dpt_hybrid@1024 --models-dir runs/ --yes
+symtrs get --verify --data-root /data/SyMTRS
+
 # one run, from a config, with a dry run first
 symtrs train configs/depth/2048/midas_dpt_hybrid_2048.yaml --data-root /data/SyMTRS --dry-run
 symtrs train configs/depth/2048/midas_dpt_hybrid_2048.yaml --data-root /data/SyMTRS
@@ -146,6 +288,14 @@ symtrs eval configs/superresolution/srcnn_x4.yaml --data-root /data/SyMTRS --eva
 # the whole grid: plan first, then execute
 symtrs sweep --task depth --data-root /data/SyMTRS --out-dir runs
 symtrs sweep --task depth --data-root /data/SyMTRS --out-dir runs --execute --jobs 1
+
+# several compatible models on one shared batch (one loader, one decoded batch per step)
+symtrs train-group configs/segmentation/2048/unet_small_2048.yaml \
+                  configs/segmentation/2048/segformer_b0_2048.yaml \
+                  --data-root /data/SyMTRS --out-dir runs/group1 --device cuda:0 --dry-run
+symtrs train-group configs/segmentation/2048/unet_small_2048.yaml \
+                  configs/segmentation/2048/segformer_b0_2048.yaml \
+                  --data-root /data/SyMTRS --out-dir runs/group1 --device cuda:0
 
 # collect the results table
 symtrs tables runs --task depth --format markdown
@@ -170,7 +320,12 @@ symtrs/
   config.py            RunConfig: the single schema every front-end builds
   registry.py          model keys -> spec (task, protocol, requires, default kwargs)
   cli.py, commands/    one module per subcommand; _common.py holds the shared flags
+  hub/                 the release launcher: manifest.py (schema), plan.py (selection ->
+                       exact files, dedupe, sizes), state.py (lockfile, verify), fetch.py
+                       (Hub / local mirror), install.py,
+                       viewmodel.py (pure TUI state), tui.py (Textual), render.py
   data/                splits.py (the resolution mapping), factory.py, exr.py, datasets
+                       naming.py (the release's file-name grammar, shared with the publisher)
   engine/              trainer.py (routing), loop.py (train/eval loops, metrics)
   model/
     base.py            the model interface the adapters implement
@@ -179,17 +334,31 @@ symtrs/
     semantic/          segmentation models
     domain/            the CycleGAN/pix2pix subprocess front-end + vendored-tree check
     superres/          the SR subprocess front-end
-configs/               88 generated YAMLs + generate_grid.py (see configs/README.md)
-symtrs/legacy/          the SR implementation and datasets: moved inside, byte-identical
+configs/               80 generated YAMLs + generate_grid.py (see configs/README.md)
+symtrs/legacy/          the SR implementation and datasets: moved inside, then edited (see its README)
 train_superresolution.py, dataloader/   shims that re-export from symtrs/legacy/
 pytorch-CycleGAN-and-pix2pix/                           vendored upstream, pinned
 tests/                 pytest; conftest.py holds the layout and data fixtures
+docs/hub.md            the release manifest/table contract the launcher reads
 ```
 
 Run artefacts, uniformly for every task: `<run_dir>/weights/best.pt`, `weights/last.pt`,
 `summary.json`, `metrics.csv`, `config.yaml`, `logs/`, `preview/`. `symtrs tables` reads
 `summary.json`; a missing `test` key means the test split was never scored, and it is
 absent rather than zero on purpose.
+
+Shadow removal and the `shadow2noshadow` direction also write prediction images, because
+their scorer reads pixels. `eval.retain_predictions` decides what survives that scoring:
+`downsample` (the default) keeps a 512 px copy of each (`predictions/<split>/`, marked with
+`_retained.json` so scoring refuses to read it again), the scenes a figure zooms into at
+full resolution (`preview/full/`, one per camera height, picked by
+`shadow.runner.preview_keys`), and every metric in `per_image_<split>.json`; `all` keeps the
+full-size PNGs (~45 GB per 3000-image split - the setting to use while changing a scorer);
+`none` keeps no prediction images. `symtrs eval` re-runs prediction before scoring, so a
+pruned run is re-scored from its checkpoint, never from a downsampled image.
+`scripts/prune_predictions.py --runs <root>` applies the same rule to runs created before it
+existed (dry run by default), and backfills `summary.json` with the spread and the retention
+record those runs' scorer did not write - additive keys only.
 
 ## 6. Making changes
 
@@ -211,6 +380,13 @@ descriptor in `symtrs/model/<task>/` with `describe()`, `task` and `requires`, a
 routing branch in `engine/trainer.py` (`train` and `evaluate_run`) if it is driven as a
 subprocess. Add it to §1 of this file and to the table in `configs/README.md`.
 
+**Change the release contract.** `symtrs/hub/manifest.py` is the only reader of
+`symtrs-hub.json` and `symtrs/data/naming.py` is the only copy of the file-name grammar;
+`docs/hub.md` is what the publisher must produce. A schema change bumps `SCHEMA`, updates
+that document, and adds a rejection test in `tests/test_hub_manifest.py` - an older
+package must refuse a newer release rather than half-read it. The publisher is expected to
+import `symtrs.data.naming`, not to parse names a second time.
+
 ## 7. Traps that have already bitten
 
 - **The upstream auto-split.** `UnalignedDataset`/`AlignedDataset` re-split the data by
@@ -226,6 +402,15 @@ subprocess. Add it to §1 of this file and to the table in `configs/README.md`.
   files and fails if it does not. Upstream writes its generated images **flat** in
   `results/<name>/<phase>_<epoch>/images/` as `<image>_fake_B.png` — not one folder per
   label, which is the other way it was read once and scored nothing.
+- **The generated image is `fake_B` in every direction, `BtoA` included.** Upstream's
+  `set_input` (`models/pix2pix_model.py`, `models/cycle_gan_model.py`) does
+  `real_A = input["A" if AtoB else "B"]` and `forward` does `fake_B = G(real_A)`, so
+  `--direction BtoA` swaps the *inputs*, not the output label; `fake_A` is CycleGAN's other
+  generator on the other input, i.e. the opposite translation. Reading `fake_A` for
+  `night2day`/`noshadow2shadow` made pix2pix score nothing (`test: {}`) and CycleGAN score
+  day-to-night against real day images. `DomainAdaptation.generated_paths` now selects
+  `GENERATED_LABEL` and raises when it finds nothing; `tests/test_domain_commands.py` parses
+  the two upstream files and fails if the premise changes.
 - **Upstream's `--save_epoch_freq` default is 5, and the score step loads `latest`.** A run
   shorter than five epochs trains and then fails at scoring with a `FileNotFoundError`. The
   front-end passes `--save_epoch_freq 1` for that reason; a caller can thin it out again,
@@ -233,6 +418,12 @@ subprocess. Add it to §1 of this file and to the table in `configs/README.md`.
 - **DeepLabV3 and batch size 1.** torchvision's atrous head has BatchNorm and cannot train
   with a batch of one; the trainer converts the resulting error into a `ConfigError` that
   says so. Keep `batch_size >= 2` for the DeepLabV3 configs.
+- **`train.freeze` used to be a no-op.** Adapters stored the policy and nothing applied it;
+  `symtrs.engine.trainer.apply_run_freeze` now does, before `.to()`/DDP/the optimiser. It
+  recognises the encoder by module-name prefix (`encoder`, `backbone`, `pretrained`), so a
+  model that keeps everything under one of those sets `freeze_encoder_prefixes` (MiDaS:
+  `backbone.pretrained`). Check the "freeze=... -> N M trainable" line. (It was found because
+  Depth Pro, since dropped, ran out of memory with a "frozen" encoder that still trained.)
 - **`data.depth_scale`.** Metric depth models predict metres. If the EXR stores millimetres
   as uint16, every metric is wrong by a constant factor and it looks like a broken model.
   `symtrs doctor --data-root` checks the first file it finds.
@@ -248,6 +439,25 @@ subprocess. Add it to §1 of this file and to the table in `configs/README.md`.
   numpy` refuses an EXR rather than returning whatever numpy guessed.
 - **A missing resolution folder is an error, never a fallback.** A silent fallback to a
   coarser level changes what the reported number means.
+- **A relative run directory and a subprocess with another cwd.** Shadow removal and domain
+  adaptation launch with the upstream checkout as cwd (and the shadow worker re-reads
+  `config.yaml` there), so a relative `--out-dir runs/validation/x` made the worker fail on
+  its own `config.yaml` and upstream's `train.py` miss `staging/trainA` (it then falls into its
+  auto-split branch; its relative `--checkpoints_dir`/`--results_dir` would also have been
+  written into the vendored tree). Found by the 2026-10-17 validation queue. The runners now
+  start with `cfg = cfg.anchored()` (`RunConfig.anchored`: `out_dir`, `data.root`,
+  `shadow.init_weights`, `train.resume` resolved against the *caller's* cwd, once, on a copy).
+  Never build a path for a subprocess from `cfg.resolved_out_dir` on an un-anchored config, and
+  never resolve a user-typed path inside a launcher. `tests/test_relative_run_dir.py` covers
+  the three subprocess tasks. Paths inside `upstream_args`/`model_kwargs.extra_args` are
+  passed through verbatim: give them absolute.
+- **The launcher copies a release; it does not format one.** `symtrs get` writes every
+  downloaded file at the repo-relative path the manifest/table names, and nothing else -
+  no renames, no symlink farm, no "converted" tree. The dataset format is the maintainer's
+  (the current release is the flat `<split>/rgb_day` tree; a future one may be task-first),
+  and the loader reads whatever was published. A group is recorded in
+  `.symtrs/install.json` only when every file its table lists is present at the advertised
+  size - a partial download is visible, not claimed.
 
 ## 8. Testing
 
@@ -270,6 +480,12 @@ conventions matter when adding one:
   mistake (the protocol pairing, the ×1 row not being super-resolution, the zero-shot
   exclusion for SR), assert the message or the guard, so removing the protection fails a
   test rather than quietly changing a number.
+- **The hub tests are offline.** `tests/test_hub_*.py` drive the launcher against the
+  `hub_mirror` fixture (a complete little multi-repo release under `tmp_path`), so
+  dedupe, repo routing, path-preserving installs, locking and verification are pinned
+  without a network or either optional extra.
+  `tests/test_hub_tui.py` skips when `textual` is absent; the selection rules it exercises
+  live in `viewmodel.py` and are covered without it.
 
 ## 9. Style
 

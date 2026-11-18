@@ -10,10 +10,16 @@
 # swinir_x1.yaml - read that one for the loss, the batch size and the
 # model-specific caveats. Only the scale changes here.
 #
-# This is the one model whose training cost grows with the input size, so
+# This is the model whose training cost grows fastest with the input size, so
 # train.patch_size matters more as the scale rises: the crop is in LR pixels,
 # so a 64px crop is a 256px region of the target. Raise it if memory
 # allows, and set model_kwargs.swinir_checkpoint: true at x8 if it does not.
+#
+# Training is on random aligned crops: 64px of the LR input and the
+# matching 256px of the target. A whole 2048px frame does not fit a 12 GB card for any
+# model here. Validation and test score the WHOLE image (val_patch_size: 0), pushed
+# through the network in eval.tile_size windows where it does not fit in one pass;
+# PSNR / SSIM / MSE are computed per image on the stitched result and averaged.
 #
 # The training code for this task predates the `symtrs` package and now lives inside
 # it: `symtrs/legacy/superres/train.py` owns the model set, the data loading and the
@@ -33,7 +39,7 @@ model_kwargs:
   swinir_depths: [6, 6, 6, 6]
   swinir_num_heads: [6, 6, 6, 6]
   swinir_window: 7
-  swinir_mlp_ratio: 4.0e0
+  swinir_mlp_ratio: 4.0
   swinir_upsampler: pixelshuffle
   swinir_checkpoint: false
 
@@ -55,8 +61,10 @@ train:
   # A path here resumes a previous run; `symtrs eval` scores the run directory's
   # weights/best.pt without training at all.
   resume: ""
-  # LR-space crops, SwinIR only: the other three models train on the whole image.
+  # LR pixels of the random training crop, every model: a fixed 64px LR patch (token count), so the target
+  # crop is x4 that = 256px.
   patch_size: 64
+  # 0 = the whole image at val and test, never the training crop.
   val_patch_size: 0
   amp: true
 
@@ -67,3 +75,9 @@ eval:
   batch_size: 1
   amp: true
   num_visualizations: 4
+  # The whole image is scored in windows of this many LR pixels, blended and stitched;
+  # metrics are computed on the stitched image. Larger than the training crop on purpose
+  # (see SR_EVAL_TILE in configs/generate_grid.py); a frame no larger than the window is
+  # scored in one pass.
+  tile_size: 512
+  tile_overlap: 64

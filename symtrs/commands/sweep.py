@@ -27,17 +27,17 @@ from symtrs.registry import model_keys
 
 #: Tasks that exist only at native resolution, because the domain labels (day/night)
 #: are not present in the downsampled folders.
-NATIVE_ONLY_TASKS = ("domain_adapt",)
+NATIVE_ONLY_TASKS = ("domain_adapt", "shadow_removal")
 
 #: Tasks with no released weights, so a zero-shot entry has nothing to load. `symtrs eval`
 #: re-scores the run's own checkpoint for these instead, which is the finetune half of the
 #: row - a zero-shot entry would only fail with "there is no checkpoint at ...".
-NO_ZERO_SHOT_TASKS = ("superresolution",)
+NO_ZERO_SHOT_TASKS = ("superresolution", "shadow_removal")
 
 
 def add_parser(subparsers) -> None:
     parser = subparsers.add_parser("sweep", help="plan and run the full model x resolution grid")
-    parser.add_argument("--task", required=True, help="depth, segmentation or domain_adapt")
+    parser.add_argument("--task", required=True, help="depth, segmentation, domain_adapt, superresolution or shadow_removal")
     parser.add_argument("--data-root", dest="data_root", required=True)
     parser.add_argument("--out-dir", dest="out_dir", default="runs")
     parser.add_argument("--models", default="all",
@@ -66,7 +66,7 @@ def build_plan(
     if task in NATIVE_ONLY_TASKS:
         if [r for r in resolutions if r != 2048]:
             print(
-                f"[symtrs] {task} only exists at 2048: the rgb_night folders are not "
+                f"[symtrs] {task} only exists at 2048: the rgb_night and rgb_noshadow folders are not "
                 "downsampled, so the lower resolutions are dropped from the plan"
             )
         resolutions = [2048]

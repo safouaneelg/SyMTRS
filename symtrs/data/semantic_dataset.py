@@ -1,8 +1,11 @@
 """Semantic segmentation dataset over the revised SyMTRS layout.
 
-Labels are grayscale PNGs with 6 classes. Class values are read verbatim; the class
-count is a configuration value that `detect_class_values` cross-checks rather than a
-value the code infers silently.
+Labels are 8-bit grayscale PNGs holding `class_id * label_step` (the current export:
+step 63, 5 classes - background, building, green, road, car). `decode_labels` turns the
+grey level back into a class index; a grey level that is not near a multiple of the step
+becomes `ignore_index` rather than being rounded into some class. The class count is a
+configuration value that `detect_class_values` cross-checks rather than a value the code
+infers silently.
 """
 
 from __future__ import annotations
@@ -14,12 +17,41 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 from torch.utils.data import Dataset
 
-from symtrs.data.io import list_images, match_by_stem, read_image, read_label_map, coverage_report
+from symtrs.data.io import list_images, check_pairing, match_by_stem, read_image, read_label_map, coverage_report
 from symtrs.data.splits import SplitDirs, resolve_split_dirs
-from symtrs.data.transforms import apply_crop, flip_tensors, match_spatial, sample_crop_params
+from symtrs.data.transforms import (
+    apply_crop,
+    center_crop_params,
+    flip_tensors,
+    match_spatial,
+    sample_crop_params,
+)
 
-#: Default class count for the revised SyMTRS semantic labels.
-DEFAULT_NUM_CLASSES = 6
+#: Default class count and grey-level step for the revised SyMTRS semantic labels. The
+#: defaults live in `symtrs/config.py`; these mirror them for direct dataset use.
+DEFAULT_NUM_CLASSES = 5
+DEFAULT_LABEL_STEP = 63
+CLASS_NAMES = ("background", "building", "green", "road", "car")
+
+#: Grey levels a pixel may sit away from a multiple of the step and still be that class
+#: (resampling or PNG quantisation); beyond it the pixel is unlabelled, not rounded.
+LABEL_TOLERANCE = 2
+
+
+def decode_labels(raw: torch.Tensor, label_step: int, ignore_index: int = 255) -> torch.Tensor:
+    """Grey levels -> class indices: `round(v / label_step)`, off-grid -> `ignore_index`.
+
+    With `label_step == 1` the mask already holds class ids and is returned as read.
+    Rounding silently would turn a stray 100 into class 2; marking it ignored keeps it out
+    of the loss and the metrics, where the cost of being wrong is a missing pixel and not
+    a wrong label.
+    """
+    if label_step <= 1:
+        return raw
+    step = int(label_step)
+    classes = torch.div(raw + step // 2, step, rounding_mode="floor")
+    off_grid = (raw - classes * step).abs() > LABEL_TOLERANCE
+    return torch.where(off_grid, torch.full_like(classes, int(ignore_index)), classes)
 
 
 class SemanticDataset(Dataset):
@@ -36,6 +68,7 @@ class SemanticDataset(Dataset):
         split: str = "train",
         resolution: int = 2048,
         num_classes: int = DEFAULT_NUM_CLASSES,
+        label_step: int = DEFAULT_LABEL_STEP,
         ignore_index: int = 255,
         max_samples: int = 0,
         patch_size: int = 0,
@@ -49,6 +82,7 @@ class SemanticDataset(Dataset):
         self.resolution = resolution
         self.num_classes = int(num_classes)
         self.ignore_index = int(ignore_index)
+        self.label_step = int(label_step)
         self.patch_size = int(patch_size)
         self.augment = bool(augment)
         self.horizontal_flip = bool(horizontal_flip)
@@ -62,6 +96,7 @@ class SemanticDataset(Dataset):
         labels = list_images(semantic_dir)
         pairs = match_by_stem(images, labels)
 
+        check_pairing(pairs, images, labels, "image/semantic", split, resolution)
         if not pairs:
             raise RuntimeError(
                 f"no image/semantic pairs for split={split!r} resolution={resolution}.\n"
@@ -83,7 +118,7 @@ class SemanticDataset(Dataset):
             image_path, mask_path = self.pairs[index]
             try:
                 image = read_image(image_path, mode="rgb")
-                mask = read_label_map(mask_path)
+                mask = decode_labels(read_label_map(mask_path), self.label_step, self.ignore_index)
                 break
             except Exception as exc:
                 print(
@@ -101,7 +136,12 @@ class SemanticDataset(Dataset):
         image, mask = match_spatial([image, mask])
 
         height, width = image.shape[-2:]
-        box = sample_crop_params(height, width, self.patch_size, self.generator)
+        # Random crop only while augmenting. Anything else (validation, test) gets the
+        # centre crop, so a split is the same pixels on every pass.
+        if self.augment:
+            box = sample_crop_params(height, width, self.patch_size, self.generator)
+        else:
+            box = center_crop_params(height, width, self.patch_size)
         if self.augment:
             horizontal = self.horizontal_flip and torch.rand(1, generator=self.generator).item() < 0.5
             vertical = self.vertical_flip and torch.rand(1, generator=self.generator).item() < 0.5
@@ -121,10 +161,14 @@ def detect_class_values(
     split: str = "train",
     resolution: int = 2048,
     sample: int = 16,
+    label_step: int = 1,
+    ignore_index: int = 255,
 ) -> Counter:
     """Count label pixel values over a sample of the split.
 
-    Returns a `Counter` value -> pixel count. Used by `symtrs inspect` and to warn
+    Returns a `Counter` value -> pixel count. By default the grey levels are counted as
+    stored (`label_step=1`), so `symtrs inspect` shows what is really on disk; pass the
+    configured step to count decoded class indices instead. Used by `symtrs inspect` and to warn
     when the configured `num_classes` disagrees with the data.
     """
     dirs = resolve_split_dirs(root, split, resolution)
@@ -136,7 +180,9 @@ def detect_class_values(
     counter: Counter = Counter()
     for path in labels[::step][:sample]:
         try:
-            values, counts = torch.unique(read_label_map(path), return_counts=True)
+            values, counts = torch.unique(
+                decode_labels(read_label_map(path), label_step, ignore_index), return_counts=True
+            )
         except Exception as exc:
             print(f"[symtrs.data] could not inspect {path}: {type(exc).__name__}: {exc}")
             continue

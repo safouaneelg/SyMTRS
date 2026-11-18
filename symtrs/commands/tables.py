@@ -2,6 +2,7 @@
 
     symtrs tables runs/ --format markdown
     symtrs tables runs/ --metric depth --split test --csv results/depth.csv
+    symtrs tables runs/ --task shadow_removal --spread     # with the distribution columns
 
 Walks a runs directory for `summary.json` files and prints the test metrics of every
 run it finds. This is the step that turns a directory full of run folders into the
@@ -14,17 +15,37 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 #: Columns that identify a run rather than measure it.
 IDENTITY = ("task", "model", "resolution", "mode", "best_epoch")
 
+#: Suffixes `aggregate` adds beside each mean. They live in `summary.json` (a figure or a
+#: paired test wants them) but a results table reports means; `--spread` adds them back.
+#: A name that is in a `COLUMN_ORDER` (KID's own std, a metric in its own right) is not one.
+SPREAD_SUFFIXES = ("_std", "_median", "_p05", "_p95")
+
 #: Metric order per task, so two tables of the same task line up.
 COLUMN_ORDER = {
     "depth": ("rmse", "mae", "abs_rel", "sq_rel", "d1", "d2", "d3", "silog"),
     "segmentation": ("miou", "pixel_acc", "mean_acc", "mean_dice", "fwiou", "loss"),
-    "domain_adapt": ("fid", "kid", "kid_std"),
+    # The paired columns exist only on `shadow2noshadow` rows (see
+    # `symtrs.model.domain.runner.SHADOW_REMOVAL_DIRECTIONS`) and are the shadow_removal
+    # columns under the same names, so the two tasks line up in one table.
+    # KID first: it is the primary distribution metric (FID's covariance is rank-deficient at
+    # the split sizes used; see symtrs.metrics.domain).
+    "domain_adapt": ("kid", "kid_std", "fid", "fid_rank_deficient") + (
+        "psnr", "ssim_y", "mae_lab", "rmse_lab",
+        "psnr_shadow", "ssim_y_shadow", "mae_lab_shadow", "rmse_lab_shadow",
+        "psnr_nonshadow", "ssim_y_nonshadow", "mae_lab_nonshadow", "rmse_lab_nonshadow",
+    ),
+    "shadow_removal": (
+        "psnr", "ssim_y", "mae_lab", "rmse_lab",
+        "psnr_shadow", "ssim_y_shadow", "mae_lab_shadow", "rmse_lab_shadow",
+        "psnr_nonshadow", "ssim_y_nonshadow", "mae_lab_nonshadow", "rmse_lab_nonshadow",
+    ),
 }
 
 
@@ -35,7 +56,9 @@ def add_parser(subparsers) -> None:
     parser.add_argument("--model", default=None, help="only runs whose model key contains this")
     parser.add_argument("--resolution", type=int, default=None)
     parser.add_argument("--metric", default=None,
-                        help="restrict the columns to one metric group: depth, segmentation, domain_adapt")
+                        help="restrict the columns to one metric group: depth, segmentation, domain_adapt, shadow_removal")
+    parser.add_argument("--spread", action="store_true",
+                        help="also print std/median/p05/p95, which summary.json carries for every metric")
     parser.add_argument("--format", choices=["markdown", "csv", "json"], default="markdown")
     parser.add_argument("--out", default=None, help="write to a file instead of stdout")
     parser.add_argument("--sort-by", dest="sort_by", default="", help="column to sort on")
@@ -59,6 +82,9 @@ def collect(root: str) -> List[Dict[str, Any]]:
             "model": summary.get("model", ""),
             "resolution": summary.get("resolution", ""),
             "mode": summary.get("mode", ""),
+            # Domain adaptation has four directions per model and a run is meaningless
+            # without it; other tasks do not write one.
+            **({"direction": summary["direction"]} if "direction" in summary else {}),
             "best_epoch": summary.get("best_epoch", ""),
         }
         for key, value in (summary.get("test") or {}).items():
@@ -67,15 +93,34 @@ def collect(root: str) -> List[Dict[str, Any]]:
     return rows
 
 
-def _columns(rows: List[Dict[str, Any]], metric: Optional[str]) -> List[str]:
-    identity = [name for name in ("run", "task", "model", "resolution", "mode") if any(name in r for r in rows)]
+def is_spread(name: str) -> bool:
+    """True for the distribution columns `aggregate` writes beside a mean."""
+    return name.endswith(SPREAD_SUFFIXES) and not any(
+        name in names for names in COLUMN_ORDER.values()
+    )
+
+
+def _columns(rows: List[Dict[str, Any]], metric: Optional[str], spread: bool = False) -> List[str]:
+    identity = [
+        name for name in ("run", "task", "model", "direction", "resolution", "mode")
+        if any(name in r for r in rows)
+    ]
     if metric:
         measured = [name for name in COLUMN_ORDER.get(metric, ()) if any(name in r for r in rows)]
+        if spread:
+            # Each base metric followed by its own spread, so a column sits beside its mean.
+            # KID's std is a metric of its own, so a name can be produced twice; keep one.
+            expanded: List[str] = []
+            for base in measured:
+                for name in [base] + [base + suffix for suffix in SPREAD_SUFFIXES]:
+                    if name not in expanded and any(name in r for r in rows):
+                        expanded.append(name)
+            measured = expanded
     else:
         seen: List[str] = []
         for row in rows:
             for name in row:
-                if name not in identity and name not in seen:
+                if name not in identity and (spread or not is_spread(name)) and name not in seen:
                     seen.append(name)
         measured = sorted(seen, key=lambda n: (
             next((i for i, names in enumerate(COLUMN_ORDER.values()) if n in names), 99), n
@@ -84,6 +129,10 @@ def _columns(rows: List[Dict[str, Any]], metric: Optional[str]) -> List[str]:
 
 
 def _format(value: Any) -> str:
+    # `null` in summary.json (a metric that could not be computed: a NaN validation, a class
+    # absent from the split) is shown as n/a, never as 0 and never as the string "None".
+    if value is None or (isinstance(value, float) and not math.isfinite(value)):
+        return "n/a"
     if isinstance(value, float):
         return f"{value:.4f}" if abs(value) < 1e4 else f"{value:.3g}"
     return str(value)
@@ -91,7 +140,9 @@ def _format(value: Any) -> str:
 
 def render(rows: List[Dict[str, Any]], columns: List[str], style: str) -> str:
     if style == "json":
-        return json.dumps(rows, indent=2, default=str)
+        from symtrs.common.jsonio import dumps
+
+        return dumps(rows, indent=2)
 
     if style == "csv":
         lines = [",".join(columns)]
@@ -124,9 +175,15 @@ def _run(args: argparse.Namespace) -> int:
         return 1
 
     if args.sort_by:
-        rows.sort(key=lambda r: (r.get(args.sort_by) is None, r.get(args.sort_by)))
+        def _sort_key(row):
+            value = row.get(args.sort_by)
+            missing = value is None or (isinstance(value, float) and not math.isfinite(value))
+            # Missing values sort last, and are never compared with a number.
+            return (1, 0.0, "") if missing else (0, value if isinstance(value, (int, float)) else 0.0, str(value))
 
-    columns = _columns(rows, args.metric)
+        rows.sort(key=_sort_key)
+
+    columns = _columns(rows, args.metric, args.spread)
     text = render(rows, columns, args.format)
 
     if args.out:

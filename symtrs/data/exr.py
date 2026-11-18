@@ -215,7 +215,9 @@ def _read_exr_imageio(path: Path, channel: int) -> np.ndarray:
 # ------------------------------------------------------------------- conversion
 
 
-def depth_to_tensor(array: np.ndarray, scale: float = 1.0) -> Tuple[np.ndarray, np.ndarray]:
+def depth_to_tensor(
+    array: np.ndarray, scale: float = 1.0, max_depth: Optional[float] = None
+) -> Tuple[np.ndarray, np.ndarray]:
     """Convert a raw depth array to (metres, valid mask), both float32.
 
     A pixel is valid when it is finite and strictly positive. Zero is the usual
@@ -224,11 +226,20 @@ def depth_to_tensor(array: np.ndarray, scale: float = 1.0) -> Tuple[np.ndarray, 
     origin.
 
     `scale` converts file units to metres: 1.0 if the EXR already holds metres, 0.01
-    if it holds centimetres.
+    if it holds centimetres (the real dataset).
+
+    `max_depth` is in metres, after scaling. The real renders mark sky with huge finite
+    values rather than zero, so "finite and positive" alone would count the sky as
+    geometry kilometres away; anything beyond `max_depth` is invalid instead. The cut is
+    applied to the scaled value so the same number means the same thing whatever the file
+    unit is.
     """
     array = np.asarray(array, dtype=np.float32)
     valid = np.isfinite(array) & (array > 0.0)
-    metres = np.where(valid, array * float(scale), 0.0).astype(np.float32)
+    scaled = array * np.float32(scale)
+    if max_depth is not None:
+        valid &= scaled <= float(max_depth)
+    metres = np.where(valid, scaled, 0.0).astype(np.float32)
     return metres, valid
 
 
@@ -266,8 +277,10 @@ def guess_scale_from_summary(summary: dict) -> Optional[float]:
     """Suggest a unit conversion from the median depth.
 
     Purely advisory for `symtrs inspect`: a city-scale aerial median of ~50-500
-    reads as metres, ~5000-50000 reads as centimetres. It never changes a run by
-    itself.
+    reads as metres, ~5000-50000 reads as centimetres (what the real EXRs hold, so
+    0.01 is also the `data.depth_scale` default). Sky pixels (huge values) pull the
+    median up, which only strengthens the centimetre reading. It never changes a run
+    by itself.
     """
     median = summary.get("p50")
     if median is None or not np.isfinite(median) or median <= 0:
